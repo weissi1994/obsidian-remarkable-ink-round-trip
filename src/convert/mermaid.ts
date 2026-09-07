@@ -14,6 +14,7 @@
  */
 
 import { loadMermaid } from "obsidian";
+import { selfCloseVoidTags } from "./svgxml";
 
 /** One rendered diagram, in fence-occurrence order. Dimensions in PDF points. */
 export interface DiagramImage {
@@ -81,7 +82,13 @@ export async function renderMermaidDiagrams(
 	for (let i = 0; i < sources.length; i++) {
 		try {
 			out.push(await renderOne(mermaid, sources[i], i));
-		} catch {
+		} catch (error) {
+			// Falling back to a code block is right, but silence here cost a
+			// release: the failure showed up nowhere but the mapping table.
+			console.error(
+				`reMarkable Round-Trip: mermaid diagram ${i + 1} did not render, sending it as a code block`,
+				error,
+			);
 			out.push(null);
 		}
 	}
@@ -137,7 +144,7 @@ async function rasterise(
 	widthPx: number,
 	heightPx: number,
 ): Promise<Uint8Array> {
-	const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+	const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(selfCloseVoidTags(svg))}`;
 	const image = await loadImage(url);
 
 	// createEl attaches to the right document in popped-out windows — the
