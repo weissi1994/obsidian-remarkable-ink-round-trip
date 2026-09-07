@@ -44,6 +44,13 @@ export interface RoundTripSettings {
 	 * user wrote, which is opt-in territory.
 	 */
 	linkSourceToAnnotations: boolean;
+	/**
+	 * Send standalone vault images as pictures instead of placeholder text
+	 * (fork: image blocks). Off by default: turning it on changes the
+	 * typeset output, so already-sent notes need one fresh send before their
+	 * annotations anchor against the new layout.
+	 */
+	embedImages: boolean;
 	/** Import handwritten annotations as PNG images (F12). */
 	importHandwriting: boolean;
 	/** Vault folder for the rendered handwriting images. */
@@ -85,6 +92,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	importHandwriting: true,
 	markStyles: { ...DEFAULT_MARK_STYLES },
 	handwritingFolder: "reMarkable-in/handwriting",
+	embedImages: false,
 	mirrorFolders: true,
 	deviceBaseFolder: "Obsidian",
 	deviceModel: "rm2",

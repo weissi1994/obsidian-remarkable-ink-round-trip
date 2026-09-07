@@ -65,6 +65,16 @@ export interface MappingEntry {
 		 * the layout rebuilds unchanged.
 		 */
 		images?: ({ w: number; h: number } | null)[];
+		/**
+		 * Placed vault-image dimensions in PDF points, one entry per
+		 * standalone image in occurrence order (fork: image blocks). A
+		 * separate list from `images` on purpose: each substitution pass
+		 * indexes by occurrence of its own placeholder kind, so a note holding
+		 * both a diagram and a picture cannot mis-pair the two. A `null` entry
+		 * is an image that could not be loaded and went as placeholder text.
+		 * Absent = no standalone images, or sent before the feature existed.
+		 */
+		vaultImages?: ({ w: number; h: number } | null)[];
 	};
 }
 

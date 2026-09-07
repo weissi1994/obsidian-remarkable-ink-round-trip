@@ -372,6 +372,16 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 		heading: "Content",
 		items: [
 			{
+				key: "embedImages",
+				name: "Send images as pictures",
+				desc:
+					"Off (default): an image on its own line travels as the text " +
+					"'[image: name]'. On: it is drawn into the page. Notes sent before " +
+					"you switch this on need one fresh send before their annotations " +
+					"line up again.",
+				control: { type: "toggle" },
+			},
+			{
 				key: "frontmatterAsTitleBlock",
 				name: "Frontmatter as title block",
 				desc:

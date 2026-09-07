@@ -13,7 +13,12 @@
  */
 
 import { PDFDocument, PDFFont, PDFImage, PDFPage, StandardFonts, rgb } from "pdf-lib";
-import { dropLeadingTitleHeading, type Block, type ListItem } from "./mdblocks";
+import {
+	dropLeadingTitleHeading,
+	imagePlaceholderText,
+	type Block,
+	type ListItem,
+} from "./mdblocks";
 
 /**
  * Typography behaviour version (GP_E5_S4–S7). Recorded per upload alongside
@@ -824,6 +829,12 @@ function drawBlock(ts: Typesetter, block: Block): void {
 			break;
 		case "image":
 			drawImageBlock(ts, block);
+			break;
+		case "imageref":
+			// Substitution normally replaces these before typesetting; a
+			// leftover means nobody loaded the picture, so draw what the
+			// plugin has always drawn for an image it could not inline.
+			drawParagraph(ts, imagePlaceholderText(block), "italic");
 			break;
 		case "pagebreak":
 			// Handled by the render loop; never drawn.

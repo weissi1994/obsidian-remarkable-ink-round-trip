@@ -26,6 +26,13 @@ export interface PreprocessOptions {
 	frontmatterAsTitleBlock?: boolean;
 	/** Frontmatter keys never shown in the title block. */
 	hiddenFrontmatterKeys?: string[];
+	/**
+	 * Keep an image that is the whole line as-is, so parseBlocks can turn it
+	 * into a picture block (fork: image blocks). Off by default: flattening
+	 * to `*[image: name]*` is what every note sent so far was typeset with,
+	 * and changing that changes the content hash.
+	 */
+	imagesAsBlocks?: boolean;
 	/** Maximum embed nesting depth (cycle safety net). */
 	maxEmbedDepth?: number;
 }
@@ -41,7 +48,10 @@ export interface PreprocessResult {
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const COMMENT_RE = /%%[\s\S]*?%%/g;
 const EMBED_RE = /!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
-const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
+// The lookbehind matters once standalone images survive the embed pass
+// (fork: image blocks): without it this would strip the [[...]] back out of a
+// preserved "![[picture.png]]" and the block would never be recognised.
+const WIKILINK_RE = /(?<!!)\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
 const MD_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 const CALLOUT_HEAD_RE = /^>\s*\[!([a-zA-Z-]+)\][+-]?\s*(.*)$/;
 
@@ -110,6 +120,19 @@ function isImageTarget(target: string): boolean {
 	return IMAGE_EXTENSIONS.has(ext);
 }
 
+/**
+ * True when the match at `offset` is the entire line, ignoring surrounding
+ * whitespace. Only such an image can become a block: one inside a sentence
+ * would have to break the paragraph around it.
+ */
+function isWholeLine(source: string, offset: number, length: number): boolean {
+	const lineStart = source.lastIndexOf("\n", offset - 1) + 1;
+	const lineEnd = source.indexOf("\n", offset + length);
+	const before = source.slice(lineStart, offset);
+	const after = source.slice(offset + length, lineEnd === -1 ? source.length : lineEnd);
+	return before.trim() === "" && after.trim() === "";
+}
+
 /** Flatten a callout block to a blockquote with a bold title line. */
 function flattenCallouts(markdown: string): string {
 	const lines = markdown.split("\n");
@@ -130,14 +153,23 @@ function flattenCallouts(markdown: string): string {
 
 function resolveEmbeds(
 	markdown: string,
-	options: Required<Pick<PreprocessOptions, "resolveEmbed" | "maxEmbedDepth">>,
+	options: Required<Pick<PreprocessOptions, "resolveEmbed" | "maxEmbedDepth">> & {
+		imagesAsBlocks?: boolean;
+	},
 	depth: number,
 	seen: Set<string>,
 	missing: string[],
 ): string {
-	return markdown.replace(EMBED_RE, (_all, rawTarget: string, alias?: string) => {
+	return markdown.replace(
+		EMBED_RE,
+		(_all: string, rawTarget: string, alias: string | undefined, offset: number) => {
 		const target = rawTarget.trim();
 		if (isImageTarget(target)) {
+			// A picture on its own line survives untouched, for parseBlocks to
+			// pick up as a block (fork: image blocks).
+			if (options.imagesAsBlocks === true && isWholeLine(markdown, offset, _all.length)) {
+				return _all;
+			}
 			const name = displayTextForLink(target, alias);
 			return `*[image: ${name}]*`;
 		}
@@ -150,6 +182,9 @@ function resolveEmbeds(
 			return `*[missing embed: ${displayTextForLink(target, alias)}]*`;
 		}
 		if (resolved.kind === "image") {
+			if (options.imagesAsBlocks === true && isWholeLine(markdown, offset, _all.length)) {
+				return _all;
+			}
 			return `*[image: ${resolved.name}]*`;
 		}
 		const nested = new Set(seen);
@@ -163,7 +198,8 @@ function resolveEmbeds(
 			missing,
 		);
 		return `\n${inner.trim()}\n`;
-	});
+		},
+	);
 }
 
 function renderTitleBlock(
@@ -205,9 +241,19 @@ export function preprocess(
 	const missingEmbeds: string[] = [];
 
 	let text = body.replace(COMMENT_RE, "");
-	text = resolveEmbeds(text, { resolveEmbed, maxEmbedDepth }, 0, new Set(), missingEmbeds);
+	text = resolveEmbeds(
+		text,
+		{ resolveEmbed, maxEmbedDepth, imagesAsBlocks: options.imagesAsBlocks },
+		0,
+		new Set(),
+		missingEmbeds,
+	);
 	// Markdown images (external or resolved paths) → placeholder, keep alt text.
-	text = text.replace(MD_IMAGE_RE, (_all, alt: string) => {
+	// One that is the whole line is left for parseBlocks when pictures are on.
+	text = text.replace(MD_IMAGE_RE, (_all: string, alt: string, _src: string, offset: number) => {
+		if (options.imagesAsBlocks === true && isWholeLine(text, offset, _all.length)) {
+			return _all;
+		}
 		return `*[image${alt ? `: ${alt}` : ""}]*`;
 	});
 	text = text.replace(WIKILINK_RE, (_all, target: string, alias?: string) =>

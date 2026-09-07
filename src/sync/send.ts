@@ -6,7 +6,12 @@
 
 import { preprocess, parseFrontmatter, EmbedResolver } from "../preprocess/preprocess";
 import { canonicalText } from "../convert/textdoc";
-import { parseBlocks, substituteDiagrams } from "../convert/mdblocks";
+import {
+	imageRefTargets,
+	parseBlocks,
+	substituteDiagrams,
+	substituteVaultImages,
+} from "../convert/mdblocks";
 import { renderPdf, resolveLayoutOptions, PdfLayoutOptions } from "../convert/pdf";
 import type { DiagramImage } from "../convert/mermaid";
 import { renderEpub } from "../convert/epub";
@@ -77,6 +82,15 @@ export interface SendDeps {
 	 * fence as code. Any thrown error degrades the whole send the same way.
 	 */
 	renderDiagrams?: (markdown: string) => Promise<(DiagramImage | null)[]>;
+	/**
+	 * Load standalone vault images (fork: image blocks). Same seam and same
+	 * failure rule as renderDiagrams: DOM-bound, so the edge injects it, and
+	 * a null slot falls back to the placeholder text the plugin has always
+	 * produced. Targets arrive in occurrence order.
+	 */
+	resolveImages?: (targets: string[], notePath: string) => Promise<(DiagramImage | null)[]>;
+	/** Turn standalone images into pictures rather than placeholder text. */
+	imagesAsBlocks?: boolean;
 	frontmatterAsTitleBlock?: boolean;
 	/**
 	 * Skip the upload when the preprocessed content matches the recorded
@@ -126,9 +140,11 @@ export async function sendNote(
 				: preprocess(note.content, {
 						resolveEmbed: (linkpath) => deps.resolveEmbed(linkpath, note.path),
 						frontmatterAsTitleBlock: deps.frontmatterAsTitleBlock,
+						imagesAsBlocks: deps.imagesAsBlocks,
 					});
 		const markdown = typeof body === "string" ? body : body.markdown;
 		let diagrams: (DiagramImage | null)[] = [];
+		let pictures: (DiagramImage | null)[] = [];
 		const missingEmbeds = typeof body === "string" ? [] : body.missingEmbeds;
 		const hash = contentHash(markdown);
 		if (deps.skipUnchanged && table[docId]?.contentHash === hash) {
@@ -171,6 +187,27 @@ export async function sendNote(
 					diagrams = [];
 				}
 				if (diagrams.length > 0) blocks = substituteDiagrams(blocks, diagrams);
+			}
+			// Vault pictures, same rules as diagrams: PDF only (EPUB reflows
+			// and records no geometry to anchor against), failures fall back
+			// to placeholder text, and the hash above is taken before this so
+			// "unchanged, skip" never depends on how a picture loaded.
+			if (format === "pdf" && deps.resolveImages !== undefined) {
+				const targets = imageRefTargets(blocks);
+				if (targets.length > 0) {
+					try {
+						pictures = await deps.resolveImages(targets, note.path);
+					} catch (error) {
+						console.error(
+							"reMarkable Round-Trip: loading vault images failed, sending them as placeholder text",
+							error,
+						);
+						pictures = [];
+					}
+				}
+				// Runs even with nothing loaded: leftover placeholders must
+				// become their text form rather than reach the typesetter.
+				if (targets.length > 0) blocks = substituteVaultImages(blocks, pictures);
 			}
 			const bytes =
 				format === "epub"
@@ -219,6 +256,13 @@ export async function sendNote(
 								? {
 										images: diagrams.map((d) =>
 											d === null ? null : { w: d.w, h: d.h },
+										),
+									}
+								: {}),
+							...(pictures.length > 0
+								? {
+										vaultImages: pictures.map((p) =>
+											p === null ? null : { w: p.w, h: p.h },
 										),
 									}
 								: {}),

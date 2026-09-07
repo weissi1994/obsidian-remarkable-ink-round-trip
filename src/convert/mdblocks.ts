@@ -16,6 +16,15 @@ export type Block =
 	| { type: "table"; rows: string[][] }
 	| { type: "hr" }
 	| { type: "image"; w: number; h: number; png?: Uint8Array }
+	/**
+	 * A vault image on its own line, before the edge has loaded it (fork:
+	 * image blocks). Kept as a placeholder for the same reason a mermaid
+	 * fence is: reading bytes and measuring pixels needs the DOM, so the
+	 * pure pipeline records *where* a picture goes and substitution fills it
+	 * in — at send time from the vault, at import time from the recorded
+	 * geometry.
+	 */
+	| { type: "imageref"; target: string; alt: string }
 	| { type: "pagebreak" };
 
 export interface ListItem {
@@ -32,6 +41,25 @@ const HR_RE = /^(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const PAGEBREAK_RE = /^\\pagebreak$/;
 const FENCE_RE = /^(?:```|~~~)/;
 const TABLE_DIVIDER_RE = /^\s*\|?[\s:|-]+\|[\s:|-]*$/;
+/**
+ * An image that is the whole line becomes a block; one sitting mid-sentence
+ * stays inline text, because a paragraph cannot be broken around a picture
+ * without reflowing the sentence (fork: image blocks).
+ */
+const STANDALONE_WIKI_IMAGE_RE = /^!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]$/;
+const STANDALONE_MD_IMAGE_RE = /^!\[([^\]]*)\]\(([^)]+)\)$/;
+
+/** A standalone image line → its target and alt text, else null. */
+function standaloneImage(line: string): { target: string; alt: string } | null {
+	const wiki = line.match(STANDALONE_WIKI_IMAGE_RE);
+	if (wiki !== null) {
+		const target = wiki[1].trim();
+		return { target, alt: (wiki[2] ?? "").trim() };
+	}
+	const md = line.match(STANDALONE_MD_IMAGE_RE);
+	if (md !== null) return { target: md[2].trim(), alt: md[1].trim() };
+	return null;
+}
 
 /**
  * A paragraph that is one single bold or italic span — "**Doel**" on its own
@@ -121,6 +149,13 @@ export function parseBlocks(markdown: string): Block[] {
 			blocks.push(
 				lang === "" ? { type: "code", lines: code } : { type: "code", lines: code, lang },
 			);
+			continue;
+		}
+
+		const picture = standaloneImage(line.trim());
+		if (picture !== null) {
+			flushAll();
+			blocks.push({ type: "imageref", target: picture.target, alt: picture.alt });
 			continue;
 		}
 
@@ -245,4 +280,46 @@ export function substituteDiagrams(
 			? { type: "image", w: image.w, h: image.h, png: image.png }
 			: { type: "image", w: image.w, h: image.h };
 	});
+}
+
+/** What an unresolved picture reads as — the pre-fork placeholder text. */
+export function imagePlaceholderText(block: Block & { type: "imageref" }): string {
+	const name = block.alt !== "" ? block.alt : block.target.split("/").pop() ?? block.target;
+	return `[image: ${name}]`;
+}
+
+/**
+ * Fill `imageref` placeholders with loaded vault images, pairing by
+ * occurrence order (fork: image blocks) — the mermaid counterpart of
+ * substituteDiagrams, deliberately kept as its own pass over its own kind of
+ * placeholder. Two independent arrays cannot mis-pair the way one shared
+ * list would when a note holds both a diagram and a picture.
+ *
+ * A picture that could not be loaded (missing file, a format the edge could
+ * not decode, an external URL) falls back to the italic placeholder line the
+ * plugin has always produced, so a broken image never renders as nothing.
+ */
+export function substituteVaultImages(
+	blocks: Block[],
+	images: ({ w: number; h: number; png?: Uint8Array } | null)[],
+): Block[] {
+	let next = 0;
+	return blocks.map((block) => {
+		if (block.type !== "imageref") return block;
+		const image = images[next];
+		next++;
+		if (image == null || !(image.w > 0) || !(image.h > 0)) {
+			return { type: "paragraph", text: imagePlaceholderText(block), style: "italic" };
+		}
+		return image.png !== undefined
+			? { type: "image", w: image.w, h: image.h, png: image.png }
+			: { type: "image", w: image.w, h: image.h };
+	});
+}
+
+/** Targets of the `imageref` blocks, in the order substitution expects them. */
+export function imageRefTargets(blocks: Block[]): string[] {
+	return blocks
+		.filter((b): b is Block & { type: "imageref" } => b.type === "imageref")
+		.map((b) => b.target);
 }

@@ -41,9 +41,15 @@ import {
 } from "./incoming/pull";
 import { renderImportReport } from "./incoming/report";
 import { paintPlan, planRender } from "./incoming/strokerender";
-import { parseBlocks, substituteDiagrams } from "./convert/mdblocks";
+import {
+	imageRefTargets,
+	parseBlocks,
+	substituteDiagrams,
+	substituteVaultImages,
+} from "./convert/mdblocks";
 import { PdfLayout, renderPdf } from "./convert/pdf";
 import { renderMermaidDiagrams } from "./convert/mermaid";
+import type { DiagramImage } from "./convert/mermaid";
 import { MappingEntry, contentHash } from "./id/mapping";
 import { preprocess } from "./preprocess/preprocess";
 import {
@@ -652,6 +658,11 @@ export default class RoundTripPlugin extends Plugin {
 					// injected like every other Obsidian capability (fork:
 					// image blocks).
 					renderDiagrams: (markdown) => renderMermaidDiagrams(markdown),
+					// Vault pictures, same edge, same rules (fork: image blocks).
+					resolveImages: this.settings.embedImages
+						? (targets, notePath) => this.resolveVaultImages(targets, notePath)
+						: undefined,
+					imagesAsBlocks: this.settings.embedImages,
 					frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
 					skipUnchanged: options.auto === true,
 				},
@@ -1107,6 +1118,7 @@ export default class RoundTripPlugin extends Plugin {
 		const pre = preprocess(await this.app.vault.cachedRead(file), {
 			resolveEmbed: (linkpath) => embeds.get(linkpath) ?? { kind: "missing" },
 			frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
+			imagesAsBlocks: this.settings.embedImages,
 		});
 		if (contentHash(pre.markdown) !== entry.contentHash) return "changed";
 		return moved ? "moved" : "match";
@@ -1135,6 +1147,7 @@ export default class RoundTripPlugin extends Plugin {
 		const pre = preprocess(await this.app.vault.cachedRead(file), {
 			resolveEmbed: (linkpath) => embeds.get(linkpath) ?? { kind: "missing" },
 			frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
+			imagesAsBlocks: this.settings.embedImages,
 		});
 		// A changed note means the geometry no longer matches the document on
 		// the device; quoting from it would put the wrong sentence under the
@@ -1148,6 +1161,14 @@ export default class RoundTripPlugin extends Plugin {
 		let blocks = parseBlocks(pre.markdown);
 		if (typography.images !== undefined && typography.images.length > 0) {
 			blocks = substituteDiagrams(blocks, typography.images);
+		}
+		// Pictures replay from recorded geometry for the same reason diagrams
+		// do: re-reading them would work, but a picture that changed on disk
+		// would shift every anchor below it. An entry with no recorded
+		// geometry still needs the pass, so leftover placeholders take their
+		// text shape exactly as they did at send time.
+		if (imageRefTargets(blocks).length > 0) {
+			blocks = substituteVaultImages(blocks, typography.vaultImages ?? []);
 		}
 		const { layout } = await renderPdf(
 			blocks,
@@ -1200,6 +1221,87 @@ export default class RoundTripPlugin extends Plugin {
 			await this.app.vault.createBinary(path, buffer);
 		}
 		return path;
+	}
+
+	/**
+	 * Load standalone vault images as PNG pictures (fork: image blocks).
+	 *
+	 * Everything goes through a canvas rather than being embedded as-is: it
+	 * gives one format pdf-lib always accepts (it takes only PNG and JPEG,
+	 * while a vault holds webp, gif, avif and svg too) and it yields the
+	 * natural pixel size in the same step. A picture that cannot be read or
+	 * decoded comes back null, and substitution turns it back into the
+	 * placeholder text — never a failed send.
+	 */
+	private async resolveVaultImages(
+		targets: string[],
+		notePath: string,
+	): Promise<(DiagramImage | null)[]> {
+		const out: (DiagramImage | null)[] = [];
+		for (const target of targets) {
+			try {
+				out.push(await this.loadVaultImage(target, notePath));
+			} catch (error) {
+				console.error(
+					`reMarkable Round-Trip: image "${target}" could not be loaded, sending it as placeholder text`,
+					error,
+				);
+				out.push(null);
+			}
+		}
+		return out;
+	}
+
+	private async loadVaultImage(
+		target: string,
+		notePath: string,
+	): Promise<DiagramImage | null> {
+		// Obsidian resolves a link the way the editor would, so "pic.png",
+		// "assets/pic.png" and a full vault path all land on the same file.
+		const file =
+			this.app.metadataCache.getFirstLinkpathDest(target.split("#")[0], notePath) ??
+			this.app.vault.getFileByPath(target);
+		if (file === null) return null;
+
+		const bytes = await this.app.vault.readBinary(file);
+		const blob = new Blob([bytes]);
+		const url = URL.createObjectURL(blob);
+		try {
+			const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+				const el = new Image();
+				el.onload = () => resolve(el);
+				el.onerror = () => reject(new Error(`could not decode ${file.path}`));
+				el.src = url;
+			});
+			const widthPx = image.naturalWidth;
+			const heightPx = image.naturalHeight;
+			if (!(widthPx > 0) || !(heightPx > 0)) return null;
+
+			const canvas = createEl("canvas");
+			canvas.width = widthPx;
+			canvas.height = heightPx;
+			const context = canvas.getContext("2d");
+			if (context === null) throw new Error("no 2D canvas available for rendering");
+			// The device page is white; an explicit fill keeps a transparent
+			// PNG from picking up whatever is behind it.
+			context.fillStyle = "#ffffff";
+			context.fillRect(0, 0, widthPx, heightPx);
+			context.drawImage(image, 0, 0);
+
+			const png = await new Promise<Blob>((resolve, reject) =>
+				canvas.toBlob(
+					(b) => (b !== null ? resolve(b) : reject(new Error("canvas.toBlob produced nothing"))),
+					"image/png",
+				),
+			);
+			return {
+				w: widthPx * (72 / 96),
+				h: heightPx * (72 / 96),
+				png: new Uint8Array(await png.arrayBuffer()),
+			};
+		} finally {
+			URL.revokeObjectURL(url);
+		}
 	}
 
 	/** Write one note's annotations to its configured destination (F11). */
