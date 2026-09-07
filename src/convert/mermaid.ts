@@ -13,6 +13,8 @@
  * on import — the same principle as the typo version (GP_E3_S15).
  */
 
+import { loadMermaid } from "obsidian";
+
 /** One rendered diagram, in fence-occurrence order. Dimensions in PDF points. */
 export interface DiagramImage {
 	/** Natural width/height in PDF points (px * 72/96). */
@@ -22,11 +24,15 @@ export interface DiagramImage {
 	png?: Uint8Array;
 }
 
-/** Minimal surface of Obsidian's bundled mermaid (loadMermaid global). */
+/**
+ * Minimal surface of Obsidian's bundled mermaid. `loadMermaid` is a module
+ * export of "obsidian", not a global: declaring it ambiently type-checked
+ * fine but bundled to a bare identifier, so every render threw a
+ * ReferenceError that send.ts swallowed into "no diagrams".
+ */
 interface MermaidApi {
 	render(id: string, text: string): Promise<{ svg: string }>;
 }
-declare function loadMermaid(): Promise<MermaidApi>;
 
 /** CSS px (96 dpi) → PDF points (72 dpi). */
 const PX_TO_PT = 72 / 96;
@@ -69,7 +75,7 @@ export async function renderMermaidDiagrams(
 ): Promise<(DiagramImage | null)[]> {
 	const sources = extractMermaidSources(markdown);
 	if (sources.length === 0) return [];
-	const mermaid = await loadMermaid();
+	const mermaid = (await loadMermaid()) as MermaidApi;
 
 	const out: (DiagramImage | null)[] = [];
 	for (let i = 0; i < sources.length; i++) {

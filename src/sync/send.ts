@@ -164,7 +164,10 @@ export async function sendNote(
 			if (format === "pdf" && deps.renderDiagrams !== undefined) {
 				try {
 					diagrams = await deps.renderDiagrams(markdown);
-				} catch {
+				} catch (error) {
+					// Degrading to code blocks is correct, but doing it silently hid a
+					// ReferenceError for a whole release — say so before falling back.
+					console.error("reMarkable Round-Trip: diagram rendering failed", error);
 					diagrams = [];
 				}
 				if (diagrams.length > 0) blocks = substituteDiagrams(blocks, diagrams);
