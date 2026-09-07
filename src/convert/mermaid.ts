@@ -165,6 +165,38 @@ async function rasterise(
 	return new Uint8Array(await blob.arrayBuffer());
 }
 
+/**
+ * Decode a serialised SVG through <img>. The SVG travels as a data URL:
+ * mermaid inlines its styles, so nothing external needs fetching (an SVG
+ * loaded through <img> could not fetch it anyway).
+ *
+ * On failure the SVG is re-parsed purely to explain why — an <img> gives no
+ * reason of its own, and "it did not decode" is not something anyone can act
+ * on. The parser error names the construct and the column.
+ */
+async function loadSvgImage(svg: string): Promise<HTMLImageElement> {
+	const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+	try {
+		return await loadImage(url);
+	} catch (error) {
+		throw new Error(`${(error as Error).message} — ${explainSvg(svg)}`);
+	}
+}
+
+/** Why an SVG would not decode, as far as the XML parser can tell. */
+function explainSvg(svg: string): string {
+	try {
+		const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+		const failure = doc.getElementsByTagName("parsererror")[0];
+		if (failure !== undefined) {
+			return `not valid XML: ${(failure.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 200)}`;
+		}
+		return `it parses as XML, so the decoder refused it for another reason (root ${describeSvgRoot(svg)})`;
+	} catch {
+		return "and it could not be parsed to say why";
+	}
+}
+
 function loadImage(url: string): Promise<HTMLImageElement> {
 	return new Promise((resolve, reject) => {
 		const image = new Image();
