@@ -108,27 +108,28 @@ async function renderOne(
 	// one render.
 	const themed = `%%{init: {"theme": "neutral"}}%%\n${source}`;
 	const { svg } = await mermaid.render(`remarkable-round-trip-mermaid-${index}`, themed);
+	const safe = selfCloseVoidTags(svg);
 
-	const { widthPx, heightPx } = svgSize(svg);
-	const png = await rasterise(svg, widthPx, heightPx);
-	return { w: widthPx * PX_TO_PT, h: heightPx * PX_TO_PT, png };
-}
+	// Decode BEFORE measuring. The <img> decoder is the only authority on
+	// whether this SVG is usable at all, and asking it first means a broken
+	// diagram reports a decode error naming the reason instead of the
+	// misleading "carries no usable size" the old parser-based reader gave
+	// for every malformed SVG.
+	const image = await loadSvgImage(safe);
 
-/** Intrinsic pixel size of a rendered mermaid SVG (viewBox, else width/height). */
-function svgSize(svg: string): { widthPx: number; heightPx: number } {
-	const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
-	const root = doc.documentElement;
-	const viewBox = root.getAttribute("viewBox");
-	if (viewBox !== null) {
-		const parts = viewBox.trim().split(/[\s,]+/).map(Number);
-		if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
-			return { widthPx: parts[2], heightPx: parts[3] };
-		}
+	// The markup's own size, else whatever the decoder made of it. A
+	// percentage-sized SVG with no viewBox still has a natural size here.
+	const declared = parseSvgSize(safe);
+	const widthPx = declared?.widthPx ?? image.naturalWidth;
+	const heightPx = declared?.heightPx ?? image.naturalHeight;
+	if (!(widthPx > 0) || !(heightPx > 0)) {
+		throw new Error(
+			`mermaid SVG carries no usable size (decoded ${image.naturalWidth}x${image.naturalHeight}, root ${describeSvgRoot(safe)})`,
+		);
 	}
-	const w = parseFloat(root.getAttribute("width") ?? "");
-	const h = parseFloat(root.getAttribute("height") ?? "");
-	if (w > 0 && h > 0) return { widthPx: w, heightPx: h };
-	throw new Error("mermaid SVG carries no usable size");
+
+	const png = await rasterise(image, widthPx, heightPx);
+	return { w: widthPx * PX_TO_PT, h: heightPx * PX_TO_PT, png };
 }
 
 /**
@@ -140,13 +141,10 @@ function svgSize(svg: string): { widthPx: number; heightPx: number } {
  * fill keeps dark-theme CSS variables from ever leaking through.
  */
 async function rasterise(
-	svg: string,
+	image: HTMLImageElement,
 	widthPx: number,
 	heightPx: number,
 ): Promise<Uint8Array> {
-	const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(selfCloseVoidTags(svg))}`;
-	const image = await loadImage(url);
-
 	// createEl attaches to the right document in popped-out windows — the
 	// same reason renderHandwriting uses it.
 	const canvas = createEl("canvas");
