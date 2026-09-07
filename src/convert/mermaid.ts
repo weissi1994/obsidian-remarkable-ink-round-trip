@@ -14,7 +14,7 @@
  */
 
 import { loadMermaid } from "obsidian";
-import { selfCloseVoidTags } from "./svgxml";
+import { describeSvgRoot, parseSvgSize, selfCloseVoidTags } from "./svgxml";
 
 /** One rendered diagram, in fence-occurrence order. Dimensions in PDF points. */
 export interface DiagramImage {
