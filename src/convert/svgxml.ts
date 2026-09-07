@@ -70,7 +70,10 @@ function absoluteLength(raw: string | undefined): number | null {
  * length is ignored rather than treated as a size.
  */
 export function parseSvgSize(svg: string): SvgSize | null {
-	const head = svg.slice(0, 2000);
+	// Only the root tag's own attributes count. Mermaid nests elements that
+	// carry their own viewBox (arrow markers), and a document-wide search
+	// picks one of those over the real size.
+	const head = svg.slice(0, 2000).match(/<svg\b[^>]*>/)?.[0] ?? "";
 
 	const viewBox = head.match(VIEWBOX_RE);
 	if (viewBox !== null) {
