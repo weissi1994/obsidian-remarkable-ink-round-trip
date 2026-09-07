@@ -6,8 +6,9 @@
 
 import { preprocess, parseFrontmatter, EmbedResolver } from "../preprocess/preprocess";
 import { canonicalText } from "../convert/textdoc";
-import { parseBlocks } from "../convert/mdblocks";
+import { parseBlocks, substituteDiagrams } from "../convert/mdblocks";
 import { renderPdf, resolveLayoutOptions, PdfLayoutOptions } from "../convert/pdf";
+import type { DiagramImage } from "../convert/mermaid";
 import { renderEpub } from "../convert/epub";
 import { ensureDocId } from "../id/docid";
 import { MappingTable, contentHash, recordUpload } from "../id/mapping";
@@ -68,6 +69,14 @@ export interface SendDeps {
 	 */
 	replacePrevious?: (previousDeviceDocId: string) => Promise<void>;
 	layout?: PdfLayoutOptions;
+	/**
+	 * Render mermaid fences to PNGs (fork: image blocks). Optional and
+	 * DOM-bound: the plugin edge wires in renderMermaidDiagrams; tests and
+	 * environments without it send fences as code blocks, exactly as
+	 * before. One null slot per failed diagram — substitution keeps that
+	 * fence as code. Any thrown error degrades the whole send the same way.
+	 */
+	renderDiagrams?: (markdown: string) => Promise<(DiagramImage | null)[]>;
 	frontmatterAsTitleBlock?: boolean;
 	/**
 	 * Skip the upload when the preprocessed content matches the recorded
@@ -119,6 +128,7 @@ export async function sendNote(
 						frontmatterAsTitleBlock: deps.frontmatterAsTitleBlock,
 					});
 		const markdown = typeof body === "string" ? body : body.markdown;
+		let diagrams: (DiagramImage | null)[] = [];
 		const missingEmbeds = typeof body === "string" ? [] : body.missingEmbeds;
 		const hash = contentHash(markdown);
 		if (deps.skipUnchanged && table[docId]?.contentHash === hash) {
@@ -146,7 +156,19 @@ export async function sendNote(
 			}
 			upload = await deps.client.uploadText(note.basename, markdown, { parentId });
 		} else {
-			const blocks = parseBlocks(markdown);
+			let blocks = parseBlocks(markdown);
+			// Diagrams render only for PDF (fork: image blocks): EPUB reflows
+			// and records no geometry to anchor against. The content hash is
+			// taken from the markdown above, before substitution, so
+			// "unchanged, skip" stays independent of how mermaid renders.
+			if (format === "pdf" && deps.renderDiagrams !== undefined) {
+				try {
+					diagrams = await deps.renderDiagrams(markdown);
+				} catch {
+					diagrams = [];
+				}
+				if (diagrams.length > 0) blocks = substituteDiagrams(blocks, diagrams);
+			}
 			const bytes =
 				format === "epub"
 					? await renderEpub(blocks, { title: note.basename, docId })
@@ -183,7 +205,22 @@ export async function sendNote(
 			textHash: format === "text" ? contentHash(canonicalText(markdown)) : undefined,
 			// EPUB reflows and a text notebook has no fixed page geometry, so
 			// only PDF records layout to anchor imported ink against (GP_E3_S8).
-			pdfLayout: format === "pdf" ? resolveLayoutOptions(deps.layout) : undefined,
+			pdfLayout:
+				format === "pdf"
+					? {
+							...resolveLayoutOptions(deps.layout),
+							// Recorded per upload so the import replays the
+							// same geometry without re-rendering mermaid
+							// (fork: image blocks; see mapping.ts).
+							...(diagrams.length > 0
+								? {
+										images: diagrams.map((d) =>
+											d === null ? null : { w: d.w, h: d.h },
+										),
+									}
+								: {}),
+						}
+					: undefined,
 		});
 		return {
 			result: {

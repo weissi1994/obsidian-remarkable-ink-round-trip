@@ -54,6 +54,17 @@ export interface MappingEntry {
 		breakAtHeading?: number;
 		/** Whether #/## sections were packed (GP_E6_S9); absent = false. */
 		packSections?: boolean;
+		/**
+		 * Placed diagram dimensions in PDF points, one entry per mermaid
+		 * fence in occurrence order (fork: image blocks). Mermaid output is
+		 * not stable across versions, so the import replays the *recorded*
+		 * geometry instead of re-rendering — the same principle that keeps
+		 * `typo` here (GP_E3_S15). A `null` entry is a fence that failed to
+		 * render and went to the device as a code block. Absent = sent
+		 * before the fork (or without diagrams): fences replay as code and
+		 * the layout rebuilds unchanged.
+		 */
+		images?: ({ w: number; h: number } | null)[];
 	};
 }
 

@@ -12,7 +12,7 @@
  * a Unicode font is a known follow-up.
  */
 
-import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, PDFFont, PDFImage, PDFPage, StandardFonts, rgb } from "pdf-lib";
 import { dropLeadingTitleHeading, type Block, type ListItem } from "./mdblocks";
 
 /**
@@ -26,10 +26,13 @@ import { dropLeadingTitleHeading, type Block, type ListItem } from "./mdblocks";
  * (float tolerance, label rows); version 4 = 0.31.0 (keep tables together,
  * keep headings with their content); version 5 = 0.32.1 (fill-in rows at
  * 2.0 line steps instead of 2.4); version 6 = 0.32.2 (a leading H1 that
- * repeats the document title is dropped); version 7 = current (a paragraph
- * that is one whole bold or italic span renders in that font).
+ * repeats the document title is dropped); version 7 = 0.33.0 (a paragraph
+ * that is one whole bold or italic span renders in that font); version 8 =
+ * current (fork: a mermaid fence whose dimensions were recorded per upload
+ * renders as an image block instead of code — replay is gated on the
+ * recorded `images` list, so pre-fork documents rebuild unchanged).
  */
-export const TYPO_VERSION = 7;
+export const TYPO_VERSION = 8;
 
 export interface PdfLayoutOptions {
 	/** Base body font size in points. */
@@ -236,6 +239,13 @@ interface Typesetter {
 	ordered?: number;
 	/** Running word counter, so a mark can name the exact words it covers. */
 	wordId: number;
+	/**
+	 * PNG handles pre-embedded in renderPdf, keyed by their image block
+	 * (fork: image blocks). Embedding is async and drawBlock is not, so it
+	 * happens once up front; a block without a handle (import-time layout
+	 * replay carries geometry only) reserves its space and draws nothing.
+	 */
+	embedded: Map<Block, PDFImage>;
 }
 
 function newPage(ts: Typesetter): void {
@@ -756,6 +766,38 @@ function drawHr(ts: Typesetter): void {
 	ts.y -= 6;
 }
 
+/**
+ * Draw an image block: a rendered mermaid diagram (fork: image blocks).
+ *
+ * Geometry is pure arithmetic over (w, h, opts) — no pixel data involved —
+ * so the import-time layout replay reproduces identical page positions from
+ * the recorded dimensions alone. Keep-together like tables: a diagram that
+ * fits a page never breaks across two; the scale cap means one always fits.
+ * No lines are emitted into the layout map — like an hr, the region carries
+ * no words, so pen strokes over it come back through the remark path,
+ * anchored to the nearest text line.
+ */
+function drawImageBlock(ts: Typesetter, block: Block & { type: "image" }): void {
+	const gap = ts.opts.fontSize * 0.6;
+	const contentW = ts.opts.pageWidth - 2 * ts.opts.margin;
+	const maxH = ts.opts.pageHeight - 2 * ts.opts.margin - 2 * gap;
+	const scale = Math.min(1, contentW / block.w, maxH / block.h);
+	const width = block.w * scale;
+	const height = block.h * scale;
+	ensureRoom(ts, height + 2 * gap);
+	ts.y -= gap;
+	const handle = ts.embedded.get(block);
+	if (handle !== undefined) {
+		ts.page.drawImage(handle, {
+			x: ts.opts.margin + (contentW - width) / 2,
+			y: ts.y - height,
+			width,
+			height,
+		});
+	}
+	ts.y -= height + gap;
+}
+
 /** Draw one block through the shared per-type routines. */
 function drawBlock(ts: Typesetter, block: Block): void {
 	switch (block.type) {
@@ -779,6 +821,9 @@ function drawBlock(ts: Typesetter, block: Block): void {
 			break;
 		case "hr":
 			drawHr(ts);
+			break;
+		case "image":
+			drawImageBlock(ts, block);
 			break;
 		case "pagebreak":
 			// Handled by the render loop; never drawn.
@@ -811,6 +856,7 @@ const MEASURE_SINK = {
 	drawText: () => undefined,
 	drawLine: () => undefined,
 	drawRectangle: () => undefined,
+	drawImage: () => undefined,
 } as unknown as PDFPage;
 
 /**
@@ -893,7 +939,16 @@ export async function renderPdf(
 		italic: await doc.embedFont(StandardFonts.HelveticaOblique),
 		mono: await doc.embedFont(StandardFonts.Courier),
 		opts,
+		embedded: new Map<Block, PDFImage>(),
 	};
+	// Image PNGs embed once, up front: embedPng is async, the draw loop is
+	// not (fork: image blocks). Layout replay passes blocks without PNGs and
+	// skips this loop entirely.
+	for (const block of blocks) {
+		if (block.type === "image" && block.png !== undefined) {
+			ts.embedded.set(block, await doc.embedPng(block.png));
+		}
+	}
 	newPage(ts);
 
 	drawHeading(ts, 0, meta.title);

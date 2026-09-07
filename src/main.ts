@@ -41,8 +41,9 @@ import {
 } from "./incoming/pull";
 import { renderImportReport } from "./incoming/report";
 import { paintPlan, planRender } from "./incoming/strokerender";
-import { parseBlocks } from "./convert/mdblocks";
+import { parseBlocks, substituteDiagrams } from "./convert/mdblocks";
 import { PdfLayout, renderPdf } from "./convert/pdf";
+import { renderMermaidDiagrams } from "./convert/mermaid";
 import { MappingEntry, contentHash } from "./id/mapping";
 import { preprocess } from "./preprocess/preprocess";
 import {
@@ -647,6 +648,10 @@ export default class RoundTripPlugin extends Plugin {
 					// the layout modal (GP_E6_S10) — both composed by sendLayout,
 					// and always recorded per upload for layout reproduction.
 					layout: options.layout ?? sendLayout(this.settings),
+					// DOM-bound mermaid rendering lives at the plugin edge,
+					// injected like every other Obsidian capability (fork:
+					// image blocks).
+					renderDiagrams: (markdown) => renderMermaidDiagrams(markdown),
 					frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
 					skipUnchanged: options.auto === true,
 				},
@@ -1136,8 +1141,16 @@ export default class RoundTripPlugin extends Plugin {
 		// ink, which is worse than no quote at all (N3).
 		if (contentHash(pre.markdown) !== entry.contentHash) return null;
 
+		// Replay diagrams from the recorded geometry — never a re-render:
+		// mermaid output is not stable across versions, and a shifted
+		// diagram height would move every anchor below it (fork: image
+		// blocks; the GP_E3_S15 lesson, applied to pictures).
+		let blocks = parseBlocks(pre.markdown);
+		if (typography.images !== undefined && typography.images.length > 0) {
+			blocks = substituteDiagrams(blocks, typography.images);
+		}
 		const { layout } = await renderPdf(
-			parseBlocks(pre.markdown),
+			blocks,
 			{ title: file.basename, docId: entry.docId },
 			// Documents sent before 0.29.0 carry no typo version: replay the
 			// behaviour they were typeset with (GP_E3_S15 lesson).

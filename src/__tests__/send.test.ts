@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PDFDocument } from "pdf-lib";
 import { NoteInput, SendDeps, sendBatch, sendNote } from "../sync/send";
-import { DOCID_SUBJECT_PREFIX } from "../convert/pdf";
+import { DOCID_SUBJECT_PREFIX , TYPO_VERSION } from "../convert/pdf";
 import { isValidDocId } from "../id/docid";
 
 function makeDeps(overrides: Partial<SendDeps> = {}) {
@@ -98,7 +98,7 @@ describe("sendNote output format", () => {
 			fontSize: 13,
 			lineHeight: 1.5,
 			margin: 40,
-			typo: 7,
+			typo: TYPO_VERSION,
 			breakAtHeading: 0,
 			packSections: false,
 			// The page size rides along too (GP_E6_S2): reproducing the layout

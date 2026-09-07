@@ -12,9 +12,10 @@ export type Block =
 	| { type: "paragraph"; text: string; style?: "bold" | "italic" }
 	| { type: "list"; items: ListItem[] }
 	| { type: "quote"; lines: string[] }
-	| { type: "code"; lines: string[] }
+	| { type: "code"; lines: string[]; lang?: string }
 	| { type: "table"; rows: string[][] }
 	| { type: "hr" }
+	| { type: "image"; w: number; h: number; png?: Uint8Array }
 	| { type: "pagebreak" };
 
 export interface ListItem {
@@ -107,13 +108,19 @@ export function parseBlocks(markdown: string): Block[] {
 
 		if (FENCE_RE.test(line.trim())) {
 			flushAll();
+			// Info string of the opening fence ("```mermaid" → "mermaid"),
+			// kept only when present so pre-fork block shapes stay
+			// byte-identical for plain fences (fork: image blocks).
+			const lang = line.trim().replace(/^(?:```|~~~)/, "").trim().toLowerCase();
 			const code: string[] = [];
 			i++;
 			while (i < lines.length && !FENCE_RE.test(lines[i].trim())) {
 				code.push(lines[i]);
 				i++;
 			}
-			blocks.push({ type: "code", lines: code });
+			blocks.push(
+				lang === "" ? { type: "code", lines: code } : { type: "code", lines: code, lang },
+			);
 			continue;
 		}
 
@@ -211,4 +218,31 @@ export function dropLeadingTitleHeading(blocks: Block[], title: string): Block[]
 		return blocks.slice(1);
 	}
 	return blocks;
+}
+
+/**
+ * Replace mermaid code blocks with image blocks, pairing by occurrence
+ * order (fork: image blocks). `images` comes either from a live render at
+ * send time (with PNG bytes) or from the dimensions recorded per upload at
+ * import time (geometry only — the layout replay never re-renders, see
+ * mapping.ts `images` and the GP_E3_S15 lesson).
+ *
+ * A `null` slot — a diagram that failed to render — leaves its fence as
+ * the code block it is today, so failure is byte-identical to pre-fork
+ * behaviour. Slots past the end of `images` do the same.
+ */
+export function substituteDiagrams(
+	blocks: Block[],
+	images: ({ w: number; h: number; png?: Uint8Array } | null)[],
+): Block[] {
+	let next = 0;
+	return blocks.map((block) => {
+		if (block.type !== "code" || block.lang !== "mermaid") return block;
+		const image = images[next];
+		next++;
+		if (image == null || !(image.w > 0) || !(image.h > 0)) return block;
+		return image.png !== undefined
+			? { type: "image", w: image.w, h: image.h, png: image.png }
+			: { type: "image", w: image.w, h: image.h };
+	});
 }
