@@ -108,7 +108,7 @@ async function renderOne(
 	// one render.
 	const themed = `%%{init: {"theme": "neutral"}}%%\n${source}`;
 	const { svg } = await mermaid.render(`remarkable-round-trip-mermaid-${index}`, themed);
-	const safe = selfCloseVoidTags(svg);
+	const safe = toWellFormedSvg(svg);
 
 	// Decode BEFORE measuring. The <img> decoder is the only authority on
 	// whether this SVG is usable at all, and asking it first means a broken
@@ -163,6 +163,35 @@ async function rasterise(
 		);
 	});
 	return new Uint8Array(await blob.arrayBuffer());
+}
+
+/**
+ * Make mermaid's SVG well-formed XML, which is what the <img> decoder
+ * demands — an unclosed `<br>` in a flowchart label is enough to fail the
+ * whole document, and the diagram then silently became a code block.
+ *
+ * Parse leniently as HTML, serialise strictly as XML: the HTML parser accepts
+ * every HTML-ism mermaid emits (unclosed void tags, bare `&`, HTML inside
+ * <foreignObject>) and XMLSerializer writes it all back correctly. That fixes
+ * the whole class at once instead of one construct at a time.
+ *
+ * The known risk is attribute case — SVG needs `viewBox`, and HTML parsing
+ * lowercases attributes. Browsers run an "adjust SVG attributes" step that
+ * preserves it; verified against mermaid 11 in Chromium 151, where the
+ * round-trip keeps `viewBox` and paints an identical picture. If anything
+ * here fails, the targeted void-tag repair still runs.
+ */
+function toWellFormedSvg(svg: string): string {
+	try {
+		const parsed = new DOMParser().parseFromString(svg, "text/html");
+		const root = parsed.querySelector("svg");
+		if (root === null) return selfCloseVoidTags(svg);
+		const serialised = new XMLSerializer().serializeToString(root);
+		// A serialiser that lost the size is worse than the original.
+		return parseSvgSize(serialised) !== null ? serialised : selfCloseVoidTags(svg);
+	} catch {
+		return selfCloseVoidTags(svg);
+	}
 }
 
 /**
