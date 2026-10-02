@@ -1,5 +1,117 @@
 # Changelog
 
+## [0.43.1] - 2026-10-02
+
+Documentation and release process only: the plugin itself is unchanged
+from 0.43.0.
+
+### Changed
+
+- **Contributors are named on the release commit.** This repository is a
+  mirror, refreshed by a workflow in one commit per release, so until now
+  the public history credited only the bot — even for 0.43.0, which was
+  mostly lexomis' work. From this release on, the release commit carries a
+  `Co-authored-by` trailer for every contributor whose work it brings over,
+  and this first one names everyone to date.
+
+## [0.43.0] - 2026-10-02
+
+Most of this release was contributed by [lexomis](https://github.com/lexomis)
+(public PR #4), who ran into the limits of sending a few hundred notes at
+once. His commits carry his name in the development repository; this
+mirror is refreshed in one commit per release, which is why 0.43.1 adds him
+as co-author here. Thank you.
+
+### Added
+
+- **Sync status.** A *Show sync status* command, and a tablet icon in the
+  ribbon with a small menu, show what is queued, which watch-folder changes
+  are still pending, how many tracked notes are covered, and when the last
+  upload finished. Long operations show their progress in the desktop status
+  bar; mobile keeps using notices.
+- **Progress is saved every 20 uploads.** A large batch that is interrupted —
+  Obsidian closed, connection gone — keeps the records of everything already
+  delivered instead of forgetting the whole run. From lexomis' follow-up
+  work, ported on its own.
+
+### Changed
+
+- **All cloud work goes through one queue.** Folder creation finishes before
+  any upload starts, an import waits for a send that is already running, and
+  the watch folder collects its changes into one batch after the quiet
+  period. Unchanged notes are dropped before any cloud request is made.
+- **When the device folders cannot be created, nothing is sent.** Earlier
+  versions fell back to uploading the batch into the root of the device so
+  the notes would at least arrive. With hundreds of notes that fallback
+  floods the root. The batch is now left unsent, with a message saying so,
+  and you send again once the folders are there. A deliberate change.
+- **Rate limiting is handled as the service asks.** An HTTP 429 ("too many
+  requests") pauses all traffic for one shared cooldown instead of every
+  request retrying on its own, and the `Retry-After` the service sends is
+  followed. The device tree is read one item at a time rather than all at
+  once.
+
+### Fixed
+
+- **Folder mirroring survives a document the plugin cannot read.** One item
+  with metadata that fails to parse — written by another tool, say — used
+  to sink the whole listing and push the batch to the root. It is now
+  skipped, with a note in the console, and the rest of the tree stays
+  usable.
+- **A `Retry-After` the plugin cannot trust no longer dictates the wait.**
+  The value is kept between 1 second and 2 minutes, nonsense falls back to
+  the plugin's own schedule, and several requests tripping the limit
+  together share one cooldown instead of adding theirs up.
+
+## [0.42.2] - 2026-09-11
+
+Documentation only: the plugin itself is unchanged from 0.42.1.
+
+### Changed
+
+- **A contributing guide.** `CONTRIBUTING.md` explains what this repository
+  is — a mirror of a private development repository, refreshed wholesale by
+  every release, which is why a pull request cannot be merged here and what
+  happens to one instead: it is read and discussed in the open, and what is
+  accepted travels onward with your commits and your name on them. It also
+  says where the product's boundaries lie, so nobody spends an evening
+  building something that was never going to fit, and how to report a bug so
+  the report answers the questions I would otherwise have to ask.
+- **The README says where the project stands**, now that "early days" no
+  longer describes it, and points to the issues and to the contributing
+  guide for reporting something or helping out.
+
+## [0.42.1] - 2026-09-11
+
+### Fixed
+
+- **Folder mirroring no longer depends on how old your Obsidian installer
+  is.** Setting up the vault mirror could fail with "some folders could not
+  be created on the device", followed by `(intermediate value).toHex is not
+  a function`. The sync connection needs a few JavaScript
+  bytes-conversion methods that only exist in newer Electron versions, and
+  Obsidian's in-app update does not renew Electron — that follows the
+  *installer* you last ran, which is why "latest Obsidian" was not enough.
+  The plugin now brings those methods along itself, so mirroring, the write
+  mode and the import work on older installers too, on desktop and on
+  mobile. *Check reMarkable cloud status* reports which of the two your
+  runtime used, and if a comparable method ever goes missing, the message
+  points at Settings → About instead of showing a raw error. Reported as
+  issue #5.
+
+## [0.42.0] - 2026-09-09
+
+### Fixed
+
+- **`![[Note#Section]]` now sends that section, not the whole note.** An
+  embed pointing at a heading, a nested `#Heading#Subheading` path or a
+  `^block-id` was resolved to the entire note — Obsidian shows just the
+  section, and so should the page you review. This also gives you a way to
+  zoom in on part of a long note without splitting it: a small note holding
+  one section embed travels to the reMarkable as its own document. A
+  subpath that names nothing in the note is reported as a missing section
+  instead of quietly sending everything.
+
 ## [0.41.0] - 2026-08-21
 
 ### Added

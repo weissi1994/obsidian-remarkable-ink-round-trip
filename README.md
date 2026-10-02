@@ -16,12 +16,16 @@ into the note they came from. The sentence you struck out is struck out. The
 phrase you circled is bold. The objection you scrawled sits under the
 paragraph it belongs to.
 
-This is the first version of reMarkable Round-Trip and I hope you'll enjoy
-using it. If you know what it should do next — do let me know.
+I hope you'll enjoy using it. If you know what it should do next — do let me
+know.
 
-> **Early days.** Fresh in the community plugin directory and under active
-> development. It is used daily on a real device, and rough edges get fixed
-> fast — please report what you hit.
+> **Where it stands.** In the community plugin directory since the end of
+> July 2026, and used daily on a real device. The loop is complete: send,
+> review with the pen, import; write with the keyboard on the device and get
+> that text back too. Development continues in the open — what gets reported
+> gets fixed, and what gets asked for shapes what comes next. See
+> [CONTRIBUTING.md](CONTRIBUTING.md) for reporting a bug, suggesting
+> something, or sending a patch.
 
 ## Start here
 
@@ -44,6 +48,11 @@ That is the whole loop. Everything below is detail for when you want it.
 
 ## Sending notes
 
+The **tablet ribbon icon** opens sync status and the annotation import actions.
+**Show sync status** is also available from the command palette: it shows queued
+work, pending watch-folder changes, tracked-note coverage, and the last upload.
+Long operations show progress in the desktop status bar; mobile uses notices.
+
 - **Command palette**: *Send current note to reMarkable*.
 - **Right-click a note or folder**: *Send to reMarkable* — a folder sends
   everything inside it, with progress and per-file errors, and keeps its own
@@ -55,14 +64,21 @@ That is the whole loop. Everything below is detail for when you want it.
   prefilled from your settings — applied to that send only. Your saved
   settings stay as they are.
 - **Watch folders** (optional, off by default): notes dropped into one or more
-  folders you choose (comma-separated) are sent automatically, after a short
-  quiet period. Unchanged notes are skipped.
+  folders you choose (comma-separated) are collected into one automatic batch
+  after a short quiet period.
+  Unchanged notes are skipped before any cloud work starts.
 
 What happens to your note on the way:
 
 - Wikilinks become readable text, `![[embeds]]` are resolved inline, callouts
   become titled quotes, comments are dropped, and frontmatter is left out — or
   rendered as a small title block, if you prefer.
+- An embed pointing at part of a note — `![[Note#Section]]`, a nested
+  `#Heading#Subheading` path, or `![[Note#^block-id]]` — brings that part
+  only, as Obsidian shows it. Handy for reviewing one chapter of a long
+  note: put the single embed in a small note of its own and send that.
+  What comes back is a summary of your marks rather than an annotated copy,
+  because the note you sent holds the link, not the text.
 - Task checkboxes (`- [ ]`) become real drawn squares you can tick with the
   pen, and a table row that is empty — or holds only a label in its first
   column — becomes a fill-in row with room to write: a note with log tables
@@ -86,7 +102,8 @@ What happens to your note on the way:
   table of contents, and non-Latin scripts survive intact.
 - Your vault folders are recreated on the device under a base folder you
   choose. Re-sending replaces the previous copy; the old one goes to the
-  device trash.
+  device trash. Folder creation always finishes before file upload; if it
+  fails, the affected batch is left unsent rather than placed in the root.
 - Each note gets a stable `remarkable-id` in its frontmatter. That id — not the
   file path — is how a document finds its note again, so you can move and
   rename freely.
@@ -246,6 +263,20 @@ credential the plugin holds.
 - The stroke reader is written against an undocumented format: unusual pens or
   a future firmware may not render. The import report says so when a page could
   not be read.
+
+## Reporting something, or helping out
+
+Bugs, questions and ideas all belong in the
+[issues](https://github.com/maxonamission/obsidian-remarkable-round-trip/issues).
+For a bug, attach `reMarkable Round-Trip log.md` from your vault: the import
+writes it every run, and it answers most of what I would otherwise have to ask.
+
+Patches are welcome too, with one thing worth knowing before you spend an
+evening on one: this repository is a mirror of a private development
+repository, so a pull request cannot be merged here — it is read and
+discussed here, and what is accepted travels onward with your commits and
+your name on them. [CONTRIBUTING.md](CONTRIBUTING.md) explains how that
+works, and where the product's boundaries lie.
 
 ## License
 
