@@ -54,9 +54,9 @@ That is the whole loop. Everything below is detail for when you want it.
   layout…)* twin that opens a small dialog — preset, sliders, page breaks,
   prefilled from your settings — applied to that send only. Your saved
   settings stay as they are.
-- **Watch folder** (optional, off by default): notes dropped into a folder you
-  choose are sent automatically, after a short quiet period. Unchanged notes
-  are skipped.
+- **Watch folders** (optional, off by default): notes dropped into one or more
+  folders you choose (comma-separated) are sent automatically, after a short
+  quiet period. Unchanged notes are skipped.
 
 What happens to your note on the way:
 

@@ -1,19 +1,28 @@
 /**
- * Watch-folder queue (PRD F6): notes created/modified inside the configured
+ * Watch-folder queue (PRD F6): notes created/modified inside any configured
  * vault folder are debounced per file and then handed to the send flow —
  * without a manual command. Timers are injected so the logic tests without
  * a DOM and the plugin edge can pass window-bound timers.
  */
 
 export interface WatchQueueOptions {
-	/** Vault folder to watch, without trailing slash (e.g. "reMarkable-out"). */
-	folder: string;
+	/** Vault folders to watch, without trailing slash (e.g. "reMarkable-out"). */
+	folders: string[];
 	/** Quiet period after the last change before a file is sent. */
 	debounceMs: number;
 	setTimer: (fn: () => void, ms: number) => number;
 	clearTimer: (id: number) => void;
 	/** Called once per file when its debounce window closes. */
 	onReady: (path: string) => void;
+}
+
+/** Split the comma-separated setting into clean, unique folder paths. */
+export function parseFolderList(value: string): string[] {
+	const folders = value
+		.split(",")
+		.map((f) => f.trim().replace(/^\/+|\/+$/g, ""))
+		.filter((f) => f !== "");
+	return [...new Set(folders)];
 }
 
 /** True when the path lives inside the watched folder (any depth). */
@@ -28,10 +37,10 @@ export class WatchQueue {
 
 	constructor(private readonly opts: WatchQueueOptions) {}
 
-	/** Report a create/modify event; only markdown files in the folder count. */
+	/** Report a create/modify event; only markdown files in a watched folder count. */
 	noteChanged(path: string): void {
 		if (!path.endsWith(".md")) return;
-		if (!isInWatchFolder(path, this.opts.folder)) return;
+		if (!this.opts.folders.some((f) => isInWatchFolder(path, f))) return;
 		const existing = this.pending.get(path);
 		if (existing !== undefined) this.opts.clearTimer(existing);
 		const id = this.opts.setTimer(() => {

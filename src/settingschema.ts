@@ -355,15 +355,15 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				key: "watchFolderEnabled",
 				name: "Auto-send from a vault folder",
 				desc:
-					"Notes created or changed in the folder below are converted and " +
+					"Notes created or changed in the folders below are converted and " +
 					"uploaded automatically (after a short quiet period). Unchanged " +
 					"notes are skipped.",
 				control: { type: "toggle" },
 			},
 			{
 				key: "watchFolderPath",
-				name: "Folder to watch",
-				desc: "Vault path, e.g. reMarkable-out",
+				name: "Folders to watch",
+				desc: "Vault paths, comma-separated, e.g. reMarkable-out, Work/print",
 				control: { type: "text", placeholder: "reMarkable-out", sanitise: "path" },
 			},
 		],

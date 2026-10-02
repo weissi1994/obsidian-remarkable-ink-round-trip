@@ -31,6 +31,7 @@ import {
 	readSetting,
 	writeSetting,
 } from "./settingschema";
+import { parseFolderList } from "./sync/watcher";
 
 /** Not a stored setting: the one-time code lives only until pairing. */
 const PAIRING_CODE_KEY = "__pairingCode";
@@ -38,6 +39,7 @@ const PAIRING_CODE_KEY = "__pairingCode";
 /** Folder paths are stored trimmed and without leading or trailing slashes. */
 function sanitise(key: string, value: unknown): unknown {
 	if (typeof value !== "string") return value;
+	if (key === "watchFolderPath") return parseFolderList(value).join(", ");
 	return key.toLowerCase().includes("folder") || key === "customEndpointUrl"
 		? cleanPath(value)
 		: value;

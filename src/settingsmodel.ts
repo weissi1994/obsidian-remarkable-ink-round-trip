@@ -31,7 +31,7 @@ export interface RoundTripSettings {
 	fontSize: number;
 	lineHeight: number;
 	margin: number;
-	/** Watch folder (F6): auto-send notes dropped into this vault folder. */
+	/** Watch folders (F6): auto-send notes dropped into these comma-separated vault folders. */
 	watchFolderEnabled: boolean;
 	watchFolderPath: string;
 	/** Where imported annotations land (F11): companion note or in the source. */

@@ -58,7 +58,7 @@ import {
 	renderAnnotationBlock,
 	upsertAnnotationBlock,
 } from "./incoming/annotationnote";
-import { WatchQueue } from "./sync/watcher";
+import { WatchQueue, parseFolderList } from "./sync/watcher";
 import { RawSyncApi, readTextNotebook, sendTextNotebook } from "./transport/textnotebook";
 import { TextImportOutcome, importEditedText, splitFrontmatter } from "./sync/textimport";
 import { TextConflictModal } from "./textconflictmodal";
@@ -412,11 +412,10 @@ export default class RoundTripPlugin extends Plugin {
 	private setupWatcher(): void {
 		this.watchQueue?.dispose();
 		this.watchQueue = null;
-		if (!this.settings.watchFolderEnabled || this.settings.watchFolderPath === "") {
-			return;
-		}
+		const folders = parseFolderList(this.settings.watchFolderPath);
+		if (!this.settings.watchFolderEnabled || folders.length === 0) return;
 		this.watchQueue = new WatchQueue({
-			folder: this.settings.watchFolderPath,
+			folders,
 			debounceMs: WATCH_DEBOUNCE_MS,
 			setTimer: (fn, ms) => window.setTimeout(fn, ms),
 			clearTimer: (id) => window.clearTimeout(id),

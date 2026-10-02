@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WatchQueue, isInWatchFolder } from "../sync/watcher";
+import { WatchQueue, isInWatchFolder, parseFolderList } from "../sync/watcher";
 
 /** Manual timer harness: fire() runs all due timers. */
 function fakeTimers() {
@@ -31,12 +31,37 @@ describe("isInWatchFolder", () => {
 	});
 });
 
+describe("parseFolderList", () => {
+	it("splits, cleans and dedupes comma-separated folders", () => {
+		expect(parseFolderList(" /out/ , Work/print,, out ")).toEqual(["out", "Work/print"]);
+		expect(parseFolderList("")).toEqual([]);
+		expect(parseFolderList("reMarkable-out")).toEqual(["reMarkable-out"]);
+	});
+});
+
 describe("WatchQueue", () => {
+	it("watches every configured folder", () => {
+		const timers = fakeTimers();
+		const ready: string[] = [];
+		const queue = new WatchQueue({
+			folders: ["out", "work/print"],
+			debounceMs: 1000,
+			setTimer: timers.setTimer,
+			clearTimer: timers.clearTimer,
+			onReady: (p) => ready.push(p),
+		});
+		queue.noteChanged("out/a.md");
+		queue.noteChanged("work/print/b.md");
+		queue.noteChanged("work/c.md");
+		timers.fire();
+		expect(ready).toEqual(["out/a.md", "work/print/b.md"]);
+	});
+
 	it("debounces repeated changes into one send", () => {
 		const timers = fakeTimers();
 		const ready: string[] = [];
 		const queue = new WatchQueue({
-			folder: "out",
+			folders: ["out"],
 			debounceMs: 1000,
 			setTimer: timers.setTimer,
 			clearTimer: timers.clearTimer,
@@ -53,7 +78,7 @@ describe("WatchQueue", () => {
 	it("ignores non-markdown files and files outside the folder", () => {
 		const timers = fakeTimers();
 		const queue = new WatchQueue({
-			folder: "out",
+			folders: ["out"],
 			debounceMs: 1000,
 			setTimer: timers.setTimer,
 			clearTimer: timers.clearTimer,
@@ -68,7 +93,7 @@ describe("WatchQueue", () => {
 		const timers = fakeTimers();
 		const ready: string[] = [];
 		const queue = new WatchQueue({
-			folder: "out",
+			folders: ["out"],
 			debounceMs: 1000,
 			setTimer: timers.setTimer,
 			clearTimer: timers.clearTimer,
