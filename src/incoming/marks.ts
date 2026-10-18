@@ -35,7 +35,10 @@ export type MarkKind =
 	| "margin"
 	| "note"
 	| "checkbox"
-	| "checkbox-cancel";
+	| "checkbox-cancel"
+	// Ink fork: what happened to the plugin's own handwriting on the tablet.
+	| "erased"
+	| "moved";
 
 export interface Mark {
 	kind: MarkKind;

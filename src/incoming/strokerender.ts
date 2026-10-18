@@ -36,8 +36,12 @@ export const PAPER_PRO_GRID: DeviceGrid = { width: 1620, height: 2160 };
  * past every task box — multiplied back, all three gestures sat exactly on
  * their boxes.
  */
-export function deviceGridFor(layout: { pageWidth: number } | null): DeviceGrid {
+export function deviceGridFor(
+	layout: { pageWidth: number; grid?: DeviceGrid } | null,
+): DeviceGrid {
 	if (layout === null) return RM2_GRID;
+	// A handwritten notebook records the grid it was written on (ink fork).
+	if (layout.grid !== undefined) return layout.grid;
 	return layout.pageWidth >= 478 ? PAPER_PRO_GRID : RM2_GRID;
 }
 

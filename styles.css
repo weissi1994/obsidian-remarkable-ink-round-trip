@@ -44,3 +44,11 @@
 		animation: none;
 	}
 }
+
+/* Ink fork: Mermaid diagrams are rendered off-screen to be traced into strokes. */
+.remarkable-ink-mermaid-host {
+	position: absolute;
+	top: 0;
+	left: -100000px;
+	pointer-events: none;
+}

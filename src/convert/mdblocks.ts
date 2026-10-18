@@ -15,7 +15,13 @@ export type Block =
 	| { type: "code"; lines: string[] }
 	| { type: "table"; rows: string[][] }
 	| { type: "hr" }
-	| { type: "pagebreak" };
+	| { type: "pagebreak" }
+	/**
+	 * Ink fork: a picture drawn as pen strokes. Never produced by parseBlocks —
+	 * the ink renderer swaps an image placeholder line for one when it has the
+	 * picture — so PDF and EPUB layout are untouched. Size in points.
+	 */
+	| { type: "image"; name: string; width: number; height: number };
 
 export interface ListItem {
 	depth: number;

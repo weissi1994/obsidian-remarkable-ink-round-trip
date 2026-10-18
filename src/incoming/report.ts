@@ -20,7 +20,7 @@ export interface ImportReportInput {
 
 export function renderImportReport(input: ImportReportInput): string {
 	const lines = [
-		`reMarkable Round-Trip — import report (${input.startedAt})`,
+		`reMarkable Ink Round-Trip — import report (${input.startedAt})`,
 		`plugin ${input.pluginVersion}${input.forced ? " · forced re-import" : ""}`,
 		"",
 	];
@@ -80,6 +80,16 @@ export function renderImportReport(input: ImportReportInput): string {
 		);
 		if (scan.unreadableFiles > 0) {
 			lines.push(`    ${scan.unreadableFiles} file(s) could not be read`);
+		}
+		// Ink fork: what happened to the handwriting the plugin wrote.
+		if (scan.ink !== undefined) {
+			lines.push(
+				scan.anchorSkipped === "no-layout"
+					? "    handwriting: could not be regenerated (sent text missing or hand deleted) — nothing read"
+					: `    handwriting: ${scan.ink.erasedWords} word(s) erased, ${scan.ink.movedWords} moved, ` +
+							`${scan.ink.partialWords} partly erased; ${scan.ink.ownStrokes} stroke(s) of your own` +
+							(scan.ink.transcribed > 0 ? `, ${scan.ink.transcribed} remark(s) transcribed` : ""),
+			);
 		}
 		lines.push(`    ${describeWrite(scan)}`);
 		const state = describeSource(scan.sourceState);

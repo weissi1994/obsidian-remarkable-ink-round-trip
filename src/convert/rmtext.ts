@@ -56,11 +56,12 @@ export interface StyleSpec {
 	style: ParagraphStyleValue;
 }
 
-const HEADER = "reMarkable .lines file, version=6          ";
+export const HEADER = "reMarkable .lines file, version=6          ";
 
 // Tag nibbles (rmscene TagType).
 const TAG_ID = 0xf;
 const TAG_LENGTH4 = 0xc;
+const TAG_BYTE8 = 0x8;
 const TAG_BYTE4 = 0x4;
 const TAG_BYTE1 = 0x1;
 
@@ -85,7 +86,8 @@ export interface CrdtId {
 const id = (part1: number, part2: number): CrdtId => ({ part1, part2 });
 const END_MARKER = id(0, 0);
 
-class ByteWriter {
+/** Little-endian writer for the v6 tagged-block encoding (shared with the ink writer). */
+export class ByteWriter {
 	private chunks: number[] = [];
 
 	get length(): number {
@@ -167,6 +169,11 @@ class ByteWriter {
 	taggedFloat(index: number, value: number): void {
 		this.tag(index, TAG_BYTE4);
 		this.f32(value);
+	}
+
+	taggedDouble(index: number, value: number): void {
+		this.tag(index, TAG_BYTE8);
+		this.f64(value);
 	}
 
 	/** Nested length-prefixed subblock: tag, uint32 length, payload. */

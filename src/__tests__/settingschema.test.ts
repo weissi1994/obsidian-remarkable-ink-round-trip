@@ -27,7 +27,16 @@ describe("the settings schema", () => {
 		// would be invisible in both renderers.
 		// lastSeenVersion is bookkeeping for the update notice (GP_E5_S3), not
 		// a user choice — only its showUpdateNotice toggle belongs in the UI.
-		const internal = new Set(["deviceToken", "mappings", "lastSeenVersion"]);
+		// Ink fork: the detected canvas, the learned hand and a pending sheet are
+		// set by commands and buttons, not typed in.
+		const internal = new Set([
+			"deviceToken",
+			"mappings",
+			"lastSeenVersion",
+			"inkCustomProfile",
+			"handVersion",
+			"pendingSheet",
+		]);
 		const described = new Set(specs.map((spec) => spec.key.split(".")[0]));
 		for (const key of Object.keys(DEFAULT_SETTINGS)) {
 			if (internal.has(key)) continue;

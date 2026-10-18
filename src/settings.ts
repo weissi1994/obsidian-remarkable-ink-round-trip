@@ -37,6 +37,8 @@ const PAIRING_CODE_KEY = "__pairingCode";
 
 /** Folder paths are stored trimmed and without leading or trailing slashes. */
 function sanitise(key: string, value: unknown): unknown {
+	// Ink fork: the colour dropdown hands back strings; the pen wants an id.
+	if (key === "inkColor") return Number(value);
 	if (typeof value !== "string") return value;
 	return key.toLowerCase().includes("folder") || key === "customEndpointUrl"
 		? cleanPath(value)
@@ -110,10 +112,57 @@ export class RoundTripSettingTab extends PluginSettingTab {
 						? []
 						: [{ name: section.heading, desc: section.note, searchable: false }]),
 					...section.items.map((spec) => this.defineSetting(spec)),
+					...(section.heading === "Handwriting" ? this.handwritingActions() : []),
 				],
 			});
 		}
 		return groups;
+	}
+
+	/** Ink fork: the handwriting sheet and page-size buttons. */
+	private handwritingActions(): SettingDefinition[] {
+		const button = (text: string, run: () => Promise<void>, cta = false) => (el: HTMLElement) => {
+			const component = new ButtonComponent(el).setButtonText(text).onClick(() => {
+				void run().then(() => this.update());
+			});
+			if (cta) component.setCta();
+		};
+		const s = this.plugin.settings;
+		return [
+			{
+				name: "My handwriting",
+				desc:
+					s.handVersion === ""
+						? "Not learned yet. Send the sheet, fill it in on the reMarkable, sync, then learn."
+						: `Learned (${s.handVersion}).` +
+							(s.pendingSheet === null ? "" : " A sheet is waiting on the tablet."),
+			},
+			{
+				name: "Send handwriting sheet",
+				desc: "A notebook of labelled boxes: write each character once, on the line.",
+				action: button("Send sheet", () => this.plugin.sendHandwritingSheet(), s.handVersion === ""),
+			},
+			{
+				name: "Learn from the sheet",
+				desc: "Read the filled-in sheet. Replaces the handwriting learned before.",
+				visible: () => this.plugin.settings.pendingSheet !== null,
+				action: button("Learn", () => this.plugin.learnHandwriting(false), true),
+			},
+			{
+				name: "Add variations",
+				desc:
+					"Fill in a fresh sheet and add it: up to three samples per character, " +
+					"used in turn, so repeated letters look less identical.",
+				visible: () =>
+					this.plugin.settings.pendingSheet !== null && this.plugin.settings.handVersion !== "",
+				action: button("Add", () => this.plugin.learnHandwriting(true)),
+			},
+			{
+				name: "Detect page size",
+				desc: "Read the canvas size from a notebook made on your reMarkable.",
+				action: button("Detect", () => this.plugin.detectPageSize()),
+			},
+		];
 	}
 
 	/** One schema entry as a declarative definition. */

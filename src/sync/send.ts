@@ -18,7 +18,10 @@ import {
 } from "../convert/pdf";
 import { renderEpub } from "../convert/epub";
 import { ensureDocId } from "../id/docid";
-import { MappingTable, contentHash, recordUpload } from "../id/mapping";
+import { InkSnapshot, MappingTable, contentHash, recordUpload } from "../id/mapping";
+import type { Block } from "../convert/mdblocks";
+import type { InkImage } from "../ink/inkimage";
+import type { InkDrawing } from "../ink/inkdrawing";
 import type { UploadResult } from "../transport/cloud";
 
 /** Vault access seam: the plugin edge adapts TFile/Vault to this shape. */
@@ -30,14 +33,17 @@ export interface NoteInput {
 	existingDocId?: unknown;
 }
 
-/** Document format the settings can choose (PRD F3). */
+/** Document file formats the upload client takes (PRD F3). */
 export type OutputFormat = "pdf" | "epub";
+
+/** What the settings can choose: a review file, or a handwritten notebook (ink fork). */
+export type SettingsFormat = OutputFormat | "ink";
 
 /**
  * Everything one send can deliver: the settings formats plus "text" — the
  * write-mode notebook (F16), an explicit per-send choice, never a default.
  */
-export type SendFormat = OutputFormat | "text";
+export type SendFormat = SettingsFormat | "text";
 
 export interface SendDeps {
 	client: {
@@ -57,6 +63,44 @@ export interface SendDeps {
 			markdown: string,
 			options: { parentId?: string },
 		): Promise<UploadResult>;
+		/**
+		 * Ink fork: upload a notebook of pen-stroke pages. Returns the page ids
+		 * it chose, which the import maps back to layout pages.
+		 */
+		uploadInk?(
+			visibleName: string,
+			pages: Uint8Array[],
+			options: { parentId?: string },
+		): Promise<UploadResult & { pageIds: string[] }>;
+	};
+	/**
+	 * Ink fork: turn a note into handwritten pages. Absent means handwriting
+	 * is unavailable here (e.g. the owner's hand is selected but missing),
+	 * and an ink send fails with a clear message.
+	 */
+	ink?: {
+		render(
+			blocks: Block[],
+			title: string,
+			docId: string,
+			layout: PdfLayoutOptions | undefined,
+			images?: Record<string, InkImage>,
+			drawings?: Record<string, InkDrawing>,
+		): { pages: Uint8Array[]; snapshot: Omit<InkSnapshot, "pageIds"> };
+		/** The note's Mermaid diagrams, traced, by diagramKey(source). */
+		loadDrawings?(markdown: string): Promise<Record<string, InkDrawing>>;
+		/** The note's embedded pictures, quantised, by placeholder name. */
+		loadImages?(note: NoteInput): Promise<Record<string, InkImage>>;
+		/** Keep the sent text, so the import can regenerate it after edits. */
+		persistSent?(
+			docId: string,
+			sent: {
+				title: string;
+				markdown: string;
+				images?: Record<string, InkImage>;
+				drawings?: Record<string, InkDrawing>;
+			},
+		): Promise<void>;
 	};
 	/** Delivered format; PDF is the default because it anchors annotations. */
 	format?: SendFormat;
@@ -189,6 +233,7 @@ export async function sendNote(
 			? await deps.resolveParent(note.path)
 			: undefined;
 		let upload: UploadResult;
+		let inkSnapshot: InkSnapshot | undefined;
 		if (format === "text") {
 			if (deps.client.uploadText === undefined) {
 				throw new Error(
@@ -198,6 +243,27 @@ export async function sendNote(
 			upload = await deps.client.uploadText(note.basename, markdown, {
 				parentId,
 			});
+		} else if (format === "ink") {
+			if (deps.client.uploadInk === undefined || deps.ink === undefined) {
+				throw new Error(
+					"Handwritten sends need the reMarkable sync API, which is not available right now.",
+				);
+			}
+			const blocks = parseBlocks(markdown);
+			const images = (await deps.ink.loadImages?.(note)) ?? {};
+			const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
+			const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
+			// Keep the text BEFORE uploading: a failed write after a landed
+			// upload would orphan the notebook and duplicate it on retry.
+			await deps.ink.persistSent?.(docId, {
+				title: note.basename,
+				markdown,
+				images: rendered.snapshot.imageStyle === undefined ? undefined : images,
+				drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
+			});
+			const result = await deps.client.uploadInk(note.basename, rendered.pages, { parentId });
+			upload = result;
+			inkSnapshot = { ...rendered.snapshot, pageIds: result.pageIds };
 		} else {
 			const blocks = parseBlocks(markdown);
 			const bytes =
@@ -244,7 +310,9 @@ export async function sendNote(
 			// EPUB reflows and a text notebook has no fixed page geometry, so
 			// only PDF records layout to anchor imported ink against (GP_E3_S8).
 			pdfLayout:
-				format === "pdf" ? resolveLayoutOptions(deps.layout) : undefined,
+				format === "pdf" || format === "ink" ? resolveLayoutOptions(deps.layout) : undefined,
+			// Ink fork: everything the import needs to regenerate the strokes.
+			ink: inkSnapshot,
 		});
 		return {
 			result: {

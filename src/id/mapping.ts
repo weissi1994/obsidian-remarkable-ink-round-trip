@@ -20,7 +20,7 @@ export interface MappingEntry {
 	 * a write-mode notebook whose import is the write-mode route, not the
 	 * annotation pull. Absent = a pre-0.36 upload, always a review copy.
 	 */
-	format?: "pdf" | "epub" | "text";
+	format?: "pdf" | "epub" | "text" | "ink";
 	/**
 	 * Hash of the canonical form of the sent text (GP_E7_S3): exactly what
 	 * an UNEDITED device copy reads back as. Lets the import tell "the
@@ -42,6 +42,12 @@ export interface MappingEntry {
 	 * `typo` records the typesetter behaviour version (GP_E5_S4–S7); absent
 	 * means version 1 (sent before 0.29.0).
 	 */
+	/**
+	 * Ink fork: how a handwritten notebook was written, so the import can
+	 * regenerate every stroke exactly. `pageIds` maps device pages back to
+	 * layout pages; a page the tablet owner added is simply not in it.
+	 */
+	ink?: InkSnapshot;
 	pdfLayout?: {
 		fontSize: number;
 		lineHeight: number;
@@ -55,6 +61,36 @@ export interface MappingEntry {
 		/** Whether #/## sections were packed (GP_E6_S9); absent = false. */
 		packSections?: boolean;
 	};
+}
+
+/** Everything a handwritten send depends on (ink fork). */
+export interface InkSnapshot {
+	pageIds: string[];
+	/** Built-in font id, or "hand" for the owner's captured handwriting. */
+	font: string;
+	/** Version hash of the handwriting library when font is "hand". */
+	hand?: string;
+	/** Built-in font used for characters the primary source lacks. */
+	fallbackFont: string;
+	pen: "fine" | "medium" | "bold";
+	color: number;
+	jitter: number;
+	profile: { width: number; height: number; dpi: number };
+	/** Renderer behaviour version (INK_SHAPE_VERSION) at send time. */
+	shape: number;
+	/**
+	 * How pictures were drawn; absent = left as text placeholders. The
+	 * quantised pictures themselves are stored with the sent text.
+	 */
+	imageStyle?: "colour-hatch" | "mono-hatch";
+	/** The title the notebook was written with (its first line). */
+	title?: string;
+	/**
+	 * Glyph source versions [primary, fallback, mono] at send time: a bundled
+	 * font that changed in an update must not silently regenerate different
+	 * strokes. Absent on nothing — recorded since the first ink release.
+	 */
+	fontVersions?: string[];
 }
 
 export type MappingTable = Record<string, MappingEntry>;

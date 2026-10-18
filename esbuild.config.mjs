@@ -22,7 +22,7 @@ const context = await esbuild.context({
 		...builtinModules,
 	],
 	banner: {
-		js: `/* reMarkable Round-Trip ${version} — https://github.com/maxonamission/codebase-galdhopiggen */`,
+		js: `/* reMarkable Ink Round-Trip ${version} — fork of reMarkable Round-Trip (GPL-3.0-or-later), https://github.com/maxonamission/obsidian-remarkable-round-trip */`,
 	},
 	// JSZip reaches this bundle through rmapi-js, for one method this plugin
 	// never calls. It arrives pre-bundled with polyfills whose legacy

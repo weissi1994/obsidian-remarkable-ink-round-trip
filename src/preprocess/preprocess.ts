@@ -95,7 +95,7 @@ function unquote(value: string): string {
 	return value.trim().replace(/^["']|["']$/g, "");
 }
 
-function displayTextForLink(target: string, alias: string | undefined): string {
+export function displayTextForLink(target: string, alias: string | undefined): string {
 	if (alias !== undefined && alias.trim() !== "") return alias.trim();
 	// Drop path and heading/block suffixes: "dir/Note#Section" → "Note › Section".
 	const [path, ...anchors] = target.split("#");
