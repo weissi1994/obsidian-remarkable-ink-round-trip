@@ -63,9 +63,15 @@ separate send/import commands — there is one way in and out, and it is ink.
 
 1. Run **Send handwriting sheet to reMarkable** (or the button under
    *Settings → Handwriting*). A notebook of labelled boxes arrives: lower and
-   upper case, digits, ä ö ü ß Ä Ö Ü and common punctuation.
-2. Write each character once, sitting on the solid line, capitals reaching the
-   dashed line. Skip any you like — they fall back to the font you choose.
+   upper case, digits, ä ö ü ß Ä Ö Ü, punctuation and brackets
+   (`[ ] { } < > « » „ “ ” ‘ ’`), symbols (`^ ~ _ | \ $ € £ ° @ # % & * + =`, `…`, `–`)
+   and the marks notes are full of: ✓ ✗ → ← ↑ ↓.
+2. Each box shows the character on the left, at writing size, on the same lines
+   you write on — copy it in the space to its right. Sit on the solid line;
+   capitals and tall letters reach the dashed line, small letters the dotted
+   one, tails go down to the lower dotted line. Skip any you like — they fall
+   back to the font you choose. Accented letters (é, à, ç…) need no box: they
+   are written as your own base letter with the accent added.
 3. Let it sync, then run **Learn my handwriting from the sheet**. From then on,
    handwritten sends use your letters.
 4. Optional: send a fresh sheet, fill it in again and run **Add handwriting
@@ -73,7 +79,8 @@ separate send/import commands — there is one way in and out, and it is ink.
    turn, so a page of your “e”s doesn't look stamped.
 
 Every send records which version of your hand it used, so re-learning later never
-confuses the import of something you sent before.
+confuses the import of something you sent before. A sheet still waiting on the
+tablet from an earlier version is read back with the layout it was sent with.
 
 ## Built-in fonts
 

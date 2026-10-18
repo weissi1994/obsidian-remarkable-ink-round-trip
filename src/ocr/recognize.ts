@@ -36,7 +36,8 @@ export interface Template {
 
 /** Characters worth recognising: letters incl. German, digits, punctuation. */
 export const OCR_CHARS =
-	"abcdefghijklmnopqrstuvwxyzäöüßABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789.,;:!?-'\"()/&+";
+	"abcdefghijklmnopqrstuvwxyzäöüßABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ0123456789.,;:!?-'\"()/&+" +
+	"[]{}<>_~^|\\$€£°@#%=*„“”‘’«»…–✓✗→←↑↓";
 
 const CLOUD_SIZE = 32;
 

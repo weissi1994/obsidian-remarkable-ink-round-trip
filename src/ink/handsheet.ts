@@ -19,15 +19,31 @@ import type { DeviceProfile, GeneratedStroke, InkPen } from "./inkrender";
 import { toInkLines } from "./inkrender";
 import { buildInkPageRm, FIRST_STROKE_COUNTER, PEN_COLOR } from "./rmwrite";
 
-/** Bump when the sheet layout or charset changes. */
-export const SHEET_VERSION = 1;
+/**
+ * Bump when the sheet layout or charset changes, and keep the old one
+ * buildable: a sheet waiting on the tablet is read back with the layout it
+ * was sent with. Version 2: more characters, a reference letter beside the
+ * writing space, and x-height and descender guides.
+ */
+export const SHEET_VERSION = 2;
 
-export const SHEET_CHARS =
+const CHARS_V1 =
 	"abcdefghijklmnopqrstuvwxyz" +
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
 	"0123456789" +
 	"äöüßÄÖÜ" +
 	".,;:!?'\"-()/&@#%+=*€";
+
+/**
+ * Characters on the letter sheet, per version. Accented letters (é, à, ç…)
+ * need no box: they are composed from the owner's own base letter.
+ */
+export const SHEET_CHARSETS: Record<number, string> = {
+	1: CHARS_V1,
+	2: CHARS_V1 + "[]{}<>_~^|\\$£°„“”‘’«»…–✓✗→←↑↓",
+};
+
+export const SHEET_CHARS = SHEET_CHARSETS[SHEET_VERSION];
 
 /**
  * The word sheet (joined-up writing): everyday German and English words,
@@ -74,12 +90,18 @@ export interface PendingSheet {
 
 const GUIDE_PEN: InkPen = { tool: 17, color: PEN_COLOR.grey, thicknessScale: 1, width: 8 };
 
-/** Lay out the sheet for a canvas. Deterministic for a given profile and kind. */
-export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters"): Sheet {
+/**
+ * Lay out the sheet for a canvas. Deterministic for a given profile, kind
+ * and version — the import rebuilds it to tell the owner's ink from ours.
+ */
+export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters", version = SHEET_VERSION): Sheet {
 	const unit = profile.dpi / 226; // keep physical sizes across devices
 	const margin = Math.round(60 * unit);
 	const words = kind === "words";
-	const boxWidth = words ? Math.round(Math.max(420 * unit, (profile.width - 2 * margin) / 2 - 1)) : Math.round(132 * unit);
+	const legacy = !words && version < 2;
+	const boxWidth = words
+		? Math.round(Math.max(420 * unit, (profile.width - 2 * margin) / 2 - 1))
+		: Math.round((legacy ? 132 : 190) * unit);
 	const boxHeight = Math.round(176 * unit);
 	const headerHeight = Math.round(210 * unit);
 	const cols = Math.max(words ? 1 : 3, Math.floor((profile.width - 2 * margin) / boxWidth));
@@ -90,7 +112,7 @@ export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters"):
 
 	const boxes: SheetBox[] = [];
 	const pages: GeneratedStroke[][] = [];
-	const chars = words ? WORD_SHEET_WORDS : [...SHEET_CHARS];
+	const chars = words ? WORD_SHEET_WORDS : [...(SHEET_CHARSETS[version] ?? SHEET_CHARS)];
 	const pageCount = Math.ceil(chars.length / perPage);
 
 	for (let p = 0; p < pageCount; p++) {
@@ -152,8 +174,13 @@ export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters"):
 			words
 				? "Write each word once in its box the way you usually write, joined-up " +
 						"if that is how you write, sitting on the solid line. Skip any you like."
-				: "Write each character once in its box, sitting on the solid line. " +
-						"Capitals reach the dashed line. Skip any you like.",
+				: legacy
+					? "Write each character once in its box, sitting on the solid line. " +
+							"Capitals reach the dashed line. Skip any you like."
+					: "Copy each character once, in the space to its right. Sit on the " +
+							"solid line; capitals and tall letters reach the dashed line, small " +
+							"letters the dotted one, tails go down to the lower dotted line. " +
+							"Skip any you like.",
 			instructionCap,
 		);
 		instructions.forEach((line, index) => {
@@ -166,33 +193,90 @@ export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters"):
 			const row = Math.floor(index / cols);
 			const left = left0 + col * boxWidth;
 			const top = headerHeight + row * boxHeight;
-			const baseline = top + boxHeight * 0.7;
-			const capLine = baseline - boxHeight * 0.42;
+			if (legacy) {
+				const baseline = top + boxHeight * 0.7;
+				const capLine = baseline - boxHeight * 0.42;
+				boxes.push({ char, page: p + 1, left, top, width: boxWidth, height: boxHeight, baseline, capLine });
+				const inset = 6 * unit;
+				// Frame.
+				add([
+					{ x: left + inset, y: top + inset },
+					{ x: left + boxWidth - inset, y: top + inset },
+					{ x: left + boxWidth - inset, y: top + boxHeight - inset },
+					{ x: left + inset, y: top + boxHeight - inset },
+					{ x: left + inset, y: top + inset },
+				]);
+				// Baseline, solid.
+				add([
+					{ x: left + inset * 2, y: baseline },
+					{ x: left + boxWidth - inset * 2, y: baseline },
+				]);
+				// Cap line, dashed.
+				const dash = 10 * unit;
+				for (let x = left + inset * 2; x + dash <= left + boxWidth - inset * 2; x += dash * 2) {
+					add([
+						{ x, y: capLine },
+						{ x: x + dash, y: capLine },
+					]);
+				}
+				// The character to write, small, top left.
+				write(char, left + inset * 2.2, top + inset + 22 * unit, 18 * unit, PEN_COLOR.grey);
+				return;
+			}
+			// Version 2: the reference, written at full size on the same lines
+			// the owner writes on, so where every part belongs can be read off.
+			const baseline = top + boxHeight * 0.66;
+			const cap = boxHeight * 0.4;
+			const capLine = baseline - cap;
+			const xLine = baseline - cap * 0.66;
+			const descLine = baseline + cap * 0.38;
 			boxes.push({ char, page: p + 1, left, top, width: boxWidth, height: boxHeight, baseline, capLine });
 			const inset = 6 * unit;
-			// Frame.
+			const right = left + boxWidth - inset;
 			add([
 				{ x: left + inset, y: top + inset },
-				{ x: left + boxWidth - inset, y: top + inset },
-				{ x: left + boxWidth - inset, y: top + boxHeight - inset },
+				{ x: right, y: top + inset },
+				{ x: right, y: top + boxHeight - inset },
 				{ x: left + inset, y: top + boxHeight - inset },
 				{ x: left + inset, y: top + inset },
 			]);
-			// Baseline, solid.
-			add([
-				{ x: left + inset * 2, y: baseline },
-				{ x: left + boxWidth - inset * 2, y: baseline },
-			]);
-			// Cap line, dashed.
-			const dash = 10 * unit;
-			for (let x = left + inset * 2; x + dash <= left + boxWidth - inset * 2; x += dash * 2) {
+			// The reference, in black so it stands out from the grey guides: a
+			// character at writing size in its own column, shrunk only when it
+			// would not fit; a word above the guides, where no line crosses it.
+			const column = words ? 0 : boxWidth * 0.44;
+			if (words) {
+				const wordCap = Math.min(cap * 0.42, (capLine - top - inset * 3) * 0.85);
+				write(char, left + inset * 2.5, capLine - inset * 2.5, wordCap, PEN_COLOR.black);
+			} else {
+				const natural = label.widthOfTextAtSize(char, cap / CAP_RATIO);
+				const refCap = natural > column * 0.8 ? (cap * column * 0.8) / natural : cap;
+				const refWidth = label.widthOfTextAtSize(char, refCap / CAP_RATIO);
+				write(char, left + (column - refWidth) / 2 + inset / 2, baseline, refCap, PEN_COLOR.black);
+				// Where the reference ends and the writing space begins.
 				add([
-					{ x, y: capLine },
-					{ x: x + dash, y: capLine },
+					{ x: left + column, y: top + inset * 3 },
+					{ x: left + column, y: top + boxHeight - inset * 3 },
 				]);
 			}
-			// The character to write, small, top left.
-			write(char, left + inset * 2.2, top + inset + 22 * unit, 18 * unit, PEN_COLOR.grey);
+			// Guides across the box: cap dashed, x-height and descender dotted,
+			// baseline solid.
+			const from = left + inset * 2;
+			const to = right - inset;
+			const dashed = (y: number, dash: number, gap: number) => {
+				for (let x = from; x + dash <= to; x += dash + gap) {
+					add([
+						{ x, y },
+						{ x: x + dash, y },
+					]);
+				}
+			};
+			dashed(capLine, 10 * unit, 10 * unit);
+			dashed(xLine, 3 * unit, 9 * unit);
+			dashed(descLine, 3 * unit, 9 * unit);
+			add([
+				{ x: from, y: baseline },
+				{ x: to, y: baseline },
+			]);
 		});
 		pages.push(strokes);
 	}
@@ -312,7 +396,7 @@ export function learnHand(
 	previous: HandLibrary | null = null,
 	now: () => Date = () => new Date(),
 ): LearnResult {
-	const sheet = buildSheet(pending.profile);
+	const sheet = buildSheet(pending.profile, "letters", pending.version);
 	const found = new Map<string, number[][]>();
 	pending.pageIds.forEach((pageId, index) => {
 		const bytes = pages.get(pageId);
@@ -387,7 +471,7 @@ export function learnHand(
 			glyphs,
 		},
 		learned: learned.sort(),
-		skipped: [...SHEET_CHARS].filter((ch) => !found.has(ch) && !(ch in glyphs)),
+		skipped: [...(SHEET_CHARSETS[pending.version] ?? SHEET_CHARS)].filter((ch) => !found.has(ch) && !(ch in glyphs)),
 	};
 }
 
@@ -399,7 +483,7 @@ export function learnWords(
 	pending: PendingSheet,
 	pages: Map<string, Uint8Array>,
 ): Record<string, { x: number; y: number }[][]> {
-	const sheet = buildSheet(pending.profile, "words");
+	const sheet = buildSheet(pending.profile, "words", pending.version);
 	const found: Record<string, { x: number; y: number }[][]> = {};
 	pending.pageIds.forEach((pageId, index) => {
 		const bytes = pages.get(pageId);

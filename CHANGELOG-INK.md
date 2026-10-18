@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A clearer handwriting sheet with more characters:** each box shows its
+  character in black at writing size beside the writing space, on the same
+  lines — cap (dashed), x-height and descender (dotted) and baseline (solid) —
+  so where every part belongs can be read off. New boxes: `[ ] { } < > « »
+  „ “ ” ‘ ’ ^ ~ _ | \ $ £ ° … –` and ✓ ✗ → ← ↑ ↓. The word sheet shows each
+  word above its lines. A sheet sent before is still read with its own layout.
+- **Check marks, crosses and arrows** in a note (✓ ✔ ✗ ✘ → ← ↔ ↑ ↓) are now
+  written as such — in your hand once learned — instead of `?` or `->`;
+  notebooks sent earlier keep their look.
 - **Joined-up handwriting, learned from you:** the built-in reader compares a
   whole word's trace with words you wrote before. It learns from every remark
   text you correct or type in under an image, and from a new **word sheet** of

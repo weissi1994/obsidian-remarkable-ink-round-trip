@@ -42,8 +42,13 @@ function inflateContentStreams(bytes: Uint8Array): string {
 
 describe("toWinAnsi", () => {
 	it("keeps WinAnsi typography and falls back only for what WinAnsi lacks (GP_E5_S7)", () => {
-		expect(toWinAnsi("a → b — 'x' … ≤5")).toBe("a -> b — 'x' … <=5");
+		expect(toWinAnsi("a → b — 'x' … ≤5", 8)).toBe("a -> b — 'x' … <=5");
 		expect(toWinAnsi("‘q’ “r” – • s")).toBe("‘q’ “r” – • s");
+	});
+
+	it("keeps check marks, crosses and arrows for handwriting since typo 9", () => {
+		expect(toWinAnsi("a → b ✓ done ✗ ↑ ✔")).toBe("a → b ✓ done ✗ ↑ ✔");
+		expect(toWinAnsi("a → b ✓", 8)).toBe("a -> b ?");
 	});
 
 	it("replays the pre-0.29 ASCII fallbacks for typo-version-1 documents", () => {

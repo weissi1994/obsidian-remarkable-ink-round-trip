@@ -35,9 +35,14 @@ import {
  * that is one whole bold or italic span renders in that font); version 8 =
  * current (fork: a mermaid fence whose dimensions were recorded per upload
  * renders as an image block instead of code — replay is gated on the
- * recorded `images` list, so pre-fork documents rebuild unchanged).
+ * recorded `images` list, so pre-fork documents rebuild unchanged); version
+ * 9 = handwriting only: check marks, crosses and arrows are drawn as such
+ * instead of becoming "?" or "->".
  */
-export const TYPO_VERSION = 8;
+export const TYPO_VERSION = 9;
+
+/** Symbols a handwritten page draws itself since typo 9 (see glyphs.ts SHAPES). */
+const DRAWN_SYMBOLS = "✓✔☑✗✘✕✖→←↔↑↓";
 
 export interface PdfLayoutOptions {
 	/** Base body font size in points. */
@@ -215,7 +220,9 @@ const LEGACY_REPLACEMENTS: Record<string, string> = {
 export function toWinAnsi(text: string, typo: number = TYPO_VERSION): string {
 	let out = "";
 	for (const ch of text.normalize("NFC")) {
-		if (typo < 2 && ch in LEGACY_REPLACEMENTS) {
+		if (typo >= 9 && DRAWN_SYMBOLS.includes(ch)) {
+			out += ch;
+		} else if (typo < 2 && ch in LEGACY_REPLACEMENTS) {
 			out += LEGACY_REPLACEMENTS[ch];
 		} else if (ch in REPLACEMENTS) {
 			out += REPLACEMENTS[ch];

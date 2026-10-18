@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RM_V6_HEADER, parseRmPage } from "../incoming/rmlines";
+import { builtinFont, resolveGlyph } from "../ink/glyphs";
 
 /**
  * Build a `.rm` v6 file holding one glyph block — the shape the tablet writes
@@ -103,5 +104,34 @@ describe("parseRmPage on glyph blocks", () => {
 	it("returns nothing for a file that is not v6", () => {
 		const page = parseRmPage(new Uint8Array([1, 2, 3]));
 		expect(page).toEqual({ strokes: [], highlights: [], blockTypes: {} });
+	});
+});
+
+describe("drawn symbols", () => {
+	it("draws check, cross and arrows no font carries, look-alikes included", () => {
+		const f = builtinFont("readability");
+		for (const ch of ["✓", "✗", "→", "←", "↑", "↓", "↔"]) {
+			const glyph = resolveGlyph(ch, f, f);
+			expect(glyph.strokes.length, ch).toBeGreaterThan(0);
+			expect(glyph.strokes[0]).not.toEqual([0.05, 0, 0.5, 0, 0.5, 0.75, 0.05, 0.75, 0.05, 0]);
+		}
+		expect(resolveGlyph("✔", f, f)).toEqual(resolveGlyph("✓", f, f));
+		expect(resolveGlyph("✘", f, f)).toEqual(resolveGlyph("✗", f, f));
+	});
+});
+
+describe("symbols in a handwritten note", () => {
+	it("writes ✓ and → as drawn symbols, and an older send as before", async () => {
+		const { parseBlocks } = await import("../convert/mdblocks");
+		const { renderInk, DEVICE_PROFILES, INK_PENS } = await import("../ink/inkrender");
+		const { HandFont } = await import("../ink/glyphs");
+		const f = builtinFont("readability");
+		const face = new HandFont(f, f);
+		const options = { profile: DEVICE_PROFILES.rm2, fonts: { body: face, bold: face, italic: face, mono: face }, pen: INK_PENS.medium, jitter: 0, seed: "s" };
+		const words = (typo?: number) =>
+			renderInk(parseBlocks("done ✓ next → later"), "t", typo === undefined ? {} : { typo }, options).layout.lines
+				.flatMap((l) => l.words.map((w) => w.text));
+		expect(words()).toEqual(expect.arrayContaining(["✓", "→"]));
+		expect(words(8)).toEqual(expect.arrayContaining(["?", "->"]));
 	});
 });

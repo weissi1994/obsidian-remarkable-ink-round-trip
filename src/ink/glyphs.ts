@@ -221,6 +221,33 @@ function sequence(parts: Glyph[]): Glyph {
 	return { advance: cursor, strokes };
 }
 
+/**
+ * Symbols no bundled font carries, drawn as a pen would (cap units, y up):
+ * check, cross and arrows — common in notes, and what the handwriting sheet
+ * shows for the owner to copy.
+ */
+const SHAPES: Record<string, Glyph> = {
+	"✓": { advance: 0.8, strokes: [[0.08, 0.38, 0.3, 0.08, 0.72, 0.72]] },
+	"✗": {
+		advance: 0.74,
+		strokes: [
+			[0.1, 0.66, 0.64, 0.04],
+			[0.64, 0.66, 0.1, 0.04],
+		],
+	},
+	"→": { advance: 0.95, strokes: [[0.06, 0.35, 0.85, 0.35], [0.62, 0.55, 0.86, 0.35, 0.62, 0.15]] },
+	"←": { advance: 0.95, strokes: [[0.89, 0.35, 0.1, 0.35], [0.33, 0.55, 0.09, 0.35, 0.33, 0.15]] },
+	"↔": {
+		advance: 1.05,
+		strokes: [[0.08, 0.35, 0.97, 0.35], [0.3, 0.55, 0.07, 0.35, 0.3, 0.15], [0.75, 0.55, 0.98, 0.35, 0.75, 0.15]],
+	},
+	"↑": { advance: 0.6, strokes: [[0.3, 0, 0.3, 0.75], [0.1, 0.52, 0.3, 0.76, 0.5, 0.52]] },
+	"↓": { advance: 0.6, strokes: [[0.3, 0.75, 0.3, 0], [0.1, 0.23, 0.3, -0.01, 0.5, 0.23]] },
+};
+
+/** Look-alikes drawn with the same shape. */
+const SHAPE_ALIASES: Record<string, string> = { "✔": "✓", "☑": "✓", "✘": "✗", "✕": "✗", "✖": "✗" };
+
 /** A box with a question mark: what a character no source can draw becomes. */
 function missingGlyph(): Glyph {
 	return {
@@ -246,6 +273,11 @@ export function resolveGlyph(
 		if (options !== undefined && options.length > 0) {
 			return options[Math.abs(variant) % options.length];
 		}
+	}
+	const shape = SHAPES[SHAPE_ALIASES[ch] ?? ch];
+	if (shape !== undefined) {
+		if (SHAPE_ALIASES[ch] !== undefined) return resolveGlyph(SHAPE_ALIASES[ch], primary, fallback, variant, depth + 1);
+		return shape;
 	}
 	if (depth > 2) return missingGlyph();
 	const decomposed = ch.normalize("NFD");

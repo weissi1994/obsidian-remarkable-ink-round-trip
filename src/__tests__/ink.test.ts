@@ -369,12 +369,20 @@ describe("ink import end to end", () => {
 	});
 });
 
-import { buildSheet, handSource, learnHand, SHEET_CHARS, sheetPagesToRm } from "../ink/handsheet";
+import {
+	buildSheet,
+	handSource,
+	learnHand,
+	SHEET_CHARS,
+	SHEET_CHARSETS,
+	SHEET_VERSION,
+	sheetPagesToRm,
+} from "../ink/handsheet";
 
 describe("handwriting capture", () => {
 	/** Fill a sheet "by hand", using a script font as the owner's writing. */
-	function filledSheet(profile = DEVICE_PROFILES.rm2, skip = "") {
-		const sheet = buildSheet(profile);
+	function filledSheet(profile = DEVICE_PROFILES.rm2, skip = "", version = SHEET_VERSION) {
+		const sheet = buildSheet(profile, "letters", version);
 		const hand = builtinFont("hershey-script");
 		const pages = sheetPagesToRm(sheet, profile);
 		const pageIds = pages.map((_, i) => `sheet-${i + 1}`);
@@ -406,6 +414,27 @@ describe("handwriting capture", () => {
 		return { sheet, pageIds, filled, profile };
 	}
 
+	it("still reads back a sheet sent with the first layout", () => {
+		const { pageIds, filled, profile } = filledSheet(DEVICE_PROFILES.rm2, "", 1);
+		const result = learnHand({ deviceDocId: "s", pageIds, profile, version: 1 }, filled);
+		expect(result.learned.join("")).toBe([...SHEET_CHARSETS[1]].filter((ch) => builtinFont("hershey-script").glyphs.has(ch)).sort().join(""));
+		expect(buildSheet(profile, "letters", 1).boxes.map((b) => b.char).join("")).toBe(SHEET_CHARSETS[1]);
+	});
+
+	it("puts a full-size reference beside each box's writing space, on the same guides", () => {
+		const profile = DEVICE_PROFILES.rm2;
+		const sheet = buildSheet(profile);
+		const box = sheet.boxes.find((b) => b.char === "g")!;
+		// Reference strokes sit in the left column and reach below the baseline.
+		const inBox = sheet.pages[box.page - 1].filter((s) =>
+			s.points.every((p) => p.x >= box.left && p.x <= box.left + box.width * 0.4 && p.y > box.top && p.y < box.top + box.height),
+		);
+		const lowest = Math.max(...inBox.flatMap((s) => s.points.map((p) => p.y)));
+		expect(lowest).toBeGreaterThan(box.baseline);
+		expect(SHEET_CHARS).toContain("„");
+		expect(SHEET_CHARS).not.toContain("§");
+	});
+
 	it("lays the whole charset out on the canvas", () => {
 		for (const profile of Object.values(DEVICE_PROFILES)) {
 			const sheet = buildSheet(profile);
@@ -420,7 +449,7 @@ describe("handwriting capture", () => {
 
 	it("learns a glyph per filled box and skips the empty ones", () => {
 		const { pageIds, filled, profile } = filledSheet(DEVICE_PROFILES.move, "XQ");
-		const result = learnHand({ deviceDocId: "s", pageIds, profile, version: 1 }, filled);
+		const result = learnHand({ deviceDocId: "s", pageIds, profile, version: SHEET_VERSION }, filled);
 		expect(result.skipped).toEqual(expect.arrayContaining(["X", "Q"]));
 		expect(result.learned).toContain("a");
 		const a = result.library.glyphs.a[0];
@@ -433,8 +462,8 @@ describe("handwriting capture", () => {
 
 	it("adds variants on a second sheet and writes notes in the learned hand", () => {
 		const { pageIds, filled, profile } = filledSheet();
-		const first = learnHand({ deviceDocId: "s", pageIds, profile, version: 1 }, filled);
-		const second = learnHand({ deviceDocId: "s", pageIds, profile, version: 1 }, filled, first.library);
+		const first = learnHand({ deviceDocId: "s", pageIds, profile, version: SHEET_VERSION }, filled);
+		const second = learnHand({ deviceDocId: "s", pageIds, profile, version: SHEET_VERSION }, filled, first.library);
 		expect(second.library.glyphs.e.length).toBe(2);
 		const snapshot: InkSnapshot = { ...SNAPSHOT, font: "hand", hand: second.library.version };
 		const options = inkOptionsFor(snapshot, "doc-2", (version) =>
