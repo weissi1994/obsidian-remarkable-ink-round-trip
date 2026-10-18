@@ -193,10 +193,11 @@ export class InkEdge {
 		return this.readJson<SentRecord>(`${this.dir}/sent/${docId}.json`);
 	}
 
-	upload(api: RawSyncApi, name: string, pages: Uint8Array[], parentId?: string) {
-		return sendNotebook(api, name, pages, { parentId }).then((result) => ({
+	upload(api: RawSyncApi, name: string, pages: Uint8Array[], parentId?: string, replaces?: string) {
+		return sendNotebook(api, name, pages, { parentId, replaces }).then((result) => ({
 			deviceDocId: result.docId,
 			pageIds: result.pageIds,
+			replaced: result.replaced === true,
 		}));
 	}
 

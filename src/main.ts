@@ -114,6 +114,8 @@ export default class RoundTripPlugin extends Plugin {
 	/** Unknown data.json keys, preserved across saves (see extrasFrom). */
 	private extraData: Record<string, unknown> = {};
 	private syncRunning: Promise<void> | null = null;
+	/** Progress of the upload batch running now, for the status panel. */
+	private uploading: { done: number; total: number } | null = null;
 	/** Built-in OCR: templates per handwriting version, the vault's words per run. */
 	private templates: { key: string; templates: Template[] } | null = null;
 	private lexicon: Promise<Lexicon> | null = null;
@@ -350,6 +352,7 @@ export default class RoundTripPlugin extends Plugin {
 				live: {
 					...this.syncCoordinator.status(),
 					pendingChanges: this.watchQueue?.status().pendingChanges ?? 0,
+					uploading: this.uploading ?? undefined,
 				},
 			}),
 		}).open();
@@ -720,6 +723,7 @@ export default class RoundTripPlugin extends Plugin {
 						`Sending 0/${queuedNotes.length} to reMarkable…`,
 						{ done: 0, total: queuedNotes.length },
 					);
+					this.uploading = { done: 0, total: queuedNotes.length };
 					try {
 						const activeMirror = mirror;
 						const activeRaw = rawApi;
@@ -733,7 +737,7 @@ export default class RoundTripPlugin extends Plugin {
 											return Promise.reject(new Error("The reMarkable sync API is not available right now."));
 										}
 										return this.ink
-											.upload(activeRaw, visibleName, pages, uploadOptions.parentId)
+											.upload(activeRaw, visibleName, pages, uploadOptions.parentId, uploadOptions.replaces)
 											.catch((error: unknown) => {
 												throw toTransportError(error);
 											});
@@ -779,12 +783,10 @@ export default class RoundTripPlugin extends Plugin {
 								frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
 								skipUnchanged: options.auto === true,
 							},
-							(done, total) =>
-								updateProgress(
-									notice,
-									`Sending ${done}/${total} to reMarkable…`,
-									{ done, total },
-								),
+							(done, total) => {
+								this.uploading = { done, total };
+								updateProgress(notice, `Sending ${done}/${total} to reMarkable…`, { done, total });
+							},
 							async (checkpoint) => {
 								this.settings.mappings = checkpoint;
 								await this.persistSettings();
@@ -798,6 +800,7 @@ export default class RoundTripPlugin extends Plugin {
 							quiet: options.background === true,
 						});
 					} finally {
+						this.uploading = null;
 						notice.hide();
 					}
 				},

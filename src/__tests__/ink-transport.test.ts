@@ -51,7 +51,12 @@ function fakeApi(failRootHashTimes = 0) {
 			return Promise.resolve([hash, generation]);
 		},
 	};
-	return { api, texts, rootList: () => (root ? (lists.get(root.hash) ?? []) : []) };
+	return {
+		api,
+		texts,
+		rootList: () => (root ? (lists.get(root.hash) ?? []) : []),
+		rootWrites: () => generation - 1,
+	};
 }
 
 describe("notebook upload", () => {
@@ -74,6 +79,22 @@ describe("notebook upload", () => {
 		const read = await readNotebook(api, docId);
 		expect(read.pages.map((p) => p.pageId)).toEqual(pageIds);
 		expect([...read.pages[1].bytes]).toEqual([4, 5]);
+	});
+
+	it("trashes the notebook it replaces in the same root update", async () => {
+		const { api, texts, rootList, rootWrites } = fakeApi();
+		const old = await uploadNotebook(api, "Plan", [new Uint8Array([1])], { now: () => 1 });
+		const before = rootWrites();
+		const next = await uploadNotebook(api, "Plan", [new Uint8Array([2])], { now: () => 2, replaces: old.docId });
+		expect(next.replaced).toBe(true);
+		expect(rootWrites() - before).toBe(1);
+		expect(JSON.parse(texts.get(`${old.docId}.metadata`)!)).toMatchObject({ parent: "trash", visibleName: "Plan" });
+		const ids = rootList().map((e) => e.id);
+		expect(ids).toEqual(expect.arrayContaining([old.docId, next.docId]));
+		expect(ids.filter((id) => id === old.docId)).toHaveLength(1);
+		// A notebook already gone from the account is simply not trashed.
+		const third = await uploadNotebook(api, "Plan", [new Uint8Array([3])], { now: () => 3, replaces: "gone" });
+		expect(third.replaced).toBe(false);
 	});
 
 	it("retries a generation conflict onto the same document", async () => {

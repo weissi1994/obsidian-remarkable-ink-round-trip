@@ -116,6 +116,7 @@ export const ACCENT_COLORS: Record<Exclude<HighlightKind, "mark">, number> = {
 	"code": PEN_COLOR.blue,
 	"inline-code": PEN_COLOR.pink,
 	"quote": PEN_COLOR.yellow,
+	"table-header": PEN_COLOR.grey,
 };
 
 /** The placeholder line preprocessing leaves for an image embed. */

@@ -3,6 +3,8 @@ import type { SyncQueueStatus } from "./queues";
 
 export interface LiveSyncStatus extends SyncQueueStatus {
 	pendingChanges: number;
+	/** Notes done and in the running upload batch, when one runs. */
+	uploading?: { done: number; total: number };
 }
 
 export interface SyncStatusSummary {
@@ -34,7 +36,9 @@ export function buildSyncStatusSummary(input: {
 		input.live.active === "folder"
 			? "Preparing device folders"
 			: input.live.active === "push"
-				? "Uploading"
+				? input.live.uploading === undefined
+					? "Uploading"
+					: `Uploading ${input.live.uploading.done}/${input.live.uploading.total}`
 				: input.live.active === "pull"
 					? "Importing"
 					: input.live.queuedFolders +

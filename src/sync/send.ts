@@ -44,8 +44,9 @@ export interface SendDeps {
 		uploadInk(
 			visibleName: string,
 			pages: Uint8Array[],
-			options: { parentId?: string },
-		): Promise<UploadResult & { pageIds: string[] }>;
+			/** `replaces`: the previous notebook, trashed in the same cloud update. */
+			options: { parentId?: string; replaces?: string },
+		): Promise<UploadResult & { pageIds: string[]; replaced?: boolean }>;
 	};
 	/** Turn a note into handwritten pages. */
 	ink: {
@@ -190,12 +191,16 @@ export async function sendNote(
 			images: rendered.snapshot.imageStyle === undefined ? undefined : images,
 			drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
 		});
-		const upload = await deps.client.uploadInk(note.basename, rendered.pages, { parentId });
+		const upload = await deps.client.uploadInk(note.basename, rendered.pages, {
+			parentId,
+			replaces: deps.replacePrevious === undefined ? undefined : current?.deviceDocId,
+		});
 		const inkSnapshot: InkSnapshot = { ...rendered.snapshot, pageIds: upload.pageIds };
 
 		const previous = table[docId];
 		if (
 			deps.replacePrevious &&
+			upload.replaced !== true &&
 			previous !== undefined &&
 			previous.deviceDocId !== upload.deviceDocId
 		) {
@@ -248,19 +253,14 @@ export async function sendBatch(
 ): Promise<{ results: SendResult[]; table: MappingTable }> {
 	const results: SendResult[] = [];
 	let current = table;
-	let successfulSinceCheckpoint = 0;
 	for (const note of notes) {
 		const { result, table: updated } = await sendNote(note, current, deps);
 		current = updated;
 		results.push(result);
 		onProgress?.(results.length, notes.length, result);
-		if (notes.length > 20 && result.ok) {
-			successfulSinceCheckpoint += 1;
-			if (successfulSinceCheckpoint === 20) {
-				await onCheckpoint?.(current);
-				successfulSinceCheckpoint = 0;
-			}
-		}
+		// Every notebook that landed is recorded at once: a batch interrupted
+		// half-way must not send them again — the cloud limits how fast it goes.
+		if (notes.length > 1 && result.ok && result.skipped !== true) await onCheckpoint?.(current);
 	}
 	return { results, table: current };
 }

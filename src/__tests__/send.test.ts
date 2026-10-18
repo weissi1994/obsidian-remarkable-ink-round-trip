@@ -260,7 +260,7 @@ describe("sendBatch", () => {
 		expect(progress).toEqual([1, 2]);
 	});
 
-	it("checkpoints a large batch after every 20 successful uploads", async () => {
+	it("records every landed upload of a batch at once", async () => {
 		const { deps } = makeDeps();
 		const checkpoints: number[] = [];
 		const notes = Array.from({ length: 45 }, (_, index) => ({
@@ -279,7 +279,8 @@ describe("sendBatch", () => {
 			},
 		);
 
-		expect(checkpoints).toEqual([20, 40]);
+		expect(checkpoints).toHaveLength(45);
+		expect(checkpoints[44]).toBe(45);
 		expect(Object.keys(table)).toHaveLength(45);
 	});
 });

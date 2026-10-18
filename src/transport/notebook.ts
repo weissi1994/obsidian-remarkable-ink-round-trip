@@ -37,6 +37,8 @@ export interface RawEntry {
 export interface NotebookUploadResult {
 	docId: string;
 	pageIds: string[];
+	/** The replaced notebook was found and moved to the trash. */
+	replaced?: boolean;
 }
 
 /** RFC4122-v4-shaped id from crypto randomness (same approach as docid.ts). */
@@ -55,6 +57,11 @@ export interface NotebookUploadOptions {
 	now?: () => number;
 	/** Device template per page; "Blank" is a stock template on every model. */
 	template?: string;
+	/**
+	 * A notebook this one replaces: moved to the trash in the same root
+	 * update, instead of a second write of the account's whole root index.
+	 */
+	replaces?: string;
 }
 
 /** The content JSON for a notebook of `pageIds` (fields modern firmware writes). */
@@ -128,9 +135,15 @@ export async function uploadNotebook(
 		api.getEntries("root.docSchema", rootHash),
 	]);
 
+	const trashed =
+		options.replaces === undefined ? null : await trashedEntry(api, rootEntries, options.replaces, timestamp, schemaVersion);
 	const [rootEntry, uploadRoot] = await api.putEntries(
 		"root",
-		[...rootEntries.filter((entry) => entry.id !== docId), collectionEntry],
+		[
+			...rootEntries.filter((entry) => entry.id !== docId && entry.id !== trashed?.entry.id),
+			...(trashed === null ? [] : [trashed.entry]),
+			collectionEntry,
+		],
 		4,
 	);
 	await Promise.all([
@@ -140,9 +153,46 @@ export async function uploadNotebook(
 		...fileUploads.map(([, upload]) => upload),
 		uploadCollection,
 		uploadRoot,
+		...(trashed === null ? [] : trashed.uploads),
 	]);
 	await api.putRootHash(rootEntry.hash, generation);
-	return { docId, pageIds };
+	return { docId, pageIds, replaced: trashed !== null };
+}
+
+/**
+ * The root entry of `docId` with its metadata moved to the trash, or null when
+ * the document is not on the account (already gone) or unreadable.
+ */
+async function trashedEntry(
+	api: RawSyncApi,
+	rootEntries: RawEntry[],
+	docId: string,
+	timestamp: string,
+	schemaVersion: number,
+): Promise<{ entry: RawEntry; uploads: Promise<void>[] } | null> {
+	const current = rootEntries.find((entry) => entry.id === docId);
+	if (current === undefined) return null;
+	try {
+		const { entries } = await api.getEntries(`${docId}.docSchema`, current.hash);
+		const metaEntry = entries.find((entry) => entry.id === `${docId}.metadata`);
+		if (metaEntry === undefined) return null;
+		const metadata = JSON.parse(new TextDecoder().decode(await api.getHash(metaEntry.id, metaEntry.hash))) as Record<
+			string,
+			unknown
+		>;
+		const [newMeta, uploadMeta] = await api.putText(
+			`${docId}.metadata`,
+			JSON.stringify({ ...metadata, parent: "trash", lastModified: timestamp }),
+		);
+		const [entry, uploadEntries] = await api.putEntries(
+			docId,
+			entries.map((e) => (e.id === metaEntry.id ? newMeta : e)),
+			schemaVersion,
+		);
+		return { entry, uploads: [uploadMeta, uploadEntries] };
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -153,7 +203,7 @@ export async function sendNotebook(
 	api: RawSyncApi,
 	visibleName: string,
 	pages: Uint8Array[],
-	options: { parentId?: string; retry?: RetryOptions; now?: () => number } = {},
+	options: { parentId?: string; retry?: RetryOptions; now?: () => number; replaces?: string } = {},
 ): Promise<NotebookUploadResult> {
 	const docId = uuid4();
 	const pageIds = pages.map(() => uuid4());
@@ -164,6 +214,7 @@ export async function sendNotebook(
 				docId,
 				pageIds,
 				now: options.now,
+				replaces: options.replaces,
 			}),
 		options.retry,
 	);

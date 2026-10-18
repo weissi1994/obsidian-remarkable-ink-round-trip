@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Tables with a full grid:** an outer border, lines between columns and
+  under every row, a heavier rule under the header (with a light grey band
+  when colour accents are on), and padded cells so no line touches the text.
+  Columns no longer break a word they have room for. Notebooks sent earlier
+  keep their old tables.
+- **Faster, steadier re-sends:** the notebook a re-send replaces is moved to the
+  trash in the same cloud update as the upload, halving the writes to the
+  account's root index — fewer rate-limit waits and fewer clashes with the
+  tablet syncing at the same time. Every landed upload is recorded at once, and
+  the sync status shows the running batch (*Uploading 12/80*).
 - **A clearer handwriting sheet with more characters:** each box shows its
   character in black at writing size beside the writing space, on the same
   lines — cap (dashed), x-height and descender (dotted) and baseline (solid) —

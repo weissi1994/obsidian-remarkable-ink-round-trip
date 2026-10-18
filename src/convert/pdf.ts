@@ -37,9 +37,10 @@ import {
  * renders as an image block instead of code — replay is gated on the
  * recorded `images` list, so pre-fork documents rebuild unchanged); version
  * 9 = handwriting only: check marks, crosses and arrows are drawn as such
- * instead of becoming "?" or "->".
+ * instead of becoming "?" or "->"; version 10 = tables get a full grid —
+ * border, column and row lines — with padded cells.
  */
-export const TYPO_VERSION = 9;
+export const TYPO_VERSION = 10;
 
 /** Symbols a handwritten page draws itself since typo 9 (see glyphs.ts SHAPES). */
 const DRAWN_SYMBOLS = "✓✔☑✗✘✕✖→←↔↑↓";
@@ -306,7 +307,7 @@ export interface DrawPage {
 	drawPng?(block: Block, options: { x: number; y: number; width: number; height: number }): void;
 }
 
-export type HighlightKind = "code" | "inline-code" | "quote" | "mark";
+export type HighlightKind = "code" | "inline-code" | "quote" | "mark" | "table-header";
 
 /** Fonts and pages: everything a typesetting pass draws with. */
 export interface TypesetBackend {
@@ -816,6 +817,66 @@ function drawCode(ts: Typesetter, codeLines: string[]): void {
 }
 
 /**
+ * Table rows in a full grid (typo 10): each row draws its own sides, column
+ * lines and bottom rule, so a table broken across pages stays closed on both
+ * — a row that starts a page draws the top border again.
+ */
+function drawGridRows(
+	ts: Typesetter,
+	rows: string[][],
+	plans: { writing: boolean; label: boolean; cellLines: string[][]; height: number }[],
+	g: { size: number; step: number; total: number; offsets: number[]; inset: number; padTop: number; padBottom: number },
+): void {
+	const left = ts.opts.margin;
+	const right = ts.opts.margin + g.total;
+	const border = rgb(0.25, 0.25, 0.25);
+	const inner = rgb(0.6, 0.6, 0.6);
+	const hline = (y: number, thickness: number, color: DrawColor) =>
+		ts.page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness, color });
+	const vlines = (top: number, bottom: number) => {
+		ts.page.drawLine({ start: { x: left, y: top }, end: { x: left, y: bottom }, thickness: 0.8, color: border });
+		ts.page.drawLine({ start: { x: right, y: top }, end: { x: right, y: bottom }, thickness: 0.8, color: border });
+		for (const offset of g.offsets.slice(1)) {
+			const x = left + offset;
+			ts.page.drawLine({ start: { x, y: top }, end: { x, y: bottom }, thickness: 0.5, color: inner });
+		}
+	};
+	let page = -1;
+	rows.forEach((row, rowIndex) => {
+		beginBlock(ts, "table", rowIndex);
+		const plan = plans[rowIndex];
+		ensureRoom(ts, Math.min(plan.height, ts.opts.pageHeight - 2 * ts.opts.margin));
+		const top = ts.y;
+		// A row opening the table or a page closes the grid above it.
+		if (ts.pageIndex !== page) hline(top, 0.8, border);
+		page = ts.pageIndex;
+		if (rowIndex === 0) {
+			ts.page.drawHighlight?.({ x: left, y: top - plan.height, width: g.total, height: plan.height, kind: "table-header" });
+		}
+		let bottom = top - plan.height;
+		if (!plan.writing) {
+			const font = rowIndex === 0 ? ts.bold : ts.body;
+			let lowest = top - g.padTop;
+			row.forEach((_cell, c) => {
+				let y = top - g.padTop;
+				for (const line of plan.cellLines[c]) {
+					y -= g.step;
+					if (y < ts.opts.margin) break;
+					put(ts, line, left + g.offsets[c] + g.inset, y, g.size, font);
+				}
+				lowest = Math.min(lowest, y);
+			});
+			// A row taller than the page is cut where its text was cut.
+			bottom = Math.max(Math.min(bottom, lowest - g.padBottom), ts.opts.margin - g.padBottom);
+		}
+		vlines(top, bottom);
+		const last = rowIndex === rows.length - 1;
+		hline(bottom, rowIndex === 0 ? 1.3 : last ? 0.8 : 0.5, rowIndex === 0 || last ? border : inner);
+		ts.y = bottom;
+	});
+}
+
+/**
  * Distribute a table's total width over columns based on their natural
  * (content) widths. Fits naturally when there is room; otherwise columns
  * shrink proportionally, but never below `minWidth` (or their own natural
@@ -826,10 +887,15 @@ export function computeColumnWidths(
 	naturals: number[],
 	total: number,
 	minWidth = 56,
+	/** Per column, the width below which a word would have to break (typo 10). */
+	words?: number[],
 ): number[] {
 	const sum = naturals.reduce((a, b) => a + b, 0);
 	if (sum <= total) return [...naturals];
-	const floors = naturals.map((n) => Math.min(minWidth, n));
+	const base = naturals.map((n) => Math.min(minWidth, n));
+	// Room for each column's longest word, as long as all of them fit.
+	const wordFloors = words === undefined ? base : base.map((floor, i) => Math.min(naturals[i], Math.max(floor, words[i])));
+	const floors = wordFloors.reduce((a, b) => a + b, 0) <= total ? wordFloors : base;
 	const flexTotal = total - floors.reduce((a, b) => a + b, 0);
 	const flexNat = naturals.map((n, i) => n - floors[i]);
 	const flexSum = flexNat.reduce((a, b) => a + b, 0);
@@ -857,7 +923,23 @@ function drawTable(ts: Typesetter, rows: string[][]): void {
 			}),
 		),
 	);
-	const widths = computeColumnWidths(naturals, total);
+	// Typo 10: no column narrower than its longest word, where they all fit.
+	const longestWords =
+		ts.opts.typo >= 10
+			? Array.from({ length: cols }, (_, c) =>
+					Math.max(
+						0,
+						...rows.flatMap((row, rowIndex) => {
+							const font = rowIndex === 0 ? ts.bold : ts.body;
+							return toWinAnsi(row[c] ?? "", ts.opts.typo)
+								.split(/\s+/)
+								.filter((w) => w !== "")
+								.map((w) => font.widthOfTextAtSize(w, size) + pad);
+						}),
+					),
+				)
+			: undefined;
+	const widths = computeColumnWidths(naturals, total, 56, longestWords);
 	const offsets = widths.map((_, c) => widths.slice(0, c).reduce((a, b) => a + b, 0));
 
 	// Plan every row up front: fill-in shapes (GP_E5_S5), wrapped cell lines
@@ -867,6 +949,11 @@ function drawTable(ts: Typesetter, rows: string[][]): void {
 	// that a log table can no longer share a page with its text (typo 5
 	// trimmed 2.4 to 2.0 on owner feedback; earlier uploads replay 2.4).
 	const writingSteps = ts.opts.typo >= 5 ? 2 : 2.4;
+	// Typo 10: a full grid, and room inside each cell so no line touches text.
+	const grid = ts.opts.typo >= 10;
+	const padTop = grid ? size * 0.3 : 0;
+	const padBottom = grid ? size * 0.45 : 0;
+	const inset = grid ? pad / 2 : 0;
 	const plans = rows.map((row, rowIndex) => {
 		// An all-empty body row is a fill-in row (GP_E5_S5): real writing
 		// height and a faint rule — a one-line sliver is useless under a pen.
@@ -888,8 +975,9 @@ function drawTable(ts: Typesetter, rows: string[][]): void {
 			wrapText(toWinAnsi(cell, ts.opts.typo), font, size, Math.max(widths[c] - pad, 24), ts.opts.typo),
 		);
 		const rowLines = Math.max(1, ...cellLines.map((lines) => lines.length));
-		const height =
-			(label ? Math.max(rowLines, writingSteps) : rowLines) * step + (rowIndex === 0 ? 6 : 0);
+		const height = grid
+			? (label ? Math.max(rowLines, writingSteps) : rowLines) * step + padTop + padBottom
+			: (label ? Math.max(rowLines, writingSteps) : rowLines) * step + (rowIndex === 0 ? 6 : 0);
 		return { writing, label, cellLines, height };
 	});
 
@@ -901,6 +989,12 @@ function drawTable(ts: Typesetter, rows: string[][]): void {
 		if (tableHeight <= ts.opts.pageHeight - 2 * ts.opts.margin) {
 			ensureRoom(ts, tableHeight);
 		}
+	}
+
+	if (grid) {
+		drawGridRows(ts, rows, plans, { size, step, total, offsets, inset, padTop, padBottom });
+		ts.y -= size * 0.8;
+		return;
 	}
 
 	rows.forEach((row, rowIndex) => {
