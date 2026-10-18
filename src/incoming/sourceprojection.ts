@@ -194,6 +194,11 @@ export interface ProjectionInput {
 	marks: ImportedMark[];
 	/** How each mark becomes markdown; defaults when not given. */
 	styles?: MarkStyles;
+	/**
+	 * Ink fork: what an erased handwritten word becomes in the copy —
+	 * removed (default) or kept as struck-through text.
+	 */
+	erasedAs?: "delete" | "strikethrough";
 }
 
 export interface ProjectionResult {
@@ -273,8 +278,64 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 		if (onLine > 0 && struck.size > onLine / 2) cancelled.add(line);
 	}
 
+	// Ink fork: words erased or moved on the tablet. They are edits to the
+	// text rather than markup around it. Removals are collected per WORD and
+	// merged into runs afterwards (removalEdits): a word range never spans a
+	// line, so no removal can eat a newline and every line index the passes
+	// below rely on still holds.
+	const erasedAs = input.erasedAs ?? "delete";
+	const erased = new Set<number>();
+	const removed: Range[] = [];
+	const edits: TextEdit[] = [];
 	for (const mark of input.marks) {
+		if (mark.kind !== "erased") continue;
 		const covered = (mark.words ?? []).map((id) => ranges.get(id)).filter(isRange);
+		if (covered.length === 0) continue;
+		for (const id of mark.words ?? []) erased.add(id);
+		if (erasedAs === "strikethrough") {
+			// One span per source line, so a strike never wraps a line break.
+			for (const group of groupByLine(covered, lineOf)) spans.push({ kind: "strikethrough", ...group });
+		} else {
+			removed.push(...covered);
+		}
+		placed++;
+	}
+	if (erasedAs === "strikethrough") erased.clear(); // struck words keep their marks
+	for (const mark of input.marks) {
+		if (mark.kind !== "moved") continue;
+		const ids = [...(mark.words ?? [])].sort((a, b) => a - b);
+		const anchorId = mark.moveAfter ?? mark.moveBefore;
+		const anchor = anchorId === undefined ? undefined : ranges.get(anchorId);
+		if (ids.length === 0 || anchor === undefined || anchorId === undefined) continue;
+		if (erased.has(anchorId) || ids.some((id) => erased.has(id) || !ranges.has(id))) continue;
+		// Only a contiguous run of words moves: a lasso across a gap would
+		// otherwise drag the words in between along.
+		if (ids.some((id, i) => i > 0 && id !== ids[i - 1] + 1)) continue;
+		const start = ranges.get(ids[0])!.start;
+		const end = ranges.get(ids[ids.length - 1])!.end;
+		if (anchor.start >= start && anchor.end <= end) continue; // into itself
+		const text = input.source.slice(start, end);
+		// A phrase spanning lines, or cutting through inline markup, is reported
+		// in the summary but not applied: moving half a **bold** span would
+		// re-bold the wrong words.
+		if (text.includes("\n") || !balancedInline(text)) continue;
+		for (const id of ids) removed.push(ranges.get(id)!);
+		edits.push(
+			mark.moveAfter !== undefined
+				? { at: afterMarkup(input.source, anchor.end), remove: 0, text: ` ${text}`, rank: 100 }
+				: { at: beforeMarkup(input.source, anchor.start), remove: 0, text: `${text} `, rank: -100 },
+		);
+		for (const id of ids) erased.add(id); // its old place keeps no markup
+		placed++;
+	}
+	edits.push(...removalEdits(input.source, removed));
+
+	for (const mark of input.marks) {
+		if (mark.kind === "erased" || mark.kind === "moved") continue;
+		const covered = (mark.words ?? [])
+			.filter((id) => !erased.has(id))
+			.map((id) => ranges.get(id))
+			.filter(isRange);
 		if (covered.length === 0) continue;
 		const line = lineOf(Math.min(...covered.map((range) => range.start)));
 		if (mark.kind === "checkbox" || mark.kind === "checkbox-cancel") {
@@ -299,7 +360,12 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	const unplaced: Highlight[] = [];
 	for (const highlight of input.highlights) {
 		const ids = wordIdsOf(words, highlight);
-		const covered = ids.map((id) => ranges.get(id)).filter(isRange);
+		// A highlight on erased or moved words must not put markup into text
+		// that is about to be removed (ink fork).
+		const covered = ids
+			.filter((id) => !erased.has(id))
+			.map((id) => ranges.get(id))
+			.filter(isRange);
 		if (covered.length === 0) {
 			unplaced.push(highlight);
 			continue;
@@ -314,7 +380,7 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 		placed++;
 	}
 
-	let markdown = applySpans(input.source, spans, input.styles);
+	let markdown = applySpans(input.source, spans, input.styles, edits);
 	// Before applyBlockMarks: that step inserts lines, and the task-state
 	// rewrite addresses lines by their untouched-source index (applySpans
 	// only inserts inline, so those indices still hold here).
@@ -380,6 +446,7 @@ function applySpans(
 	source: string,
 	spans: { kind: string; color?: number; rgb?: string; start: number; end: number }[],
 	styles: MarkStyles = DEFAULT_MARK_STYLES,
+	textEdits: TextEdit[] = [],
 ): string {
 	const merged: typeof spans = [];
 	for (const kind of KIND_ORDER) {
@@ -394,7 +461,7 @@ function applySpans(
 		}
 	}
 
-	const edits: { at: number; text: string; rank: number }[] = [];
+	const edits: TextEdit[] = [...textEdits];
 	// Spans arrive outermost-kind first, so a wrapper's own choice is settled
 	// before the marks nested inside it have to make theirs.
 	const html: Range[] = [];
@@ -408,17 +475,117 @@ function applySpans(
 		if (range === null) continue;
 		if (open.startsWith("<")) html.push(range);
 		const depth = KIND_ORDER.indexOf(span.kind);
-		edits.push({ at: range.start, text: open, rank: depth });
-		edits.push({ at: range.end, text: close, rank: -depth });
+		edits.push({ at: range.start, remove: 0, text: open, rank: depth });
+		edits.push({ at: range.end, remove: 0, text: close, rank: -depth });
 	}
 	// Apply back to front so earlier offsets stay valid; at one position the
-	// outer wrapper opens first and closes last.
-	edits.sort((a, b) => b.at - a.at || b.rank - a.rank);
+	// outer wrapper opens first and closes last. A removal at a position goes
+	// before any insertion there, so nothing just inserted is cut away.
+	edits.sort((a, b) => b.at - a.at || b.remove - a.remove || b.rank - a.rank);
 	let out = source;
 	for (const edit of edits) {
-		out = out.slice(0, edit.at) + edit.text + out.slice(edit.at);
+		out = out.slice(0, edit.at) + edit.text + out.slice(edit.at + edit.remove);
 	}
 	return out;
+}
+
+/** One change to the source: remove `remove` characters at `at`, insert `text`. */
+interface TextEdit {
+	at: number;
+	remove: number;
+	text: string;
+	rank: number;
+}
+
+/** Ranges grouped per source line, each as one start–end span. */
+function groupByLine(covered: Range[], lineOf: (offset: number) => number): Range[] {
+	const byLine = new Map<number, Range>();
+	for (const range of covered) {
+		const line = lineOf(range.start);
+		const current = byLine.get(line);
+		byLine.set(
+			line,
+			current === undefined
+				? { ...range }
+				: { start: Math.min(current.start, range.start), end: Math.max(current.end, range.end) },
+		);
+	}
+	return [...byLine.values()];
+}
+
+const EMPHASIS = new Set(["*", "_", "~", "="]);
+
+/**
+ * Turn removed word ranges into non-overlapping removals: words on one line
+ * separated only by spaces merge into one run; a run that empties an
+ * emphasis takes its delimiters with it (`**gone**` leaves no `****`); and
+ * each run takes exactly one neighbouring space — never a newline.
+ */
+function removalEdits(source: string, ranges: Range[]): TextEdit[] {
+	const sorted = [...ranges].sort((a, b) => a.start - b.start);
+	const runs: Range[] = [];
+	for (const range of sorted) {
+		const last = runs[runs.length - 1];
+		if (last !== undefined && /^[ \t]*$/.test(source.slice(last.end, range.start)) && range.start >= last.end) {
+			last.end = Math.max(last.end, range.end);
+		} else if (last !== undefined && range.start < last.end) {
+			last.end = Math.max(last.end, range.end);
+		} else {
+			runs.push({ ...range });
+		}
+	}
+	const edits: TextEdit[] = [];
+	let floor = 0;
+	for (const run of runs) {
+		let { start, end } = run;
+		// Widen over delimiters the run leaves empty: matching emphasis on both sides.
+		for (;;) {
+			let width = 0;
+			while (
+				width < 3 &&
+				start - width - 1 >= 0 &&
+				EMPHASIS.has(source[start - width - 1]) &&
+				source[end + width] === source[start - width - 1]
+			) {
+				width++;
+			}
+			if (width === 0) break;
+			start -= width;
+			end += width;
+		}
+		if (source[end] === " ") end++;
+		else if (start > floor && source[start - 1] === " ") start--;
+		start = Math.max(start, floor);
+		if (end <= start) continue;
+		edits.push({ at: start, remove: end - start, text: "", rank: 0 });
+		floor = end;
+	}
+	return edits;
+}
+
+/** Inline markup in a phrase is self-contained: every delimiter closes inside it. */
+function balancedInline(text: string): boolean {
+	for (const delimiter of ["**", "__", "~~", "==", "`"]) {
+		if (text.split(delimiter).length % 2 === 0) return false;
+	}
+	const single = text.replace(/\*\*|__/g, "");
+	if ((single.match(/\*/g) ?? []).length % 2 !== 0) return false;
+	if ((text.match(/\[/g) ?? []).length !== (text.match(/\]/g) ?? []).length) return false;
+	return !/[<>]/.test(text);
+}
+
+/** Past any closing emphasis right after a word, so an insert lands outside it. */
+function afterMarkup(source: string, at: number): number {
+	let position = at;
+	while (position < source.length && EMPHASIS.has(source[position])) position++;
+	return position;
+}
+
+/** Before any opening emphasis right before a word. */
+function beforeMarkup(source: string, at: number): number {
+	let position = at;
+	while (position > 0 && EMPHASIS.has(source[position - 1])) position--;
+	return position;
 }
 
 /**
@@ -510,6 +677,11 @@ function applyBlockMarks(
 			remarks.set(anchor, [
 				...(remarks.get(anchor) ?? []),
 				title,
+				// Ink fork: the transcript is the remark's text; the image
+				// stays beside it unless the owner switched images off.
+				...(mark.transcript === undefined
+					? []
+					: mark.transcript.split("\n").map((line) => `> ${line}`)),
 				...(mark.path === undefined ? [] : [`> ![[${mark.path}]]`]),
 			]);
 		}

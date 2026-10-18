@@ -25,7 +25,13 @@ export type Block =
 	 * geometry.
 	 */
 	| { type: "imageref"; target: string; alt: string }
-	| { type: "pagebreak" };
+	| { type: "pagebreak" }
+	/**
+	 * Ink fork: a picture drawn as pen strokes. Never produced by parseBlocks —
+	 * the ink renderer swaps an image placeholder line for one when it has the
+	 * picture — so PDF and EPUB layout are untouched. Size in points.
+	 */
+	| { type: "inkimage"; name: string; width: number; height: number };
 
 export interface ListItem {
 	depth: number;

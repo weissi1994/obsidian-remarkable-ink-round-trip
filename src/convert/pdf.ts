@@ -126,6 +126,13 @@ export interface PdfLayout {
 	lines: LaidOutLine[];
 	/** Typography behaviour version this layout was produced with. */
 	typo?: number;
+	/**
+	 * The device grid the page maps onto, when the producer knows it exactly
+	 * (ink fork): a handwritten notebook is written straight in device units,
+	 * including on the Paper Pro Move, whose grid the page-width heuristic in
+	 * deviceGridFor cannot tell apart. Absent for PDFs.
+	 */
+	grid?: { width: number; height: number };
 }
 
 // reMarkable 2 screen in PDF points (1404×1872 px at 226 DPI).
@@ -225,15 +232,67 @@ function isWinAnsiExtra(ch: string): boolean {
 	return "€ŠšŽžŒœŸƒˆ˜†‡‰‹›™–—‘’“”…•".includes(ch);
 }
 
+/**
+ * What the typesetter needs from a font: its advance width. pdf-lib's PDFFont
+ * satisfies this, and so does the handwriting font of the ink renderer — the
+ * layout code below is shared, so a PDF and a handwritten notebook of the
+ * same note lay out by the same rules (ink fork).
+ */
+export interface MeasureFont {
+	widthOfTextAtSize(text: string, size: number): number;
+}
+
+/** Colour as the drawing calls pass it; opaque to the typesetter. */
+export type DrawColor = ReturnType<typeof rgb>;
+
+/**
+ * The drawing surface of one page: exactly the three PDFPage calls the
+ * typesetter makes. A PDF page forwards them to pdf-lib; the ink renderer
+ * records them and turns them into pen strokes.
+ */
+export interface DrawPage {
+	drawText(
+		text: string,
+		options: { x: number; y: number; size: number; font: MeasureFont; color?: DrawColor },
+	): void;
+	drawLine(options: {
+		start: { x: number; y: number };
+		end: { x: number; y: number };
+		thickness?: number;
+		color?: DrawColor;
+	}): void;
+	drawRectangle(options: {
+		x: number;
+		y: number;
+		width: number;
+		height: number;
+		borderWidth?: number;
+		borderColor?: DrawColor;
+	}): void;
+	/** Ink fork: where a picture goes (bottom-left origin, points). */
+	drawImage?(name: string, options: { x: number; y: number; width: number; height: number }): void;
+	/** A pre-embedded PNG for an image block; a backend without one leaves the space blank. */
+	drawPng?(block: Block, options: { x: number; y: number; width: number; height: number }): void;
+}
+
+/** Fonts and pages: everything a typesetting pass draws with. */
+export interface TypesetBackend {
+	body: MeasureFont;
+	bold: MeasureFont;
+	italic: MeasureFont;
+	mono: MeasureFont;
+	addPage(width: number, height: number): DrawPage;
+}
+
 interface Typesetter {
-	doc: PDFDocument;
-	page: PDFPage;
+	backend: TypesetBackend;
+	page: DrawPage;
 	pageIndex: number;
 	y: number;
-	body: PDFFont;
-	bold: PDFFont;
-	italic: PDFFont;
-	mono: PDFFont;
+	body: MeasureFont;
+	bold: MeasureFont;
+	italic: MeasureFont;
+	mono: MeasureFont;
 	opts: Required<PdfLayoutOptions>;
 	/** Every placed line, in reading order (GP_E3_S8). */
 	placed: LaidOutLine[];
@@ -244,17 +303,10 @@ interface Typesetter {
 	ordered?: number;
 	/** Running word counter, so a mark can name the exact words it covers. */
 	wordId: number;
-	/**
-	 * PNG handles pre-embedded in renderPdf, keyed by their image block
-	 * (fork: image blocks). Embedding is async and drawBlock is not, so it
-	 * happens once up front; a block without a handle (import-time layout
-	 * replay carries geometry only) reserves its space and draws nothing.
-	 */
-	embedded: Map<Block, PDFImage>;
 }
 
 function newPage(ts: Typesetter): void {
-	ts.page = ts.doc.addPage([ts.opts.pageWidth, ts.opts.pageHeight]);
+	ts.page = ts.backend.addPage(ts.opts.pageWidth, ts.opts.pageHeight);
 	ts.pageIndex++;
 	ts.y = ts.opts.pageHeight - ts.opts.margin;
 }
@@ -269,7 +321,7 @@ function put(
 	x: number,
 	y: number,
 	size: number,
-	font: PDFFont,
+	font: MeasureFont,
 ): void {
 	ts.page.drawText(text, { x, y, size, font, color: rgb(0, 0, 0) });
 	if (text.trim() !== "") {
@@ -304,7 +356,7 @@ function placeWords(
 	ts: Typesetter,
 	text: string,
 	x: number,
-	font: PDFFont,
+	font: MeasureFont,
 	size: number,
 ): PlacedWord[] {
 	const spaceWidth = font.widthOfTextAtSize(" ", size);
@@ -338,7 +390,7 @@ const WIDTH_EPSILON = 0.01;
 /** Split a single word wider than the line into chunks that fit (GP_E5_S4). */
 function breakLongWord(
 	word: string,
-	font: PDFFont,
+	font: MeasureFont,
 	size: number,
 	maxWidth: number,
 	epsilon: number,
@@ -366,7 +418,7 @@ function breakLongWord(
  */
 export function wrapText(
 	text: string,
-	font: PDFFont,
+	font: MeasureFont,
 	size: number,
 	maxWidth: number,
 	typo: number = TYPO_VERSION,
@@ -412,7 +464,7 @@ export function wrapText(
 function drawLines(
 	ts: Typesetter,
 	lines: string[],
-	font: PDFFont,
+	font: MeasureFont,
 	size: number,
 	indent: number,
 	extraGapAfter: number,
@@ -791,16 +843,34 @@ function drawImageBlock(ts: Typesetter, block: Block & { type: "image" }): void 
 	const height = block.h * scale;
 	ensureRoom(ts, height + 2 * gap);
 	ts.y -= gap;
-	const handle = ts.embedded.get(block);
-	if (handle !== undefined) {
-		ts.page.drawImage(handle, {
-			x: ts.opts.margin + (contentW - width) / 2,
-			y: ts.y - height,
-			width,
-			height,
-		});
-	}
+	ts.page.drawPng?.(block, {
+		x: ts.opts.margin + (contentW - width) / 2,
+		y: ts.y - height,
+		width,
+		height,
+	});
 	ts.y -= height + gap;
+}
+
+/**
+ * Ink fork: reserve room for a picture at its natural size (pixels at 96 dpi),
+ * never wider than the text column nor taller than most of a page.
+ */
+function drawImage(ts: Typesetter, block: { name: string; width: number; height: number }): void {
+	beginBlock(ts, "paragraph");
+	const maxWidth = contentWidth(ts);
+	const maxHeight = (ts.opts.pageHeight - 2 * ts.opts.margin) * 0.7;
+	let width = Math.max(Math.min(block.width, maxWidth), Math.min(60, maxWidth));
+	let height = width * (block.height / Math.max(block.width, 1));
+	if (height > maxHeight) {
+		height = maxHeight;
+		width = height * (block.width / Math.max(block.height, 1));
+	}
+	const gap = ts.opts.fontSize * 0.6;
+	ensureRoom(ts, height + gap);
+	ts.y -= height + gap * 0.5;
+	ts.page.drawImage?.(block.name, { x: ts.opts.margin, y: ts.y, width, height });
+	ts.y -= gap;
 }
 
 /** Draw one block through the shared per-type routines. */
@@ -839,6 +909,9 @@ function drawBlock(ts: Typesetter, block: Block): void {
 		case "pagebreak":
 			// Handled by the render loop; never drawn.
 			break;
+		case "inkimage":
+			drawImage(ts, block);
+			break;
 	}
 }
 
@@ -863,12 +936,13 @@ function sectionEnd(blocks: Block[], start: number): number {
  * from the page tree, its leaf and content stream would stay in the saved
  * document and roughly double the upload's size.
  */
-const MEASURE_SINK = {
+const MEASURE_SINK: DrawPage = {
 	drawText: () => undefined,
 	drawLine: () => undefined,
 	drawRectangle: () => undefined,
 	drawImage: () => undefined,
-} as unknown as PDFPage;
+	drawPng: () => undefined,
+};
 
 /**
  * Height the blocks would occupy, measured by running the SAME drawing code
@@ -930,45 +1004,93 @@ export async function renderPdf(
 	meta: PdfMetadata,
 	options: PdfLayoutOptions = {},
 ): Promise<PdfRender> {
-	const opts = resolveLayoutOptions(options);
 	const doc = await PDFDocument.create();
 	doc.setTitle(meta.title);
 	doc.setSubject(`${DOCID_SUBJECT_PREFIX}${meta.docId}`);
 	doc.setCreator("reMarkable Round-Trip (Obsidian plugin)");
 
+	const fonts = {
+		body: await doc.embedFont(StandardFonts.Helvetica),
+		bold: await doc.embedFont(StandardFonts.HelveticaBold),
+		italic: await doc.embedFont(StandardFonts.HelveticaOblique),
+		mono: await doc.embedFont(StandardFonts.Courier),
+	};
+	// Image PNGs embed once, up front: embedPng is async, the draw loop is
+	// not (fork: image blocks). A block without a handle (import-time layout
+	// replay carries geometry only) reserves its space and draws nothing.
+	const embedded = new Map<Block, PDFImage>();
+	for (const block of blocks) {
+		if (block.type === "image" && block.png !== undefined) {
+			embedded.set(block, await doc.embedPng(block.png));
+		}
+	}
+	const layout = typesetBlocks(blocks, meta.title, options, pdfBackend(doc, fonts, embedded));
+	return { bytes: await doc.save(), layout };
+}
+
+/** pdf-lib behind the typesetter's drawing seam. */
+function pdfBackend(
+	doc: PDFDocument,
+	fonts: { body: PDFFont; bold: PDFFont; italic: PDFFont; mono: PDFFont },
+	embedded: Map<Block, PDFImage>,
+): TypesetBackend {
+	// The typesetter only ever hands back the fonts it was given, so the
+	// MeasureFont it passes to drawText is one of these PDFFonts.
+	const asPdfFont = (font: MeasureFont) => font as PDFFont;
+	return {
+		...fonts,
+		addPage(width, height) {
+			const page: PDFPage = doc.addPage([width, height]);
+			return {
+				drawText: (text, o) => page.drawText(text, { ...o, font: asPdfFont(o.font) }),
+				drawLine: (o) => page.drawLine(o),
+				drawRectangle: (o) => page.drawRectangle(o),
+				drawPng: (block, o) => {
+					const handle = embedded.get(block);
+					if (handle !== undefined) page.drawImage(handle, o);
+				},
+			};
+		},
+	};
+}
+
+/**
+ * The whole layout pass, independent of what it draws on (ink fork). The
+ * PDF renderer and the handwriting renderer both come through here, so the
+ * page grid — the thing every imported mark is anchored to — is produced by
+ * one piece of code whatever the output.
+ */
+export function typesetBlocks(
+	blocks: Block[],
+	title: string,
+	options: PdfLayoutOptions,
+	backend: TypesetBackend,
+): PdfLayout {
+	const opts = resolveLayoutOptions(options);
 	const ts: Typesetter = {
-		doc,
-		page: undefined as unknown as PDFPage,
+		backend,
+		page: MEASURE_SINK,
 		pageIndex: 0,
 		placed: [],
 		block: 0,
 		role: "paragraph",
 		wordId: 0,
 		y: 0,
-		body: await doc.embedFont(StandardFonts.Helvetica),
-		bold: await doc.embedFont(StandardFonts.HelveticaBold),
-		italic: await doc.embedFont(StandardFonts.HelveticaOblique),
-		mono: await doc.embedFont(StandardFonts.Courier),
+		body: backend.body,
+		bold: backend.bold,
+		italic: backend.italic,
+		mono: backend.mono,
 		opts,
-		embedded: new Map<Block, PDFImage>(),
 	};
-	// Image PNGs embed once, up front: embedPng is async, the draw loop is
-	// not (fork: image blocks). Layout replay passes blocks without PNGs and
-	// skips this loop entirely.
-	for (const block of blocks) {
-		if (block.type === "image" && block.png !== undefined) {
-			ts.embedded.set(block, await doc.embedPng(block.png));
-		}
-	}
 	newPage(ts);
 
-	drawHeading(ts, 0, meta.title);
+	drawHeading(ts, 0, title);
 	ts.y -= 4;
 
 	// The title just went up; a first H1 saying the same thing again is
 	// duplication, not content (GP_E6_S6, typo 6 — earlier uploads replay
 	// the duplicate so their anchors hold).
-	const content = ts.opts.typo >= 6 ? dropLeadingTitleHeading(blocks, meta.title) : blocks;
+	const content = ts.opts.typo >= 6 ? dropLeadingTitleHeading(blocks, title) : blocks;
 
 	// A pagebreak is honoured lazily, before the next drawn block: a marker
 	// at the very end (or on an already-fresh page) never leaves a blank
@@ -1015,15 +1137,12 @@ export async function renderPdf(
 	}
 
 	return {
-		bytes: await doc.save(),
-		layout: {
-			pageWidth: ts.opts.pageWidth,
-			pageHeight: ts.opts.pageHeight,
-			pageCount: ts.pageIndex,
-			lines: ts.placed,
-			// The RESOLVED version (ts.opts, defaults filled in) — the raw
-			// option may be undefined and would misreport what was used.
-			typo: ts.opts.typo,
-		},
+		pageWidth: ts.opts.pageWidth,
+		pageHeight: ts.opts.pageHeight,
+		pageCount: ts.pageIndex,
+		lines: ts.placed,
+		// The RESOLVED version (ts.opts, defaults filled in) — the raw
+		// option may be undefined and would misreport what was used.
+		typo: ts.opts.typo,
 	};
 }

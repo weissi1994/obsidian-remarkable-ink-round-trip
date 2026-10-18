@@ -1,0 +1,234 @@
+/**
+ * Writing pen strokes into a v6 `.rm` page (ink fork).
+ *
+ * The block list follows rmscene (MIT, Rick Lupton) — the same reference the
+ * upstream text writer (convert/rmtext.ts) and stroke reader were built
+ * against: author table, migration and page info, the scene info carrying the
+ * paper size, the root group and "Layer 1", then one line item per stroke,
+ * chained left-to-right as a CRDT sequence inside the layer.
+ *
+ * Every stroke gets an id the import can recognise: author 1 (our own, an
+ * all-zero UUID that names nobody) and a counter from FIRST_STROKE_COUNTER
+ * upwards in drawing order. The tablet writes its own strokes under its own
+ * author, and moved or erased strokes leave tombstones and `move_id`
+ * back-references to these ids — which is how a returning page says exactly
+ * which generated words were erased or moved.
+ */
+
+import { ByteWriter, HEADER, type CrdtId } from "../convert/rmtext";
+
+const BLOCK_AUTHOR_IDS = 0x09;
+const BLOCK_MIGRATION_INFO = 0x00;
+const BLOCK_PAGE_INFO = 0x0a;
+const BLOCK_SCENE_INFO = 0x0d;
+const BLOCK_SCENE_TREE = 0x01;
+const BLOCK_TREE_NODE = 0x02;
+const BLOCK_SCENE_GROUP_ITEM = 0x04;
+const BLOCK_SCENE_LINE_ITEM = 0x05;
+const GROUP_ITEM_TYPE = 0x02;
+const LINE_ITEM_TYPE = 0x03;
+
+/** Our author index in the page's author table. */
+export const INK_AUTHOR = 1;
+/** First counter used for generated strokes; lower ids are structural. */
+export const FIRST_STROKE_COUNTER = 100;
+
+const id = (part1: number, part2: number): CrdtId => ({ part1, part2 });
+const END = id(0, 0);
+const ROOT = id(0, 1);
+const LAYER = id(0, 11);
+
+/** reMarkable pen ids (rmscene `Pen`). */
+export const PEN = {
+	ballpoint: 15,
+	fineliner: 17,
+	pencil: 14,
+	mechanicalPencil: 13,
+	marker: 16,
+} as const;
+
+/** reMarkable colour ids (rmscene `PenColor`). */
+export const PEN_COLOR = {
+	black: 0,
+	grey: 1,
+	white: 2,
+	yellow: 3,
+	green: 4,
+	pink: 5,
+	blue: 6,
+	red: 7,
+} as const;
+
+export interface InkPoint {
+	x: number;
+	y: number;
+	/** Pen width at this point (device units ×4 convention of v2 points). */
+	width: number;
+	pressure: number;
+	speed: number;
+	/** 0–255, the angle of travel as the device records it. */
+	direction: number;
+}
+
+export interface InkLine {
+	counter: number;
+	tool: number;
+	color: number;
+	thicknessScale: number;
+	points: InkPoint[];
+}
+
+export interface InkPageOptions {
+	/** Paper size in device units, written to the scene info block. */
+	paperSize: { width: number; height: number };
+}
+
+/**
+ * One line item of a page as the scene stores it. Production writes plain
+ * lines under author 1; the general shape — other authors, tombstones,
+ * move back-references — exists so tests can build pages the way a tablet
+ * leaves them after erasing and moving.
+ */
+export interface SceneItemSpec {
+	author: number;
+	counter: number;
+	/** The stroke; absent for a tombstone. */
+	line?: Omit<InkLine, "counter">;
+	/** Counters this (value-less) item deletes, starting at its own. */
+	deletedLength?: number;
+	moveFrom?: { author: number; counter: number };
+}
+
+/**
+ * Build one page. Lines are written in the order given; their counters must
+ * be unique and increasing (the CRDT sequence orders by left neighbour).
+ */
+export function buildInkPageRm(lines: InkLine[], options: InkPageOptions): Uint8Array {
+	return buildScenePageRm(
+		lines.map((line) => ({ author: INK_AUTHOR, counter: line.counter, line })),
+		options,
+	);
+}
+
+/** The general writer behind buildInkPageRm (see SceneItemSpec). */
+export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions): Uint8Array {
+	const w = new ByteWriter();
+	w.raw(new TextEncoder().encode(HEADER));
+
+	const authors = [...new Set([INK_AUTHOR, ...items.map((item) => item.author)])].sort(
+		(a, b) => a - b,
+	);
+	w.block(BLOCK_AUTHOR_IDS, 1, 1, (b) => {
+		b.varuint(authors.length);
+		for (const author of authors) {
+			b.subblock(0, (s) => {
+				s.varuint(16);
+				// Ours is all zeros; any other author gets a recognisable stand-in.
+				s.raw(new Array<number>(16).fill(author === INK_AUTHOR ? 0 : author));
+				s.u16(author);
+			});
+		}
+	});
+
+	w.block(BLOCK_MIGRATION_INFO, 1, 1, (b) => {
+		b.taggedId(1, id(1, 1));
+		b.taggedBool(2, true);
+		b.taggedBool(3, false);
+	});
+
+	w.block(BLOCK_PAGE_INFO, 0, 1, (b) => {
+		b.taggedInt(1, 1); // loads
+		b.taggedInt(2, 0); // merges
+		b.taggedInt(3, 0); // text chars
+		b.taggedInt(4, 0); // text lines
+		b.taggedInt(5, 0); // type folio use count
+	});
+
+	w.block(BLOCK_SCENE_INFO, 0, 1, (b) => {
+		// current layer
+		b.subblock(1, (s) => {
+			s.taggedId(1, id(0, 1));
+			s.taggedId(2, LAYER);
+		});
+		b.lwwBool(2, id(0, 1), true); // background visible
+		b.lwwBool(3, id(0, 1), true); // root document visible
+		b.subblock(5, (s) => {
+			s.u32(Math.round(options.paperSize.width));
+			s.u32(Math.round(options.paperSize.height));
+		});
+	});
+
+	w.block(BLOCK_SCENE_TREE, 1, 1, (b) => {
+		b.taggedId(1, LAYER);
+		b.taggedId(2, END);
+		b.taggedBool(3, true);
+		b.subblock(4, (s) => s.taggedId(1, ROOT));
+	});
+
+	w.block(BLOCK_TREE_NODE, 1, 2, (b) => {
+		b.taggedId(1, ROOT);
+		b.lwwString(2, END, "");
+		b.lwwBool(3, END, true);
+	});
+
+	w.block(BLOCK_TREE_NODE, 1, 2, (b) => {
+		b.taggedId(1, LAYER);
+		b.lwwString(2, id(0, 12), "Layer 1");
+		b.lwwBool(3, END, true);
+	});
+
+	w.block(BLOCK_SCENE_GROUP_ITEM, 1, 1, (b) => {
+		b.taggedId(1, ROOT);
+		b.taggedId(2, id(0, 13));
+		b.taggedId(3, END);
+		b.taggedId(4, END);
+		b.taggedInt(5, 0);
+		b.subblock(6, (s) => {
+			s.u8(GROUP_ITEM_TYPE);
+			s.taggedId(2, LAYER);
+		});
+	});
+
+	let left = END;
+	for (const item of items) {
+		const itemId = id(item.author, item.counter);
+		const line = item.line;
+		w.block(BLOCK_SCENE_LINE_ITEM, 2, 2, (b) => {
+			b.taggedId(1, LAYER);
+			b.taggedId(2, itemId);
+			b.taggedId(3, left);
+			b.taggedId(4, END);
+			b.taggedInt(5, item.deletedLength ?? 0);
+			if (line === undefined) return;
+			b.subblock(6, (s) => {
+				s.u8(LINE_ITEM_TYPE);
+				s.taggedInt(1, line.tool);
+				s.taggedInt(2, line.color);
+				s.taggedDouble(3, line.thicknessScale);
+				s.taggedFloat(4, 0); // starting length
+				s.subblock(5, (p) => {
+					for (const point of line.points) {
+						p.f32(point.x);
+						p.f32(point.y);
+						p.u16(clampInt(point.speed, 0, 0xffff));
+						p.u16(clampInt(point.width, 0, 0xffff));
+						p.u8(clampInt(point.direction, 0, 255));
+						p.u8(clampInt(point.pressure, 0, 255));
+					}
+				});
+				s.taggedId(6, id(0, 1)); // timestamp, as rmscene writes it
+				if (item.moveFrom !== undefined) {
+					s.taggedId(7, id(item.moveFrom.author, item.moveFrom.counter));
+				}
+			});
+		});
+		left = itemId;
+	}
+
+	return w.bytes();
+}
+
+function clampInt(value: number, low: number, high: number): number {
+	if (!Number.isFinite(value)) return low;
+	return Math.min(high, Math.max(low, Math.round(value)));
+}

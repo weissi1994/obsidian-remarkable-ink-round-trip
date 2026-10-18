@@ -18,6 +18,8 @@ import { deviceBoundsToPdf } from "./anchor";
 import { PageMap, parsePageEntries } from "./pagemap";
 import { describePageView, parsePageView } from "./pageview";
 import { Stroke, parseRmPage } from "./rmlines";
+import type { InkRender } from "../ink/inkrender";
+import { collectInkAnnotations } from "./inkpull";
 
 /** One file belonging to a device document. */
 export interface DocumentFile {
@@ -50,6 +52,14 @@ export interface DocumentScan {
 	addedPages: number;
 	/** Why anchoring was unavailable, when it was. */
 	anchorSkipped?: "no-layout";
+	/** Ink fork: what happened to the generated handwriting. */
+	ink?: {
+		erasedWords: number;
+		movedWords: number;
+		partialWords: number;
+		ownStrokes: number;
+		transcribed: number;
+	};
 	/** How the vault block came out: annotated copy or summary (GP_E3_S14). */
 	written?: WriteOutcome;
 	/** How the note relates to what was sent (F14, GP_E3_S3). */
@@ -97,6 +107,15 @@ export interface ImportedMark {
 	 * source text (GP_E3_S20).
 	 */
 	addedPage?: number;
+	/**
+	 * Ink fork: handwriting read as text by the configured OCR endpoint.
+	 * Opt-in; the image stays alongside unless the owner turned it off.
+	 */
+	transcript?: string;
+	/** Ink fork, kind "moved": insert the moved words after this word id… */
+	moveAfter?: number;
+	/** …or before this one, when they landed at the start of a line. */
+	moveBefore?: number;
 }
 
 /** What the edge needs to paint one remark. */
@@ -107,6 +126,8 @@ export interface StrokeRenderRequest {
 	page: number;
 	/** 1-based index of this remark within its page. */
 	remark: number;
+	/** Ink fork: a whole page the owner added, not a margin remark (OCR prompt). */
+	wholePage?: boolean;
 }
 
 export interface PullDeps {
@@ -128,6 +149,19 @@ export interface PullDeps {
 	renderStrokes?: (request: StrokeRenderRequest) => Promise<string | null>;
 	/** Diagnostic sink; the plugin edge collects these for the user. */
 	log?: (line: string) => void;
+	/**
+	 * Ink fork: regenerate the handwritten notebook exactly as it was sent —
+	 * layout and every generated stroke — so the import can tell the owner's
+	 * ink from the plugin's. Null when it cannot be reproduced.
+	 */
+	loadInk?: (entry: MappingEntry) => Promise<InkRender | null>;
+	/**
+	 * Ink fork: read handwriting as text (opt-in OCR). Absent = off. Returns
+	 * null when the endpoint saw no words.
+	 */
+	transcribe?: (request: StrokeRenderRequest & { quote?: string }) => Promise<string | null>;
+	/** Keep the ink image next to a transcript (default true). */
+	keepImageWithTranscript?: boolean;
 	/**
 	 * Reproduce the page layout of the document as it was sent, so ink can be
 	 * quoted against the text it sits on (GP_E3_S8). Returning null — no
@@ -311,7 +345,7 @@ export async function collectHighlights(
 }
 
 /** Page order from the document's `.content`; empty map when unavailable. */
-async function readPageMap(
+export async function readPageMap(
 	deviceDocId: string,
 	allFiles: DocumentFile[],
 	deps: PullDeps,
@@ -399,7 +433,7 @@ function lastLineOf(
 }
 
 /** Kinds the text says everything about; a picture of the ink adds nothing. */
-const TEXT_ONLY_KINDS = new Set<MarkKind>([
+export const TEXT_ONLY_KINDS = new Set<MarkKind>([
 	"strikethrough",
 	"underline",
 	"circle",
@@ -409,6 +443,8 @@ const TEXT_ONLY_KINDS = new Set<MarkKind>([
 	// vanished when handwriting import was off (reviewvondst).
 	"checkbox",
 	"checkbox-cancel",
+	"erased",
+	"moved",
 ]);
 
 /**
@@ -724,11 +760,12 @@ export async function pullAnnotations(
 					skipReason: "unchanged",
 				};
 			} else {
-				const { highlights, scan, marks } = await collectHighlights(
-					entry,
-					hash,
-					deps,
-				);
+				// Ink fork: a handwritten notebook is diffed against the strokes
+				// the plugin wrote; everything else is a review copy.
+				const { highlights, scan, marks } =
+					entry.format === "ink"
+						? await collectInkAnnotations(entry, hash, deps)
+						: await collectHighlights(entry, hash, deps);
 				const written = await deps.writeAnnotations(
 					entry,
 					highlights,

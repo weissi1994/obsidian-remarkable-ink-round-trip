@@ -1,0 +1,4 @@
+{
+ "flowchart": "flowchart TD\n  A[Client] -->|HTTPS| B(Envoy Gateway)\n  B --> C{Rate limit?}\n  C -->|ok| D[Service]\n  C -->|429| E[Reject]\n  D --> F[(PXC)]",
+ "pie": "pie title Traffic\n  \"EU\" : 60\n  \"US\" : 30\n  \"APAC\" : 10"
+}

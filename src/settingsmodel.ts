@@ -7,7 +7,8 @@
  */
 
 import type { MappingTable } from "./id/mapping";
-import type { OutputFormat } from "./sync/send";
+import type { SettingsFormat } from "./sync/send";
+import type { PendingSheet } from "./ink/handsheet";
 import {
 	DEFAULT_MARK_STYLES,
 	MARK_STYLE_LABELS,
@@ -24,8 +25,11 @@ export interface RoundTripSettings {
 	/** Use a self-hosted rmfakecloud endpoint instead of the official cloud. */
 	useCustomEndpoint: boolean;
 	customEndpointUrl: string;
-	/** Delivered document format (F3); PDF anchors annotations, EPUB reflows. */
-	outputFormat: OutputFormat;
+	/**
+	 * Delivered document format (F3); PDF anchors annotations, EPUB reflows,
+	 * "ink" writes a notebook of real pen strokes (ink fork).
+	 */
+	outputFormat: SettingsFormat;
 	/** Render frontmatter as a small title block instead of dropping it. */
 	frontmatterAsTitleBlock: boolean;
 	fontSize: number;
@@ -71,9 +75,44 @@ export interface RoundTripSettings {
 	showUpdateNotice: boolean;
 	/** Last plugin version this install has run; "" = fresh install. */
 	lastSeenVersion: string;
+	/* ---------------- ink fork: handwritten notebooks ---------------- */
+	/** Built-in single-line font id, or "hand" for the captured handwriting. */
+	inkFont: string;
+	/** Font for characters the handwriting library lacks. */
+	inkFallbackFont: string;
+	inkPen: "fine" | "medium" | "bold";
+	/** reMarkable colour id of the generated ink (0 black, 6 blue, …). */
+	inkColor: number;
+	/** 0–1: how hand-made the generated writing looks. */
+	inkJitter: number;
+	/** Which canvas notebooks are written for. */
+	inkDevice: InkDevice;
+	/** Canvas for "custom", filled in by "Detect page size". */
+	inkCustomProfile: { width: number; height: number; dpi: number };
+	/** Version of the active handwriting library ("" = none learned yet). */
+	handVersion: string;
+	/** A handwriting sheet on the tablet waiting to be read back. */
+	pendingSheet: PendingSheet | null;
+	/** How embedded pictures are drawn in a handwritten notebook. */
+	inkImages: "colour-hatch" | "mono-hatch" | "placeholder";
+	/** Mermaid diagrams in a handwritten notebook: drawn by hand, or as code. */
+	inkDiagrams: "handwritten" | "code";
+	/** What an erased handwritten word becomes in the annotated copy. */
+	erasedAs: "delete" | "strikethrough";
+	/** Opt-in OCR of handwritten remarks via an OpenAI-compatible endpoint. */
+	ocrEnabled: boolean;
+	/** Base URL ending in /v1, e.g. a local Ollama: http://localhost:11434/v1 */
+	ocrEndpoint: string;
+	ocrModel: string;
+	ocrApiKey: string;
+	/** Keep the ink image next to its transcript. */
+	ocrKeepImage: boolean;
 	/** docId ↔ device document mapping (round-trip foundation, F5). */
 	mappings: MappingTable;
 }
+
+/** Canvases a handwritten notebook can be written for (ink fork). */
+export type InkDevice = "auto" | "rm2" | "paperpro" | "move" | "custom";
 
 export const DEFAULT_SETTINGS: RoundTripSettings = {
 	deviceToken: "",
@@ -100,6 +139,23 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	pageBreakAtHeading: "smart",
 	showUpdateNotice: true,
 	lastSeenVersion: "",
+	inkFont: "readability",
+	inkFallbackFont: "readability",
+	inkPen: "medium",
+	inkColor: 0,
+	inkJitter: 0.4,
+	inkDevice: "auto",
+	inkCustomProfile: { width: 954, height: 1696, dpi: 264 },
+	handVersion: "",
+	pendingSheet: null,
+	inkImages: "colour-hatch",
+	inkDiagrams: "handwritten",
+	erasedAs: "delete",
+	ocrEnabled: false,
+	ocrEndpoint: "http://localhost:11434/v1",
+	ocrModel: "qwen2.5vl:7b",
+	ocrApiKey: "",
+	ocrKeepImage: true,
 	mappings: {},
 };
 

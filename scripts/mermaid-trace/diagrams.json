@@ -1,0 +1,10 @@
+{
+"flowchart": "flowchart TD\n  A[Client] -->|HTTPS| B(Envoy Gateway)\n  B --> C{Rate limit?}\n  C -->|ok| D[Service]\n  C -->|429| E[Reject]\n  D --> F[(PXC)]",
+"sequence": "sequenceDiagram\n  participant C as Client\n  participant E as Envoy\n  participant S as Service\n  C->>E: GET /pay\n  E->>S: forward\n  S-->>E: 200 OK\n  E-->>C: 200 OK\n  Note over E,S: mTLS",
+"class": "classDiagram\n  class Payment {\n    +id: string\n    +amount: int\n    +capture()\n  }\n  class Refund\n  Payment <|-- Refund",
+"state": "stateDiagram-v2\n  [*] --> Pending\n  Pending --> Captured: capture\n  Pending --> Voided: void\n  Captured --> [*]",
+"er": "erDiagram\n  MERCHANT ||--o{ PAYMENT : receives\n  PAYMENT ||--|{ REFUND : has",
+"pie": "pie title Traffic\n  \"EU\" : 60\n  \"US\" : 30\n  \"APAC\" : 10",
+"gantt": "gantt\n  title Rollout\n  dateFormat YYYY-MM-DD\n  section Infra\n  Cilium upgrade :a1, 2026-10-01, 7d\n  Envoy config :after a1, 5d",
+"mindmap": "mindmap\n  root((SRE))\n    Monitoring\n      Checkmk\n      Grafana\n    Networking\n      Cilium"
+}

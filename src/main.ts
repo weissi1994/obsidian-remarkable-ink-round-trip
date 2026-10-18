@@ -14,6 +14,7 @@ import {
 	TAbstractFile,
 	TFile,
 	TFolder,
+	loadMermaid,
 	requestUrl,
 } from "obsidian";
 import {
@@ -81,7 +82,7 @@ import { PdfLayout, renderPdf } from "./convert/pdf";
 import { renderMermaidDiagrams } from "./convert/mermaid";
 import type { DiagramImage } from "./convert/mermaid";
 import { MappingEntry, contentHash } from "./id/mapping";
-import { preprocess } from "./preprocess/preprocess";
+import { displayTextForLink, preprocess } from "./preprocess/preprocess";
 import {
 	AnnotationOutcome,
 	companionPath,
@@ -103,6 +104,11 @@ import {
 import { TextConflictModal } from "./textconflictmodal";
 import { flattenSelection, relativeFolderPath } from "./sync/selection";
 import { shouldAnnounceUpdate } from "./updatenotice";
+import { InkEdge } from "./inkedge";
+import { gridSizeFor, InkImage, quantizeImage } from "./ink/inkimage";
+import { diagramKey, InkDrawing } from "./ink/inkdrawing";
+import { extractDrawing } from "./ink/svgextract";
+import { mermaidBlocks, withInkTheme } from "./ink/mermaidtheme";
 
 const IMAGE_EXTENSIONS = new Set([
 	"png",
@@ -134,6 +140,22 @@ export default class RoundTripPlugin extends Plugin {
 	private extraData: Record<string, unknown> = {};
 	/** Layouts rebuilt during one import run, by document id (GP_E3_S12). */
 	private readonly layoutCache = new Map<string, PdfLayout | null>();
+	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
+	readonly ink = ((plugin: RoundTripPlugin) =>
+		new InkEdge({
+			get app() {
+				return plugin.app;
+			},
+			get manifest() {
+				return plugin.manifest;
+			},
+			get settings() {
+				return plugin.settings;
+			},
+			persist: () => plugin.persistSettings(),
+		}))(this);
+	/** Regenerated handwritten sends during one import run (ink fork). */
+	private readonly inkCache = new Map<string, Promise<import("./ink/inkrender").InkRender | null>>();
 	/** Which bytes-conversion methods came from the polyfill (GP_E5_S19). */
 	private byteCompat: ByteCompatReport = {
 		toHex: true,
@@ -275,7 +297,7 @@ export default class RoundTripPlugin extends Plugin {
 			checkCallback: (checking) => {
 				// EPUB reflows: there is no layout to choose (the settings hide
 				// the layout section there for the same reason).
-				if (this.settings.outputFormat !== "pdf") return false;
+				if (this.settings.outputFormat === "epub") return false;
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md") return false;
 				if (!checking) this.sendWithLayoutChoice([file], `"${file.basename}"`);
@@ -295,6 +317,38 @@ export default class RoundTripPlugin extends Plugin {
 				if (!checking) void this.sendFiles([file], { format: "text" });
 				return true;
 			},
+		});
+
+		// Ink fork: a notebook of real pen strokes — the note in handwriting.
+		this.addCommand({
+			id: "send-current-note-handwriting",
+			name: "Send current note to reMarkable as handwriting",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension !== "md") return false;
+				if (!checking) void this.sendFiles([file], { format: "ink" });
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "send-handwriting-sheet",
+			name: "Send handwriting sheet to reMarkable",
+			callback: () => void this.sendHandwritingSheet(),
+		});
+		this.addCommand({
+			id: "learn-handwriting",
+			name: "Learn my handwriting from the sheet",
+			callback: () => void this.learnHandwriting(false),
+		});
+		this.addCommand({
+			id: "learn-handwriting-variants",
+			name: "Add handwriting variations from the sheet",
+			callback: () => void this.learnHandwriting(true),
+		});
+		this.addCommand({
+			id: "detect-page-size",
+			name: "Detect reMarkable page size from my notebooks",
+			callback: () => void this.detectPageSize(),
 		});
 
 		// The way back (F17, GP_E7_S3): equally explicit, equally per note —
@@ -323,7 +377,7 @@ export default class RoundTripPlugin extends Plugin {
 					// ONE extra entry that opens the layout modal (GP_E6_S10) —
 					// deliberately not an entry per preset. PDF only: an EPUB
 					// reflows and has no layout to choose.
-					if (this.settings.outputFormat === "pdf")
+					if (this.settings.outputFormat !== "epub")
 						menu.addItem((item) =>
 							item
 								.setTitle("Send to reMarkable (choose layout…)")
@@ -341,6 +395,14 @@ export default class RoundTripPlugin extends Plugin {
 							.setIcon("pencil")
 							.onClick(() => void this.sendFiles([file], { format: "text" })),
 					);
+					// Ink fork: unless handwriting is already the default.
+					if (this.settings.outputFormat !== "ink")
+						menu.addItem((item) =>
+							item
+								.setTitle("Send to reMarkable as handwriting")
+								.setIcon("pen-tool")
+								.onClick(() => void this.sendFiles([file], { format: "ink" })),
+						);
 					// …and the way back (GP_E7_S3), only where it applies.
 					if (this.writeModeEntry(file) !== undefined)
 						menu.addItem((item) =>
@@ -385,7 +447,7 @@ export default class RoundTripPlugin extends Plugin {
 									}),
 							),
 					);
-					if (this.settings.outputFormat === "pdf")
+					if (this.settings.outputFormat !== "epub")
 						menu.addItem((item) =>
 							item
 								.setTitle("Send folder to reMarkable (choose layout…)")
@@ -420,7 +482,7 @@ export default class RoundTripPlugin extends Plugin {
 							.setIcon("send")
 							.onClick(() => void this.sendFiles(notes)),
 					);
-					if (this.settings.outputFormat === "pdf")
+					if (this.settings.outputFormat !== "epub")
 						menu.addItem((item) =>
 							item
 								.setTitle(
@@ -511,7 +573,7 @@ export default class RoundTripPlugin extends Plugin {
 	}
 
 	/** Persist runtime state without disrupting active or queued sync work. */
-	private async persistSettings(): Promise<void> {
+	async persistSettings(): Promise<void> {
 		await this.saveData(storedFrom(this.settings, this.extraData));
 	}
 
@@ -632,14 +694,8 @@ export default class RoundTripPlugin extends Plugin {
 
 		if (shouldAnnounceUpdate(prev, current) && this.settings.showUpdateNotice) {
 			const [major, minor] = current.split(".");
-			const frag = createFragment((f) => {
-				f.appendText(`reMarkable Round-Trip updated to ${major}.${minor} — `);
-				f.createEl("a", {
-					text: "see what's new",
-					href: `https://github.com/maxonamission/obsidian-remarkable-round-trip/releases/tag/${current}`,
-				});
-			});
-			new Notice(frag, 8000);
+			// Ink fork: no release page of its own; the changelog ships with it.
+			new Notice(`reMarkable Ink Round-Trip updated to ${major}.${minor} — see CHANGELOG-INK.md.`, 8000);
 		}
 
 		if (current !== prev) {
@@ -759,7 +815,9 @@ export default class RoundTripPlugin extends Plugin {
 			.enqueue({
 				ensureFolders: async () => {
 					if (queuedFiles.length === 0) return;
-					if (!mirrorFoldersActive && format !== "text") return;
+					// Ink fork: a handwritten send needs the selected hand loaded.
+					if (format === "ink") await this.ink.prepareSend();
+					if (!mirrorFoldersActive && format !== "text" && format !== "ink") return;
 					try {
 						const api = await remarkable(
 							this.settings.deviceToken,
@@ -822,6 +880,21 @@ export default class RoundTripPlugin extends Plugin {
 													throw toTransportError(error);
 												})
 										: undefined,
+									uploadInk: activeRaw
+										? (visibleName, pages, uploadOptions) =>
+												this.ink
+													.upload(activeRaw, visibleName, pages, uploadOptions.parentId)
+													.catch((error: unknown) => {
+														throw toTransportError(error);
+													})
+										: undefined,
+								},
+								ink: {
+									render: (blocks, title, docId, layout, images, drawings) =>
+										this.ink.renderForSend(blocks, title, docId, layout, images, drawings),
+									loadImages: (note) => this.noteImages(note),
+									loadDrawings: (markdown) => this.noteDrawings(markdown),
+									persistSent: (docId, sent) => this.ink.persistSent(docId, sent),
 								},
 								format,
 								resolveParent:
@@ -838,9 +911,13 @@ export default class RoundTripPlugin extends Plugin {
 												return Promise.resolve(parentIds.get(target) ?? "");
 											}
 										: undefined,
-								replacePrevious: activeMirror
-									? (previousId) => activeMirror.trashPrevious(previousId)
-									: undefined,
+								// Ink fork: a handwritten re-send only retires the old
+								// notebook when mirroring is on — with it off, that
+								// notebook may hold ink not imported yet.
+								replacePrevious:
+									activeMirror && (mirrorFoldersActive || format !== "ink")
+										? (previousId) => activeMirror.trashPrevious(previousId)
+										: undefined,
 								resolveEmbed: (linkpath, notePath) =>
 									embedMaps.get(notePath)?.get(linkpath) ?? { kind: "missing" },
 								persistDocId: async (note, docId) => {
@@ -1203,6 +1280,7 @@ export default class RoundTripPlugin extends Plugin {
 
 		const log: string[] = [];
 		this.layoutCache.clear();
+		this.inkCache.clear();
 		await this.reconcileNotePaths((line) => log.push(line));
 		const startedAt = new Date().toISOString().slice(0, 16).replace("T", " ");
 		const notice = this.progress(
@@ -1245,6 +1323,12 @@ export default class RoundTripPlugin extends Plugin {
 						: undefined,
 					loadLayout: (entry) => this.reproduceLayout(entry),
 					checkSource: (entry) => this.checkSource(entry),
+					// Ink fork: regenerate handwritten sends; opt-in OCR.
+					loadInk: (entry) => this.loadInkRender(entry),
+					transcribe: this.settings.ocrEnabled
+						? (request) => this.transcribeStrokes(request)
+						: undefined,
+					keepImageWithTranscript: this.settings.ocrKeepImage,
 					writeAnnotations: async (entry, highlights, marks, sourceState) =>
 						this.writeAnnotations(
 							entry.notePath,
@@ -1285,7 +1369,7 @@ export default class RoundTripPlugin extends Plugin {
 		} catch (error) {
 			const failure = toTransportError(error).message;
 			await this.deliverReport(
-				`reMarkable Round-Trip — import report (${startedAt})\nplugin ${this.manifest.version}\n\n` +
+				`reMarkable Ink Round-Trip — import report (${startedAt})\nplugin ${this.manifest.version}\n\n` +
 					`Run failed: ${failure}\n\n--- details ---\n${log.join("\n")}`,
 			);
 			notify(failure, 10000);
@@ -1305,7 +1389,7 @@ export default class RoundTripPlugin extends Plugin {
 			// Clipboard may be denied; the note below is the durable copy.
 		}
 		try {
-			const path = "reMarkable Round-Trip log.md";
+			const path = "reMarkable Ink Round-Trip log.md";
 			const existing = this.app.vault.getFileByPath(path);
 			const body = `\`\`\`\n${report}\n\`\`\`\n`;
 			if (existing) {
@@ -1334,7 +1418,14 @@ export default class RoundTripPlugin extends Plugin {
 		// same layout twice (marks, then the annotated copy).
 		const cached = this.layoutCache.get(entry.docId);
 		if (cached !== undefined) return cached;
-		const layout = await this.buildLayout(entry);
+		// Ink fork: a handwritten send's layout comes from its own renderer —
+		// but only while the note still matches, the same rule as for PDFs.
+		const layout =
+			entry.format === "ink"
+				? (await this.checkSource(entry)) === "changed"
+					? null
+					: ((await this.loadInkRender(entry).catch(() => null))?.layout ?? null)
+				: await this.buildLayout(entry);
 		this.layoutCache.set(entry.docId, layout);
 		return layout;
 	}
@@ -1450,6 +1541,297 @@ export default class RoundTripPlugin extends Plugin {
 			{ ...typography, typo: typography.typo ?? 1 },
 		);
 		return layout;
+	}
+
+	/* ------------------------- ink fork methods ------------------------- */
+
+	/** Regenerate a handwritten send, once per import run. */
+	private loadInkRender(entry: MappingEntry): Promise<import("./ink/inkrender").InkRender | null> {
+		let pending = this.inkCache.get(entry.docId);
+		if (pending === undefined) {
+			// Errors propagate: the import logs the reason (“could not
+			// regenerate: …”) instead of a bare null.
+			pending = this.ink.loadInk(entry, () => this.unchangedSentText(entry));
+			this.inkCache.set(entry.docId, pending);
+		}
+		return pending;
+	}
+
+	/**
+	 * The note as it was sent, rebuilt from the vault — only while it still
+	 * matches the recorded hash. The fallback for a send whose stored text
+	 * went missing (a reinstall, a cleaned plugin folder).
+	 */
+	private async unchangedSentText(
+		entry: MappingEntry,
+	): Promise<{ title: string; markdown: string } | null> {
+		const file = this.resolveNote(entry);
+		if (file === null) return null;
+		const embeds = await this.buildEmbedMap(file);
+		const pre = preprocess(await this.app.vault.cachedRead(file), {
+			resolveEmbed: (linkpath) => embeds.get(linkpath) ?? { kind: "missing" },
+			frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
+		});
+		if (contentHash(pre.markdown) !== entry.contentHash) return null;
+		// The title as sent: a renamed note must not regenerate a different
+		// first line (it would no longer match the page on the tablet).
+		return { title: entry.ink?.title ?? file.basename, markdown: pre.markdown };
+	}
+
+	/**
+	 * The pictures a note embeds, decoded and quantised for hatching, keyed by
+	 * the name their placeholder line carries — the same display text the
+	 * preprocessing writes into `*[image: …]*`. Embedded notes are followed
+	 * as deep as the preprocessing follows them.
+	 */
+	private async noteImages(note: NoteInput): Promise<Record<string, InkImage>> {
+		const out: Record<string, InkImage> = {};
+		if (this.settings.inkImages === "placeholder") return out;
+		const seen = new Set<string>();
+		const visit = async (content: string, sourcePath: string, depth: number): Promise<void> => {
+			for (const match of content.matchAll(/!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g)) {
+				const target = match[1].trim();
+				const alias = match[2];
+				const file = this.app.metadataCache.getFirstLinkpathDest(target.split("#")[0], sourcePath);
+				if (file === null) continue;
+				if (IMAGE_EXTENSIONS.has(file.extension.toLowerCase())) {
+					const names = [displayTextForLink(target, alias), file.basename].filter(
+						(name) => out[name] === undefined,
+					);
+					if (names.length === 0) continue;
+					const image = await this.decodeImage(file, alias);
+					if (image !== null) for (const name of names) out[name] = image;
+				} else if (file.extension === "md" && depth < MAX_EMBED_DEPTH && !seen.has(file.path)) {
+					seen.add(file.path);
+					await visit(await this.app.vault.cachedRead(file), file.path, depth + 1);
+				}
+			}
+			for (const match of content.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)) {
+				const alt = match[1].trim();
+				const path = match[2].trim().split(/\s+/)[0];
+				if (alt === "" || /^[a-z]+:/i.test(path) || out[alt] !== undefined) continue;
+				let decoded = path;
+				try {
+					decoded = decodeURI(path);
+				} catch {
+					// keep the raw path
+				}
+				const file = this.app.metadataCache.getFirstLinkpathDest(decoded, sourcePath);
+				if (file === null || !IMAGE_EXTENSIONS.has(file.extension.toLowerCase())) continue;
+				const image = await this.decodeImage(file);
+				if (image !== null) out[alt] = image;
+			}
+		};
+		await visit(note.content, note.path, 0);
+		return out;
+	}
+
+	/**
+	 * Decode a picture with the platform's own decoders, scale it to the
+	 * hatching grid on a canvas (over white, so transparency is paper) and
+	 * quantise it. An Obsidian size alias (`|300`, `|300x200`) sets its size.
+	 */
+	private async decodeImage(file: TFile, alias?: string): Promise<InkImage | null> {
+		try {
+			const bytes = await this.app.vault.readBinary(file);
+			const ext = file.extension.toLowerCase();
+			const type = ext === "svg" ? "image/svg+xml" : ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+			const blob = new Blob([bytes], { type });
+			let source: CanvasImageSource;
+			let width: number;
+			let height: number;
+			try {
+				const bitmap = await createImageBitmap(blob);
+				source = bitmap;
+				width = bitmap.width;
+				height = bitmap.height;
+			} catch {
+				// SVG and some formats only decode through an <img>.
+				const url = URL.createObjectURL(blob);
+				try {
+					const img = createEl("img");
+					img.src = url;
+					await img.decode();
+					source = img;
+					width = img.naturalWidth || 300;
+					height = img.naturalHeight || 300;
+				} finally {
+					window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+				}
+			}
+			if (width <= 0 || height <= 0) return null;
+			const grid = gridSizeFor(width, height);
+			const canvas = createEl("canvas");
+			canvas.width = grid.width;
+			canvas.height = grid.height;
+			const context = canvas.getContext("2d");
+			if (context === null) return null;
+			context.fillStyle = "#ffffff";
+			context.fillRect(0, 0, grid.width, grid.height);
+			context.drawImage(source, 0, 0, grid.width, grid.height);
+			const pixels = context.getImageData(0, 0, grid.width, grid.height);
+			const size = /^\s*(\d+)(?:\s*x\s*(\d+))?\s*$/.exec(alias ?? "");
+			const shownWidth = size === null ? width : Number(size[1]);
+			const shownHeight =
+				size === null ? height : size[2] !== undefined ? Number(size[2]) : (height * shownWidth) / width;
+			return quantizeImage(pixels.data, grid.width, grid.height, shownWidth, shownHeight);
+		} catch (error) {
+			console.warn(`reMarkable Ink Round-Trip: could not decode ${file.path}`, error);
+			return null;
+		}
+	}
+
+	/**
+	 * The note's Mermaid diagrams, rendered with Obsidian's own Mermaid in a
+	 * pen-friendly theme and traced into drawings, keyed by their source. A
+	 * diagram that fails to render stays a code block — the send goes on.
+	 */
+	private async noteDrawings(markdown: string): Promise<Record<string, InkDrawing>> {
+		const out: Record<string, InkDrawing> = {};
+		if (this.settings.inkDiagrams !== "handwritten") return out;
+		const sources = mermaidBlocks(markdown);
+		if (sources.length === 0) return out;
+		const mermaid = (await loadMermaid()) as {
+			render(id: string, text: string): Promise<{ svg: string }>;
+		};
+		for (const [index, source] of sources.entries()) {
+			const key = diagramKey(source);
+			if (out[key] !== undefined) continue;
+			const id = `ink-mermaid-${Date.now().toString(36)}-${index}`;
+			// Off-screen but laid out: the tracer needs real text metrics and
+			// computed styles, so neither display:none nor visibility:hidden.
+			const host = activeDocument.body.createDiv({ cls: "remarkable-ink-mermaid-host" });
+			try {
+				const { svg } = await mermaid.render(id, withInkTheme(source));
+				// Parsed the way Obsidian itself inserts it (HTML parser, which
+				// tolerates entities strict XML would reject), then adopted.
+				const parsed = new DOMParser().parseFromString(svg, "text/html").body.querySelector("svg");
+				if (parsed === null) throw new Error("Mermaid returned no SVG");
+				const element = activeDocument.importNode(parsed, true);
+				host.appendChild(element);
+				const box = element.viewBox.baseVal;
+				if (box.width > 0 && box.height > 0) {
+					element.setAttribute("width", String(box.width));
+					element.setAttribute("height", String(box.height));
+				}
+				out[key] = extractDrawing(element);
+			} catch (error) {
+				console.warn("reMarkable Ink Round-Trip: a Mermaid diagram could not be rendered", error);
+			} finally {
+				host.remove();
+				activeDocument.getElementById(`d${id}`)?.remove();
+			}
+		}
+		return out;
+	}
+
+	/** Strokes → PNG bytes (the same painter the remark images use). */
+	private async strokesToPng(strokes: StrokeRenderRequest["strokes"]): Promise<ArrayBuffer | null> {
+		const plan = planRender(strokes);
+		if (plan === null) return null;
+		const canvas = createEl("canvas");
+		canvas.width = plan.width;
+		canvas.height = plan.height;
+		const context = canvas.getContext("2d");
+		if (context === null) return null;
+		paintPlan(context, plan);
+		const blob = await new Promise<Blob | null>((resolve) =>
+			canvas.toBlob((result) => resolve(result), "image/png"),
+		);
+		return blob === null ? null : blob.arrayBuffer();
+	}
+
+	/** OCR one remark through the configured endpoint (opt-in). */
+	private async transcribeStrokes(
+		request: StrokeRenderRequest & { quote?: string },
+	): Promise<string | null> {
+		const png = await this.strokesToPng(request.strokes);
+		if (png === null) return null;
+		return this.ink.ocr(obsidianHttp, png, request.quote, request.wholePage === true);
+	}
+
+	/** Open the rmapi-js session the raw sync API lives on. */
+	private async rawApi(): Promise<RawSyncApi> {
+		const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+		return api.raw;
+	}
+
+	private requirePaired(): boolean {
+		if (this.settings.deviceToken !== "") return true;
+		notify("Not paired with a reMarkable account yet — open the plugin settings first.");
+		return false;
+	}
+
+	async sendHandwritingSheet(): Promise<void> {
+		if (!this.requirePaired()) return;
+		const notice = this.progress("Sending the handwriting sheet…");
+		try {
+			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+			let parentId: string | undefined;
+			if (this.settings.mirrorFolders && this.settings.deviceBaseFolder !== "") {
+				parentId = await new MirrorTransport(api, this.settings.deviceBaseFolder).ensureFolderPath("");
+			}
+			await this.ink.sendSheet(api.raw, parentId);
+			notify(
+				"Handwriting sheet sent. Write each character in its box on the reMarkable, let it sync, then run “Learn my handwriting from the sheet”.",
+				10000,
+			);
+		} catch (error) {
+			notify(toTransportError(error).message, 10000);
+		} finally {
+			notice.hide();
+		}
+	}
+
+	async learnHandwriting(addVariants: boolean): Promise<void> {
+		if (!this.requirePaired()) return;
+		const notice = this.progress("Reading your handwriting sheet…");
+		try {
+			const result = await this.ink.learnFromSheet(await this.rawApi(), addVariants);
+			if (this.settings.inkFont !== "hand") {
+				this.settings.inkFont = "hand";
+				await this.persistSettings();
+			}
+			const skipped =
+				result.skipped.length === 0
+					? ""
+					: ` Not on the sheet, so written in the fallback font: ${result.skipped.join(" ")}`;
+			notify(
+				`Learned ${result.learned.length} character(s)${addVariants ? " as extra variations" : ""}. Handwritten sends now use your hand.${skipped}`,
+				12000,
+			);
+		} catch (error) {
+			notify(error instanceof Error ? error.message : String(error), 10000);
+		} finally {
+			notice.hide();
+		}
+	}
+
+	async detectPageSize(): Promise<void> {
+		if (!this.requirePaired()) return;
+		const notice = this.progress("Looking for a notebook made on your reMarkable…");
+		try {
+			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+			const items = await api.listItems(true);
+			// Notebooks only, newest first: a PDF page's scene info may describe
+			// the PDF rather than the tablet.
+			const notebooks = items
+				.filter((item) => item.type === "DocumentType" && item.fileType === "notebook")
+				.sort((a, b) => Number(b.lastModified) - Number(a.lastModified))
+				.slice(0, 15)
+				.map((item) => ({ id: item.id, name: item.visibleName }));
+			const found = await this.ink.detectPageSize(api.raw, notebooks);
+			notify(
+				found === null
+					? "No notebook with a recorded page size found. Draw a stroke in any notebook on the tablet, sync, and try again."
+					: `Page size ${found.profile.width}×${found.profile.height} (${found.profile.dpi} dpi), read from “${found.from}”. Handwritten sends now use it.`,
+				10000,
+			);
+		} catch (error) {
+			notify(toTransportError(error).message, 10000);
+		} finally {
+			notice.hide();
+		}
 	}
 
 	/**
@@ -1603,6 +1985,7 @@ export default class RoundTripPlugin extends Plugin {
 			source,
 			inSourceNote: this.settings.annotationTarget === "source",
 			styles: this.settings.markStyles,
+			erasedAs: this.settings.erasedAs,
 			sourceChanged: sourceState === "changed",
 			importedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
 		});

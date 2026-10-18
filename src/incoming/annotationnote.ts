@@ -47,6 +47,8 @@ export interface AnnotationRenderInput {
 	sourceChanged?: boolean;
 	/** How each recognised mark is written; defaults when not given. */
 	styles?: MarkStyles;
+	/** Ink fork: an erased handwritten word is deleted or struck through. */
+	erasedAs?: "delete" | "strikethrough";
 }
 
 /** How the block came out, so the report can say so (GP_E3_S14). */
@@ -87,6 +89,7 @@ export function renderAnnotationBlock(input: AnnotationRenderInput): RenderedAnn
 					highlights: input.highlights,
 					marks,
 					styles: input.styles,
+					erasedAs: input.erasedAs,
 				})
 			: null;
 	if (copy !== null) {
@@ -178,11 +181,22 @@ function renderMark(mark: ImportedMark, styles: MarkStyles): string[] {
 			return [`Ticked on the reMarkable: “${mark.target ?? mark.quote ?? "task"}”`];
 		case "checkbox-cancel":
 			return [`Struck off on the reMarkable: “${mark.target ?? mark.quote ?? "task"}”`];
+		case "erased":
+			return [`~~${mark.target ?? ""}~~ — erased on the reMarkable`];
+		case "moved":
+			return [
+				`“${mark.target ?? ""}” — moved on the reMarkable` +
+					(mark.quote === undefined ? "" : ` into the line “${mark.quote}”`),
+			];
 		default:
 			if (mark.addedPage !== undefined) {
 				return [`**Page added on the reMarkable** (page ${mark.addedPage})`, ...image];
 			}
-			return [...(mark.quote === undefined ? [] : [`Note at: “${mark.quote}”`]), ...image];
+			return [
+				...(mark.quote === undefined ? [] : [`Note at: “${mark.quote}”`]),
+				...(mark.transcript === undefined ? [] : [`> ${mark.transcript.replace(/\n/g, "\n> ")}`]),
+				...image,
+			];
 	}
 }
 
