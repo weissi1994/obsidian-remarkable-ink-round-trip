@@ -309,6 +309,11 @@ export class Lexicon {
 		return lexicon;
 	}
 
+	/** Every word, lower case with its most common spelling. */
+	*words(): Iterable<[string, string]> {
+		for (const length of this.byLength.keys()) yield* this.ofLength(length);
+	}
+
 	/** Lower-case words of a length, each with its most common spelling. */
 	*ofLength(length: number): Iterable<[string, string]> {
 		for (const [key, forms] of this.byLength.get(length) ?? []) {
@@ -425,17 +430,15 @@ export interface Recognition {
 	confidence: number;
 }
 
-/**
- * Read strokes (device units, y down) as text. `lexicon` corrects whole
- * words; without it every letter stands as matched.
- */
-export function recognize(strokes: Point[][], templates: Template[], lexicon?: Lexicon): Recognition | null {
-	const usable = strokes.filter((stroke) => stroke.length > 0);
-	if (usable.length === 0 || templates.length === 0) return null;
-	const lines: string[] = [];
-	let cost = 0;
-	let letters = 0;
-	for (const lineStrokes of splitLines(usable)) {
+interface LineWords {
+	line: { baseline: number; cap: number };
+	words: Group[][];
+}
+
+/** Strokes (device units, y down) → lines of words of letter clusters. */
+function layoutOf(strokes: Point[][]): LineWords[] {
+	const out: LineWords[] = [];
+	for (const lineStrokes of splitLines(strokes.filter((stroke) => stroke.length > 0))) {
 		const lineBox = boxOf(lineStrokes);
 		const groups = clusterStrokes(lineStrokes, (lineBox.maxY - lineBox.minY) * 0.6 || 1);
 		// The baseline sits where most letters end; the tallest letters give the cap.
@@ -447,23 +450,69 @@ export function recognize(strokes: Point[][], templates: Template[], lexicon?: L
 		const typical = median(tops) || 1;
 		const cap =
 			tallest > typical * 1.2 ? Math.max(tops[Math.floor(tops.length * 0.8)], typical * 1.2) : typical / 0.7;
-		const line = { baseline, cap };
 		const gaps: number[] = [];
 		for (let i = 1; i < groups.length; i++) gaps.push(groups[i].box.minX - groups[i - 1].box.maxX);
 		const space = Math.max(cap * 0.45, median(gaps) * 2.2);
-		const wordGroups: Group[][] = [[]];
+		const words: Group[][] = [[]];
 		for (const [i, group] of groups.entries()) {
-			if (i > 0 && gaps[i - 1] > space) wordGroups.push([]);
-			wordGroups[wordGroups.length - 1].push(group);
+			if (i > 0 && gaps[i - 1] > space) words.push([]);
+			words[words.length - 1].push(group);
 		}
-		const words = wordGroups.map((word) => segment(word, line, templates));
+		out.push({ line: { baseline, cap }, words: words.filter((word) => word.length > 0) });
+	}
+	return out;
+}
+
+/** The strokes of each word, line by line — how a remark is cut into words. */
+export function splitWords(strokes: Point[][]): Point[][][][] {
+	return layoutOf(strokes).map((line) => line.words.map((word) => word.flatMap((group) => group.strokes)));
+}
+
+/** Reads a whole word at once, for joined-up writing (see words.ts). */
+export interface WholeWordReader {
+	/** The best match and how close it is; `trusted` when close enough to use. */
+	read(strokes: Point[][], lexicon: Lexicon | undefined): { word: string; cost: number; trusted: boolean } | null;
+}
+
+/** A letter cost per letter that counts as "the letter reader is unsure". */
+const UNSURE = 0.3;
+
+/**
+ * Read strokes (device units, y down) as text. `lexicon` corrects whole
+ * words; `words` reads joined-up words whole — the owner's own samples first.
+ */
+export function recognize(
+	strokes: Point[][],
+	templates: Template[],
+	lexicon?: Lexicon,
+	words?: WholeWordReader,
+): Recognition | null {
+	const usable = strokes.filter((stroke) => stroke.length > 0);
+	if (usable.length === 0 || templates.length === 0) return null;
+	const lines: string[] = [];
+	let cost = 0;
+	let letters = 0;
+	for (const { line, words: wordGroups } of layoutOf(usable)) {
 		const out: string[] = [];
-		for (const word of words) {
-			if (word.length === 0) continue;
-			const corrected = correct(word, lexicon);
-			out.push(corrected.text);
-			cost += corrected.cost;
-			letters += word.length;
+		for (const groups of wordGroups) {
+			const letterCandidates = segment(groups, line, templates);
+			if (letterCandidates.length === 0) continue;
+			const corrected = correct(letterCandidates, lexicon);
+			let text = corrected.text;
+			let wordCost = corrected.cost;
+			let wordLetters = letterCandidates.length;
+			if (words !== undefined) {
+				const whole = words.read(groups.flatMap((g) => g.strokes), lexicon);
+				const unsure = corrected.cost / letterCandidates.length > UNSURE;
+				if (whole !== null && whole.trusted && (unsure || whole.cost < 0.1)) {
+					text = whole.word;
+					wordLetters = [...whole.word].length;
+					wordCost = whole.cost * wordLetters;
+				}
+			}
+			out.push(text);
+			cost += wordCost;
+			letters += wordLetters;
 		}
 		lines.push(out.join(" "));
 	}
