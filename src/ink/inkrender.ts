@@ -18,6 +18,7 @@ import { imagePlaceholderText, type Block } from "../convert/mdblocks";
 import {
 	DrawColor,
 	DrawPage,
+	HighlightKind,
 	MeasureFont,
 	PdfLayout,
 	PdfLayoutOptions,
@@ -97,7 +98,20 @@ export interface InkRenderOptions {
 	imageStyle?: ImageStyle;
 	/** Diagrams by diagramKey(source): Mermaid blocks drawn by hand. */
 	drawings?: Record<string, InkDrawing>;
+	/**
+	 * Colour accents: highlighter bands behind code, inline code and quotes,
+	 * and diagram fills as highlighter instead of hatching. Absent on sends
+	 * made before the feature, which must replay without them.
+	 */
+	accents?: boolean;
 }
+
+/** Highlighter colour per accent; the rM 2 and 1 show every one as grey. */
+export const ACCENT_COLORS: Record<HighlightKind, number> = {
+	"code": PEN_COLOR.blue,
+	"inline-code": PEN_COLOR.pink,
+	"quote": PEN_COLOR.yellow,
+};
 
 /** The placeholder line preprocessing leaves for an image embed. */
 const IMAGE_PLACEHOLDER = /^\[image: (.+)\]$/;
@@ -146,6 +160,8 @@ export interface GeneratedStroke {
 	tool: number;
 	color: number;
 	thicknessScale: number;
+	/** v2 point width, when not the pen's own (highlighter bands). */
+	width?: number;
 	/** Absolute device coordinates. */
 	points: { x: number; y: number }[];
 }
@@ -163,6 +179,7 @@ export interface InkRender {
 type DrawOp =
 	| { kind: "text"; text: string; x: number; y: number; size: number; font: HandFont; color?: DrawColor }
 	| { kind: "image"; name: string; x: number; y: number; width: number; height: number }
+	| { kind: "highlight"; x: number; y: number; width: number; height: number; highlight: HighlightKind }
 	| {
 			kind: "line";
 			x1: number;
@@ -236,6 +253,9 @@ class RecordingBackend implements TypesetBackend {
 					thickness: o.borderWidth ?? 1,
 					color: o.borderColor,
 				});
+			},
+			drawHighlight: (o) => {
+				ops.push({ kind: "highlight", x: o.x, y: o.y, width: o.width, height: o.height, highlight: o.kind });
 			},
 			drawImage: (name, o) => {
 				ops.push({ kind: "image", name, x: o.x, y: o.y, width: o.width, height: o.height });
@@ -351,21 +371,48 @@ export function renderInk(
 			points: { x: number; y: number }[],
 			color: number,
 			thicknessScale: number,
+			pen: { tool: number; width: number } | undefined = undefined,
 		) => {
 			const dense = resample(points);
 			if (dense.length === 0) return;
-			strokes.push({
+			const stroke: GeneratedStroke = {
 				counter: counter++,
 				wordId,
-				tool: options.pen.tool,
+				tool: pen?.tool ?? options.pen.tool,
 				color,
 				thicknessScale,
 				points: dense.map((point) => ({ x: round2(point.x), y: round2(point.y) })),
-			});
+			};
+			if (pen !== undefined) stroke.width = pen.width;
+			strokes.push(stroke);
 		};
 
 		for (const op of ops) {
-			if (op.kind === "text") {
+			if (op.kind === "highlight") {
+				if (options.accents !== true) continue;
+				const top = toDevice(op.x, op.y + op.height);
+				const bottom = toDevice(op.x + op.width, op.y);
+				const height = bottom.y - top.y;
+				// One band per ~7 pt of height; each a little wider than its
+				// share so neighbouring bands and lines join without gaps.
+				const rows = Math.max(1, Math.ceil(height / (7 * options.profile.dpi / 72)));
+				const band = height / rows;
+				// The pen's round ends reach past the points by half a band.
+				const inset = Math.max(0, Math.min(band / 2, (bottom.x - top.x) / 2 - 0.5));
+				for (let row = 0; row < rows; row++) {
+					const y = top.y + band * (row + 0.5);
+					add(
+						null,
+						[
+							{ x: top.x + inset, y },
+							{ x: bottom.x - inset, y },
+						],
+						ACCENT_COLORS[op.highlight],
+						1,
+						{ tool: PEN.highlighter, width: Math.round(band * 1.1 * 4) },
+					);
+				}
+			} else if (op.kind === "text") {
 				const placed = byPlacement.get(`${page}|${op.x}|${op.y}|${op.text}`);
 				const color = penColorFor(op.color, options.pen);
 				const weight = op.font.style.weight ?? 1;
@@ -433,8 +480,15 @@ export function renderInk(
 						seed: `${options.seed}|${op.name}`,
 						unit: options.profile.dpi / 72,
 						colour: options.imageStyle !== "mono-hatch",
+						highlighter: options.accents === true,
 					});
-					for (const stroke of strokes) add(null, stroke.points, stroke.color, stroke.thickness);
+					for (const stroke of strokes) {
+						const pen =
+							stroke.tool === undefined || stroke.width === undefined
+								? undefined
+								: { tool: stroke.tool, width: stroke.width };
+						add(null, stroke.points, stroke.color, stroke.thickness, pen);
+					}
 					continue;
 				}
 				const image = options.images?.[op.name];
@@ -496,7 +550,7 @@ export function toInkLines(strokes: GeneratedStroke[], pen: InkPen): InkLine[] {
 			return {
 				x: point.x,
 				y: point.y,
-				width: pen.width * widthScale,
+				width: stroke.width ?? pen.width * widthScale,
 				pressure: 200,
 				speed: 6,
 				direction: directionOf(next.x - prev.x, next.y - prev.y),

@@ -81,6 +81,29 @@ function hueDistance(a: number, b: number): number {
 	return d > 180 ? 360 - d : d;
 }
 
+/** Highlighter colours by hue; Paper Pro and Move show them, others grey. */
+const HIGHLIGHTER_HUES: { color: number; hue: number }[] = [
+	{ color: PEN_COLOR.yellow, hue: 55 },
+	{ color: PEN_COLOR.green, hue: 125 },
+	{ color: PEN_COLOR.blue, hue: 205 },
+	{ color: PEN_COLOR.pink, hue: 315 },
+	{ color: PEN_COLOR.red, hue: 5 },
+];
+
+/**
+ * The highlighter colour closest to a fill, or null for near-white. Unlike
+ * quantizePixel, pale tints count: a pastel box background is still colour.
+ */
+export function highlighterColorOf(r: number, g: number, b: number): number | null {
+	const { h, s, v } = rgbToHsv(r, g, b);
+	if (s < 0.08 || v < 0.2) return v >= 0.93 ? null : PEN_COLOR.grey;
+	let best = HIGHLIGHTER_HUES[0];
+	for (const candidate of HIGHLIGHTER_HUES) {
+		if (hueDistance(h, candidate.hue) < hueDistance(h, best.hue)) best = candidate;
+	}
+	return best.color;
+}
+
 /** One pixel → `ink << 2 | level`, or 0 for paper. Alpha below ½ is paper. */
 export function quantizePixel(r: number, g: number, b: number, a = 255): number {
 	if (a < 128) return 0;

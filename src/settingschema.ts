@@ -360,6 +360,16 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				},
 			},
 			{
+				key: "inkAccents",
+				name: "Colour accents",
+				desc:
+					"Highlighter bands behind code blocks (blue), inline code (pink) and " +
+					"quotes and callouts (yellow); coloured areas in Mermaid diagrams are " +
+					"filled with the highlighter in their nearest colour instead of " +
+					"hatched. Colour shows on the Paper Pro and Move; other models show grey.",
+				control: { type: "toggle" },
+			},
+			{
 				key: "erasedAs",
 				name: "A word you erase on the tablet becomes",
 				desc:

@@ -1,5 +1,17 @@
 # Changelog — reMarkable Ink Round-Trip
 
+## Unreleased
+
+- **Colour accents:** code blocks get a blue highlighter band, inline code a
+  pink one and quotes/callouts a yellow one — drawn with the tablet's own
+  highlighter, so the text stays on top. Coloured areas in Mermaid diagrams
+  (`style`/`classDef` fills, notes, pie slices) are filled with the highlighter
+  in their nearest colour instead of hatched, and pale pastel fills now count
+  as colour too. Colour shows on the Paper Pro and Move; other models show grey.
+- *Settings → Handwriting → Colour accents* (on by default). Recorded per send:
+  notebooks sent earlier are regenerated without accents, so their import is
+  unchanged.
+
 ## 1.2.0 — 2026-10-18
 
 - **Mermaid diagrams drawn by hand:** every ```` ```mermaid ```` block is rendered

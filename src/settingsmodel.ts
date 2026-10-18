@@ -97,6 +97,8 @@ export interface RoundTripSettings {
 	inkImages: "colour-hatch" | "mono-hatch" | "placeholder";
 	/** Mermaid diagrams in a handwritten notebook: drawn by hand, or as code. */
 	inkDiagrams: "handwritten" | "code";
+	/** Highlighter colour behind code and quotes, and for diagram fills. */
+	inkAccents: boolean;
 	/** What an erased handwritten word becomes in the annotated copy. */
 	erasedAs: "delete" | "strikethrough";
 	/** Opt-in OCR of handwritten remarks via an OpenAI-compatible endpoint. */
@@ -150,6 +152,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	pendingSheet: null,
 	inkImages: "colour-hatch",
 	inkDiagrams: "handwritten",
+	inkAccents: true,
 	erasedAs: "delete",
 	ocrEnabled: false,
 	ocrEndpoint: "http://localhost:11434/v1",

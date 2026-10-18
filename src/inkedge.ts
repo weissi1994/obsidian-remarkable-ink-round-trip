@@ -150,6 +150,7 @@ export class InkEdge {
 			profile: this.profile(),
 			shape: INK_SHAPE_VERSION,
 			imageStyle: s.inkImages === "placeholder" ? undefined : s.inkImages,
+			...(s.inkAccents ? { accents: true as const } : {}),
 		};
 	}
 

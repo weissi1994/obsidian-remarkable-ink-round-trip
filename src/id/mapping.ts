@@ -104,6 +104,8 @@ export interface InkSnapshot {
 	 * quantised pictures themselves are stored with the sent text.
 	 */
 	imageStyle?: "colour-hatch" | "mono-hatch";
+	/** Colour accents were drawn (highlighter bands, diagram fills); absent = not. */
+	accents?: true;
 	/** The title the notebook was written with (its first line). */
 	title?: string;
 	/**

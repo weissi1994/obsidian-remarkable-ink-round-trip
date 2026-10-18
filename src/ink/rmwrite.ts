@@ -45,6 +45,7 @@ export const PEN = {
 	pencil: 14,
 	mechanicalPencil: 13,
 	marker: 16,
+	highlighter: 18,
 } as const;
 
 /** reMarkable colour ids (rmscene `PenColor`). */

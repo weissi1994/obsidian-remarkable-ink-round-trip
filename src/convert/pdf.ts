@@ -18,6 +18,7 @@ import {
 	imagePlaceholderText,
 	type Block,
 	type ListItem,
+	wordCount,
 } from "./mdblocks";
 
 /**
@@ -79,6 +80,8 @@ export interface PlacedWord {
 	text: string;
 	x: number;
 	width: number;
+	/** Inline code in the source (fork: colour accents). */
+	code?: true;
 }
 
 /** What kind of source block a line came from (GP_E3_S12). */
@@ -271,9 +274,16 @@ export interface DrawPage {
 	}): void;
 	/** Ink fork: where a picture goes (bottom-left origin, points). */
 	drawImage?(name: string, options: { x: number; y: number; width: number; height: number }): void;
+	/**
+	 * Ink fork: a coloured band behind text — a code block or quote line, or
+	 * a run of inline code. Bottom-left origin, points. PDF ignores it.
+	 */
+	drawHighlight?(options: { x: number; y: number; width: number; height: number; kind: HighlightKind }): void;
 	/** A pre-embedded PNG for an image block; a backend without one leaves the space blank. */
 	drawPng?(block: Block, options: { x: number; y: number; width: number; height: number }): void;
 }
+
+export type HighlightKind = "code" | "inline-code" | "quote";
 
 /** Fonts and pages: everything a typesetting pass draws with. */
 export interface TypesetBackend {
@@ -303,6 +313,26 @@ interface Typesetter {
 	ordered?: number;
 	/** Running word counter, so a mark can name the exact words it covers. */
 	wordId: number;
+	/** Inline-code words of the current block, consumed as words are placed. */
+	code?: InlineCode;
+}
+
+interface InlineCode {
+	flags: Set<number>;
+	/** The block's words as wrapText splits them. */
+	words: string[];
+	word: number;
+	/** Characters of the current word already placed (a broken long word). */
+	used: number;
+}
+
+/** Arm inline-code tracking for the text the current block is about to place. */
+function trackInlineCode(ts: Typesetter, text: string, code: number[] | undefined): void {
+	if (code === undefined || code.length === 0) return;
+	const words = toWinAnsi(text, ts.opts.typo)
+		.split(/\s+/)
+		.filter((w) => w !== "");
+	ts.code = { flags: new Set(code), words, word: 0, used: 0 };
 }
 
 function newPage(ts: Typesetter): void {
@@ -323,6 +353,24 @@ function put(
 	size: number,
 	font: MeasureFont,
 ): void {
+	const words = text.trim() !== "" ? placeWords(ts, text, x, font, size) : [];
+	if (ts.page.drawHighlight !== undefined) {
+		const space = font.widthOfTextAtSize(" ", size);
+		for (let i = 0; i < words.length; i++) {
+			if (words[i].code !== true) continue;
+			let j = i;
+			while (j + 1 < words.length && words[j + 1].code === true) j++;
+			const pad = space * 0.4;
+			ts.page.drawHighlight({
+				x: words[i].x - pad,
+				y: y - size * 0.3,
+				width: words[j].x + words[j].width - words[i].x + 2 * pad,
+				height: size * 1.15,
+				kind: "inline-code",
+			});
+			i = j;
+		}
+	}
 	ts.page.drawText(text, { x, y, size, font, color: rgb(0, 0, 0) });
 	if (text.trim() !== "") {
 		ts.placed.push({
@@ -331,7 +379,7 @@ function put(
 			y,
 			size,
 			text,
-			words: placeWords(ts, text, x, font, size),
+			words,
 			block: ts.block,
 			role: ts.role,
 			level: ts.level,
@@ -346,6 +394,7 @@ function beginBlock(ts: Typesetter, role: LineRole, level?: number, ordered?: nu
 	ts.role = role;
 	ts.level = level;
 	ts.ordered = ordered;
+	ts.code = undefined;
 }
 
 /**
@@ -368,7 +417,17 @@ function placeWords(
 			continue;
 		}
 		const width = font.widthOfTextAtSize(part, size);
-		words.push({ id: ts.wordId++, text: part, x: cursor, width });
+		const word: PlacedWord = { id: ts.wordId++, text: part, x: cursor, width };
+		const code = ts.code;
+		if (code !== undefined && code.word < code.words.length) {
+			if (code.flags.has(code.word)) word.code = true;
+			code.used += part.length;
+			if (code.used >= code.words[code.word].length) {
+				code.word++;
+				code.used = 0;
+			}
+		}
+		words.push(word);
 		cursor += width + spaceWidth;
 	}
 	return words;
@@ -482,8 +541,9 @@ function contentWidth(ts: Typesetter, indent = 0): number {
 	return ts.opts.pageWidth - 2 * ts.opts.margin - indent;
 }
 
-function drawHeading(ts: Typesetter, level: number, text: string): void {
+function drawHeading(ts: Typesetter, level: number, text: string, code?: number[]): void {
 	beginBlock(ts, level === 0 ? "title" : "heading", Math.max(level, 1));
+	trackInlineCode(ts, text, code);
 	const size = HEADING_SIZES[level] ?? 11;
 	const gapBefore = size * 0.8;
 	// Keep-with-next (GP_E6_S5, typo 4): a heading only starts on a page if
@@ -497,8 +557,14 @@ function drawHeading(ts: Typesetter, level: number, text: string): void {
 	drawLines(ts, lines, ts.bold, size, 0, size * 0.35);
 }
 
-function drawParagraph(ts: Typesetter, text: string, style?: "bold" | "italic"): void {
+function drawParagraph(
+	ts: Typesetter,
+	text: string,
+	style?: "bold" | "italic",
+	code?: number[],
+): void {
 	beginBlock(ts, "paragraph");
+	trackInlineCode(ts, text, code);
 	// A whole-span label like "**Doel**" renders in its font (GP_E6_S7,
 	// typo 7): the line stays single-font, so wrapping, the word map and the
 	// projection stay trivially correct. Mixed inline styling is GP_E6_S8.
@@ -536,6 +602,13 @@ function drawList(ts: Typesetter, items: ListItem[]): void {
 		// (GP_E5_S6) — a square you can actually tick with the pen.
 		const task = ts.opts.typo >= 2 && !item.ordered ? parseTaskMarker(item.text) : null;
 		const text = task ? task.rest : item.text;
+		// The "[ ]" marker's words are not drawn as text.
+		const skipped = task ? wordCount(item.text) - wordCount(text) : 0;
+		trackInlineCode(
+			ts,
+			text,
+			item.code?.map((i) => i - skipped).filter((i) => i >= 0),
+		);
 		const lines = wrapText(toWinAnsi(text, ts.opts.typo), ts.body, size, contentWidth(ts, indent), ts.opts.typo);
 		const step = size * ts.opts.lineHeight;
 		ensureRoom(ts, step);
@@ -623,11 +696,12 @@ function drawCheckbox(ts: Typesetter, x: number, y: number, size: number, checke
 	}
 }
 
-function drawQuote(ts: Typesetter, quoteLines: string[]): void {
+function drawQuote(ts: Typesetter, quoteLines: string[], code?: number[]): void {
 	beginBlock(ts, "quote");
 	const size = ts.opts.fontSize;
 	const indent = 14;
 	const text = quoteLines.join(" ").trim();
+	trackInlineCode(ts, text, code);
 	const lines = wrapText(toWinAnsi(text, ts.opts.typo), ts.italic, size, contentWidth(ts, indent), ts.opts.typo);
 	const step = size * ts.opts.lineHeight;
 	for (const line of lines) {
@@ -641,6 +715,13 @@ function drawQuote(ts: Typesetter, quoteLines: string[]): void {
 			end: { x: ts.opts.margin + 3, y: ts.y + step * 0.85 },
 			thickness: 1.5,
 			color: rgb(0.55, 0.55, 0.55),
+		});
+		ts.page.drawHighlight?.({
+			x: ts.opts.margin + 6,
+			y: ts.y - step * 0.15,
+			width: contentWidth(ts) - 6,
+			height: step,
+			kind: "quote",
 		});
 		put(ts, line, ts.opts.margin + indent, ts.y, size, ts.italic);
 	}
@@ -659,6 +740,13 @@ function drawCode(ts: Typesetter, codeLines: string[]): void {
 		}
 		ensureRoom(ts, step);
 		ts.y -= step;
+		ts.page.drawHighlight?.({
+			x: ts.opts.margin + 2,
+			y: ts.y - step * 0.25,
+			width: contentWidth(ts) - 2,
+			height: step,
+			kind: "code",
+		});
 		put(ts, line, ts.opts.margin + 8, ts.y, size, ts.mono);
 	}
 	ts.y -= size * 0.8;
@@ -877,16 +965,16 @@ function drawImage(ts: Typesetter, block: { name: string; width: number; height:
 function drawBlock(ts: Typesetter, block: Block): void {
 	switch (block.type) {
 		case "heading":
-			drawHeading(ts, block.level, block.text);
+			drawHeading(ts, block.level, block.text, block.code);
 			break;
 		case "paragraph":
-			drawParagraph(ts, block.text, block.style);
+			drawParagraph(ts, block.text, block.style, block.code);
 			break;
 		case "list":
 			drawList(ts, block.items);
 			break;
 		case "quote":
-			drawQuote(ts, block.lines);
+			drawQuote(ts, block.lines, block.code);
 			break;
 		case "code":
 			drawCode(ts, block.lines);
@@ -963,6 +1051,7 @@ function measureBlocks(ts: Typesetter, blocks: Block[]): number {
 		ordered: ts.ordered,
 		wordId: ts.wordId,
 		y: ts.y,
+		code: ts.code,
 	};
 	const tall = 1_000_000;
 	ts.opts = { ...ts.opts, pageHeight: tall };
@@ -983,6 +1072,7 @@ function measureBlocks(ts: Typesetter, blocks: Block[]): number {
 	ts.ordered = saved.ordered;
 	ts.wordId = saved.wordId;
 	ts.y = saved.y;
+	ts.code = saved.code;
 	return used;
 }
 

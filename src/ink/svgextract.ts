@@ -70,6 +70,12 @@ function parseColor(value: string): [number, number, number, number] | null {
 
 const luminance = (c: [number, number, number, number]) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
 
+/** A pale but clearly coloured fill — a pastel box background. */
+function tinted(c: [number, number, number, number]): boolean {
+	const max = Math.max(c[0], c[1], c[2]);
+	return max > 0 && (max - Math.min(c[0], c[1], c[2])) / max >= 0.08;
+}
+
 function hexOf(c: [number, number, number, number]): string {
 	return `#${[c[0], c[1], c[2]].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
 }
@@ -198,7 +204,7 @@ function addShape(
 	for (const line of shapeGeometry(el)) {
 		const flat = line.points.flatMap(([x, y]) => applyMatrix(matrix, x, y));
 		const coloured = fillVisible && canFill && (line.closed || tag === "path");
-		if (coloured && luminance(fill) < 0.9) {
+		if (coloured && (luminance(fill) < 0.9 || tinted(fill))) {
 			collected.fills.push({ points: flat, rgb: hexOf(fill) });
 		}
 		if (coloured && fillOpacity >= 0.9 && line.closed) {

@@ -7,11 +7,16 @@
  * predictable typography over rich inline styling in this MVP.
  */
 
+/**
+ * `code` on a text block: indices of its whitespace-separated words that were
+ * inline code (fork: colour accents). Present only when there are any, so
+ * blocks without inline code keep their pre-fork shape.
+ */
 export type Block =
-	| { type: "heading"; level: number; text: string }
-	| { type: "paragraph"; text: string; style?: "bold" | "italic" }
+	| { type: "heading"; level: number; text: string; code?: number[] }
+	| { type: "paragraph"; text: string; style?: "bold" | "italic"; code?: number[] }
 	| { type: "list"; items: ListItem[] }
-	| { type: "quote"; lines: string[] }
+	| { type: "quote"; lines: string[]; code?: number[] }
 	| { type: "code"; lines: string[]; lang?: string }
 	| { type: "table"; rows: string[][] }
 	| { type: "hr" }
@@ -38,6 +43,7 @@ export interface ListItem {
 	ordered: boolean;
 	marker: string;
 	text: string;
+	code?: number[];
 }
 
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
@@ -81,8 +87,11 @@ function paragraphStyle(raw: string): "bold" | "italic" | undefined {
 
 /** Strip inline markdown markers, keeping the readable text. */
 export function stripInline(text: string): string {
+	return stripMarkers(text.replace(/`([^`]*)`/g, "$1"));
+}
+
+function stripMarkers(text: string): string {
 	return text
-		.replace(/`([^`]*)`/g, "$1")
 		.replace(/\*\*([^*]+)\*\*/g, "$1")
 		.replace(/__([^_]+)__/g, "$1")
 		.replace(/(?<![\w*])\*([^*\n]+)\*(?![\w*])/g, "$1")
@@ -90,6 +99,60 @@ export function stripInline(text: string): string {
 		.replace(/==([^=]+)==/g, "$1")
 		.replace(/~~([^~]+)~~/g, "$1")
 		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+}
+
+const CODE_OPEN = "\u0001";
+const CODE_CLOSE = "\u0002";
+
+/**
+ * stripInline, plus which of the resulting words were inline code. The text
+ * is always exactly stripInline's; when sentinel-marking the spans would
+ * change it, no word is flagged rather than risk a different layout.
+ */
+export function stripInlineCode(raw: string): { text: string; code: number[] } {
+	const text = stripInline(raw);
+	if (!raw.includes("`")) return { text, code: [] };
+	const marked = stripMarkers(raw.replace(/`([^`]*)`/g, `${CODE_OPEN}$1${CODE_CLOSE}`));
+	if (marked.split(CODE_OPEN).join("").split(CODE_CLOSE).join("") !== text) return { text, code: [] };
+	const code: number[] = [];
+	let token = 0;
+	let inToken = false;
+	let inCode = false;
+	let flagged = false;
+	for (const ch of marked) {
+		if (ch === CODE_OPEN || ch === CODE_CLOSE) {
+			inCode = ch === CODE_OPEN;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			if (inToken) {
+				if (flagged) code.push(token);
+				token++;
+			}
+			inToken = false;
+			flagged = false;
+			continue;
+		}
+		inToken = true;
+		if (inCode) flagged = true;
+	}
+	if (inToken && flagged) code.push(token);
+	return { text, code };
+}
+
+/** Number of whitespace-separated words, as the typesetter counts them. */
+export function wordCount(text: string): number {
+	return text.split(/\s+/).filter((w) => w !== "").length;
+}
+
+/** Append `next` (with its inline-code words) to `prev`, joined by a space. */
+function joinCode(prev: { text: string; code: number[] }, next: { text: string; code: number[] }) {
+	const offset = wordCount(prev.text);
+	return { text: `${prev.text} ${next.text}`, code: [...prev.code, ...next.code.map((i) => i + offset)] };
+}
+
+function withCode<T extends object>(block: T, code: number[]): T & { code?: number[] } {
+	return code.length > 0 ? { ...block, code } : block;
 }
 
 function parseTableRow(line: string): string[] {
@@ -106,15 +169,18 @@ export function parseBlocks(markdown: string): Block[] {
 	let paragraph: string[] = [];
 	let list: ListItem[] = [];
 	let quote: string[] = [];
+	let quoteCode: { text: string; code: number[] } | null = null;
 
 	const flushParagraph = () => {
 		if (paragraph.length > 0) {
 			const raw = paragraph.join(" ").trim();
 			const style = paragraphStyle(raw);
+			const { text, code } = stripInlineCode(raw);
 			blocks.push(
-				style === undefined
-					? { type: "paragraph", text: stripInline(raw) }
-					: { type: "paragraph", text: stripInline(raw), style },
+				withCode(
+					style === undefined ? { type: "paragraph", text } : { type: "paragraph", text, style },
+					code,
+				),
 			);
 			paragraph = [];
 		}
@@ -127,8 +193,9 @@ export function parseBlocks(markdown: string): Block[] {
 	};
 	const flushQuote = () => {
 		if (quote.length > 0) {
-			blocks.push({ type: "quote", lines: quote });
+			blocks.push(withCode({ type: "quote", lines: quote }, quoteCode?.code ?? []));
 			quote = [];
+			quoteCode = null;
 		}
 	};
 	const flushAll = () => {
@@ -173,11 +240,8 @@ export function parseBlocks(markdown: string): Block[] {
 		const heading = line.match(HEADING_RE);
 		if (heading) {
 			flushAll();
-			blocks.push({
-				type: "heading",
-				level: heading[1].length,
-				text: stripInline(heading[2].trim()),
-			});
+			const { text, code } = stripInlineCode(heading[2].trim());
+			blocks.push(withCode({ type: "heading", level: heading[1].length, text }, code));
 			continue;
 		}
 
@@ -196,7 +260,10 @@ export function parseBlocks(markdown: string): Block[] {
 		if (line.trimStart().startsWith(">")) {
 			flushParagraph();
 			flushList();
-			quote.push(stripInline(line.replace(/^\s*>\s?/, "")));
+			const part = stripInlineCode(line.replace(/^\s*>\s?/, ""));
+			quote.push(part.text);
+			// drawQuote joins the lines with a space; the word indices follow.
+			quoteCode = quoteCode === null ? part : joinCode(quoteCode, part);
 			continue;
 		}
 		flushQuote();
@@ -220,18 +287,26 @@ export function parseBlocks(markdown: string): Block[] {
 			flushParagraph();
 			const indent = item[1].replace(/\t/g, "  ").length;
 			const marker = item[2];
-			list.push({
-				depth: Math.floor(indent / 2),
-				ordered: /\d/.test(marker),
-				marker: marker,
-				text: stripInline(item[3].trim()),
-			});
+			const { text, code } = stripInlineCode(item[3].trim());
+			list.push(
+				withCode(
+					{
+						depth: Math.floor(indent / 2),
+						ordered: /\d/.test(marker),
+						marker: marker,
+						text,
+					},
+					code,
+				),
+			);
 			continue;
 		}
 
 		if (list.length > 0) {
 			// Continuation line of the previous list item.
-			list[list.length - 1].text += ` ${stripInline(line.trim())}`;
+			const { code: lastCode = [], ...last } = list[list.length - 1];
+			const joined = joinCode({ text: last.text, code: lastCode }, stripInlineCode(line.trim()));
+			list[list.length - 1] = withCode({ ...last, text: joined.text }, joined.code);
 			continue;
 		}
 

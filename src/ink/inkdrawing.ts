@@ -16,8 +16,8 @@
  */
 
 import { CAP_RATIO, HandFont } from "./glyphs";
-import { IMAGE_INKS, quantizePixel } from "./inkimage";
-import { PEN_COLOR } from "./rmwrite";
+import { IMAGE_INKS, highlighterColorOf, quantizePixel } from "./inkimage";
+import { PEN, PEN_COLOR } from "./rmwrite";
 
 export interface DrawingPath {
 	/** Flat x,y list in drawing pixels. */
@@ -412,6 +412,10 @@ export interface DrawingStroke {
 	color: number;
 	thickness: number;
 	points: { x: number; y: number }[];
+	/** Pen other than the note's own (the highlighter for fills). */
+	tool?: number;
+	/** v2 point width, when not derived from the thickness. */
+	width?: number;
 }
 
 export interface DrawingRenderOptions {
@@ -429,6 +433,8 @@ export interface DrawingRenderOptions {
 	unit: number;
 	/** Fill hatching in colour or grey. */
 	colour: boolean;
+	/** Fill areas with highlighter bands instead of hatching. */
+	highlighter?: boolean;
 }
 
 function hash32(text: string): number {
@@ -549,6 +555,27 @@ export function drawingStrokes(drawing: InkDrawing, options: DrawingRenderOption
 	const spacing = 2.6 * options.unit;
 	for (const fill of drawing.fills) {
 		const value = parseInt(fill.rgb.slice(1), 16);
+		if (options.highlighter === true) {
+			const color = highlighterColorOf((value >> 16) & 255, (value >> 8) & 255, value & 255);
+			if (color === null) continue;
+			const polygon: { x: number; y: number }[] = [];
+			for (let i = 0; i + 1 < fill.points.length; i += 2) polygon.push(map(fill.points[i], fill.points[i + 1]));
+			// Rows that exactly tile the shape's height, none wider than 7 pt.
+			const ys = polygon.map((p) => p.y);
+			const height = Math.max(...ys) - Math.min(...ys);
+			if (height < 1) continue;
+			const band = height / Math.max(1, Math.ceil(height / (7 * options.unit)));
+			for (const segment of hatchPolygon(polygon, 0, band)) {
+				out.push({
+					color: options.colour ? color : PEN_COLOR.grey,
+					thickness: 1,
+					points: segment,
+					tool: PEN.highlighter,
+					width: Math.round(band * 1.1 * 4),
+				});
+			}
+			continue;
+		}
 		const code = quantizePixel((value >> 16) & 255, (value >> 8) & 255, value & 255);
 		if (code === 0) continue;
 		let ink = code >> 2;

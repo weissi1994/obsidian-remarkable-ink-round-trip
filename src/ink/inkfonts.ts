@@ -83,5 +83,6 @@ export function inkOptionsFor(
 		jitter: snapshot.jitter,
 		seed,
 		imageStyle: snapshot.imageStyle,
+		accents: snapshot.accents === true,
 	};
 }
