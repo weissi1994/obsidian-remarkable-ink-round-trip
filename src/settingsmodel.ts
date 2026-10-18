@@ -81,7 +81,7 @@ export interface RoundTripSettings {
 	/** What a word erased on the tablet becomes in the note. */
 	erasedAs: "delete" | "strikethrough";
 	/** Opt-in OCR of handwritten remarks via an OpenAI-compatible endpoint. */
-	ocrEnabled: boolean;
+	ocrMode: OcrMode;
 	/** Base URL ending in /v1, e.g. a local Ollama: http://localhost:11434/v1 */
 	ocrEndpoint: string;
 	ocrModel: string;
@@ -94,6 +94,9 @@ export interface RoundTripSettings {
 
 /** Canvases a handwritten notebook can be written for (ink fork). */
 export type InkDevice = "rm2" | "paperpro" | "move" | "custom";
+
+/** How handwritten remarks are read as text: on the device's strokes, by a vision endpoint, or not. */
+export type OcrMode = "builtin" | "endpoint" | "off";
 
 export const DEFAULT_SETTINGS: RoundTripSettings = {
 	deviceToken: "",
@@ -129,7 +132,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	inkDiagrams: "handwritten",
 	inkAccents: true,
 	erasedAs: "delete",
-	ocrEnabled: false,
+	ocrMode: "builtin",
 	ocrEndpoint: "http://localhost:11434/v1",
 	ocrModel: "qwen2.5vl:7b",
 	ocrApiKey: "",
@@ -153,7 +156,9 @@ export function settingsFrom(stored: Partial<RoundTripSettings>): RoundTripSetti
 		settings.pageBreakAtHeading = "off";
 	}
 	// The notebook canvas used to follow a separate "reMarkable model".
-	const legacy = stored as { inkDevice?: string; deviceModel?: string };
+	const legacy = stored as { inkDevice?: string; deviceModel?: string; ocrEnabled?: boolean };
+	// The vision endpoint used to be the only OCR, behind an on/off switch.
+	if (stored.ocrMode === undefined && legacy.ocrEnabled === true) settings.ocrMode = "endpoint";
 	if (legacy.inkDevice === "auto" || legacy.inkDevice === undefined) {
 		settings.inkDevice = legacy.deviceModel === "paperpro" ? "paperpro" : "rm2";
 	}

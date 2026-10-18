@@ -361,16 +361,27 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 	{
 		heading: "Reading handwriting (OCR)",
 		note:
-			"Off by default: handwritten remarks come back as images. Turn this on to " +
-			"also get them as text from an OpenAI-compatible vision endpoint you choose " +
-			"— a local Ollama or LM Studio keeps your ink on your own machine. Only the " +
-			"cropped remark images are sent there, never the note.",
+			"Handwritten remarks come back as images, and — when they can be read — as " +
+			"text. Built-in reads your pen strokes right here, matching them against " +
+			"your handwriting sheet (or print letters without one) and the words in " +
+			"your vault, so German, English and your own vocabulary work; nothing leaves " +
+			"the device. It reads separate print letters well and leaves joined-up " +
+			"writing it is unsure of as image only. A vision endpoint is the " +
+			"alternative for that: an OpenAI-compatible model you choose, local (Ollama, " +
+			"LM Studio) or hosted; only the cropped remark images are sent there.",
 		items: [
 			{
-				key: "ocrEnabled",
-				name: "Transcribe handwritten remarks",
-				desc: "Send each remark image to the endpoint below and add the text it reads.",
-				control: { type: "toggle" },
+				key: "ocrMode",
+				name: "Read handwriting with",
+				desc: "Built-in needs nothing set up; it gets better once you have filled in the handwriting sheet.",
+				control: {
+					type: "dropdown",
+					options: {
+						builtin: "Built-in (on this device)",
+						endpoint: "Vision model endpoint",
+						off: "Off — images only",
+					},
+				},
 				refresh: true,
 			},
 			{
@@ -378,28 +389,28 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				name: "Endpoint",
 				desc: "Base URL up to /v1, e.g. http://localhost:11434/v1 for Ollama.",
 				control: { type: "text", placeholder: "http://localhost:11434/v1", sanitise: "url" },
-				visibleWhen: { key: "ocrEnabled", equals: true },
+				visibleWhen: { key: "ocrMode", equals: "endpoint" },
 			},
 			{
 				key: "ocrModel",
 				name: "Model",
 				desc: "A vision-capable model the endpoint serves, e.g. qwen2.5vl:7b.",
 				control: { type: "text", placeholder: "qwen2.5vl:7b" },
-				visibleWhen: { key: "ocrEnabled", equals: true },
+				visibleWhen: { key: "ocrMode", equals: "endpoint" },
 			},
 			{
 				key: "ocrApiKey",
 				name: "API key",
 				desc: "Only for hosted endpoints; leave empty for a local server.",
 				control: { type: "text", placeholder: "" },
-				visibleWhen: { key: "ocrEnabled", equals: true },
+				visibleWhen: { key: "ocrMode", equals: "endpoint" },
 			},
 			{
 				key: "ocrKeepImage",
 				name: "Keep the image next to the text",
 				desc: "Recommended: a misread word is easy to check against the ink.",
 				control: { type: "toggle" },
-				visibleWhen: { key: "ocrEnabled", equals: true },
+				visibleWhen: { key: "ocrMode", in: ["builtin", "endpoint"] },
 			},
 		],
 	},

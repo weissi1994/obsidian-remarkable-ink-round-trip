@@ -107,3 +107,12 @@ describe("notebook canvas migration", () => {
 		expect(legacy({})).toBe("rm2");
 	});
 });
+
+describe("OCR mode migration", () => {
+	it("keeps an OCR endpoint that was switched on, and reads on the device otherwise", () => {
+		expect(settingsFrom({ ocrEnabled: true } as Partial<RoundTripSettings>).ocrMode).toBe("endpoint");
+		expect(settingsFrom({ ocrEnabled: false } as Partial<RoundTripSettings>).ocrMode).toBe("builtin");
+		expect(settingsFrom({}).ocrMode).toBe("builtin");
+		expect(settingsFrom({ ocrEnabled: true, ocrMode: "off" } as Partial<RoundTripSettings>).ocrMode).toBe("off");
+	});
+});

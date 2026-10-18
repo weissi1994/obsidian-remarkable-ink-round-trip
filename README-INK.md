@@ -139,18 +139,27 @@ an edit of the diagram changes what the import compares the page against.
 Scribbles on a diagram come back as remarks; erasing part of it is not
 reported as erased text.
 
-## Reading handwriting (OCR) — opt-in
+## Reading handwriting (OCR)
 
-Off by default: upstream returns handwriting as an image on purpose, because a
-wrong guess can be worse than the ink. Turn on *Settings → Reading handwriting*
-to also get the text, from any OpenAI-compatible vision endpoint you choose:
+Every remark comes back as an image of your ink — and, when it can be read, as
+text next to it. *Settings → Reading handwriting → Read handwriting with*:
 
-- **Local, private:** Ollama (`http://localhost:11434/v1`, e.g. `qwen2.5vl:7b`)
-  or LM Studio. The ink never leaves your machine.
-- **Hosted:** any OpenAI-compatible API with a vision model; add the API key.
+- **Built-in** (default) reads the pen strokes themselves, right in the plugin —
+  no model, no download, nothing sent anywhere, on mobile too. Each letter is
+  matched against your own handwriting from the sheet (see
+  [Your own handwriting](#your-own-handwriting); without a sheet, against print
+  letters), and each word against the words in your vault — so German, English
+  and your own names and jargon are covered without a dictionary. It is made for
+  separate print letters; a remark it is unsure of (joined-up writing, a
+  drawing) stays image only rather than come back as a wrong guess.
+- **Vision model endpoint**: any OpenAI-compatible vision model — local (Ollama
+  `http://localhost:11434/v1` with e.g. `qwen2.5vl:7b`, LM Studio) or hosted with
+  an API key. Better at joined-up writing, slower. Only the cropped remark images
+  are sent, never the note.
+- **Off**: images only.
 
-Only the cropped remark images are sent — never the note. The image stays next to
-the transcript unless you turn that off, so a misread word is easy to check.
+The image stays next to the text unless you turn that off, so a misread word is
+easy to check.
 
 ## How it works
 

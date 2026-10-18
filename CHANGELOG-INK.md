@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Built-in handwriting recognition, on by default:** remarks are read from
+  their pen strokes inside the plugin — letters matched against your
+  handwriting sheet (print letters without one), words corrected against your
+  vault's vocabulary, so German and English work without a dictionary. Nothing
+  leaves the device; an unsure reading stays image only. The vision-model
+  endpoint remains as an option (*Read handwriting with*); an endpoint you had
+  switched on keeps being used.
 - **Inline styling in handwriting:** bold words are written with a heavier pen,
   italic ones slanted, `~~struck~~` and `<u>underlined</u>` words get a pen line
   through or under them, and `==highlights==` / `<mark style="background: …">`

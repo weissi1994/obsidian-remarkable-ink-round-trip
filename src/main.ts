@@ -55,6 +55,8 @@ import { EmbedContent } from "./preprocess/preprocess";
 import { DOCID_FRONTMATTER_KEY } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
+import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
+import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
 	ImportedMark,
@@ -110,6 +112,9 @@ export default class RoundTripPlugin extends Plugin {
 	/** Unknown data.json keys, preserved across saves (see extrasFrom). */
 	private extraData: Record<string, unknown> = {};
 	private syncRunning: Promise<void> | null = null;
+	/** Built-in OCR: templates per handwriting version, the vault's words per run. */
+	private templates: { key: string; templates: Template[] } | null = null;
+	private lexicon: Promise<Lexicon> | null = null;
 	private syncTimer: number | null = null;
 	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
 	readonly ink = ((plugin: RoundTripPlugin) =>
@@ -972,6 +977,7 @@ export default class RoundTripPlugin extends Plugin {
 
 		const log: string[] = [];
 		this.inkCache.clear();
+		this.lexicon = null;
 		await this.reconcileNotePaths((line) => log.push(line));
 		const startedAt = new Date().toISOString().slice(0, 16).replace("T", " ");
 		const notice = quiet ? null : this.progress(`Checking ${mappings} notebook(s) on the reMarkable…`);
@@ -1002,9 +1008,12 @@ export default class RoundTripPlugin extends Plugin {
 						: undefined,
 					checkSource: (entry) => this.checkSource(entry),
 					loadInk: (entry) => this.loadInkRender(entry),
-					transcribe: this.settings.ocrEnabled
-						? (request) => this.transcribeStrokes(request)
-						: undefined,
+					transcribe:
+						this.settings.ocrMode === "builtin"
+							? (request) => this.recognizeLocally(request)
+							: this.settings.ocrMode === "endpoint"
+								? (request) => this.transcribeStrokes(request)
+								: undefined,
 					keepImageWithTranscript: this.settings.ocrKeepImage,
 					writeAnnotations: (entry, highlights, marks, sourceState) =>
 						this.applyTabletChanges(entry, highlights, marks, changed, sourceState),
@@ -1328,6 +1337,42 @@ export default class RoundTripPlugin extends Plugin {
 			canvas.toBlob((result) => resolve(result), "image/png"),
 		);
 		return blob === null ? null : blob.arrayBuffer();
+	}
+
+	/**
+	 * Read one remark on this device, from its strokes (ocr/recognize.ts).
+	 * Unsure readings come back null: the image is the better answer then.
+	 */
+	private async recognizeLocally(request: StrokeRenderRequest): Promise<string | null> {
+		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
+		const result = recognize(strokes, await this.ocrTemplates(), await this.vaultLexicon());
+		return result !== null && result.confidence >= OCR_TRUST ? result.text : null;
+	}
+
+	/** Letter templates: the owner's hand first, print letters for the rest. */
+	private async ocrTemplates(): Promise<Template[]> {
+		const key = this.settings.handVersion;
+		if (this.templates?.key === key) return this.templates.templates;
+		const hand = key === "" ? null : await this.ink.ensureHand(key);
+		const templates = templatesFrom([
+			...(hand === null ? [] : [{ glyphs: hand.glyphs, weight: 0.9 }]),
+			{ glyphs: builtinFont("readability").glyphs, weight: 1 },
+			{ glyphs: builtinFont("hershey-sans").glyphs, weight: 1 },
+		]);
+		this.templates = { key, templates };
+		return templates;
+	}
+
+	/** Every word in the vault, once per sync run: the dictionary, in any language. */
+	private vaultLexicon(): Promise<Lexicon> {
+		this.lexicon ??= (async () => {
+			const texts: string[] = [];
+			for (const file of this.app.vault.getMarkdownFiles()) {
+				texts.push(await this.app.vault.cachedRead(file));
+			}
+			return Lexicon.fromText(texts);
+		})();
+		return this.lexicon;
 	}
 
 	/** OCR one remark through the configured endpoint (opt-in). */
