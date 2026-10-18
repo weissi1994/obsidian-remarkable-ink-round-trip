@@ -33,7 +33,8 @@ export type Block =
 	| { type: "list"; items: ListItem[] }
 	| { type: "quote"; lines: string[]; inline?: InlineStyles }
 	| { type: "code"; lines: string[]; lang?: string }
-	| { type: "table"; rows: string[][] }
+	/** `inline`: each cell's styling, row by row — only when any cell has some. */
+	| { type: "table"; rows: string[][]; inline?: (InlineStyles | null)[][] }
 	| { type: "hr" }
 	| { type: "image"; w: number; h: number; png?: Uint8Array }
 	/**
@@ -298,12 +299,12 @@ function withInline<T extends object>(block: T, inline: InlineStyles): T & { inl
 	return Object.keys(inline).length > 0 ? { ...block, inline } : block;
 }
 
-function parseTableRow(line: string, options: ParseOptions): string[] {
+function parseTableRow(line: string, options: ParseOptions): { text: string; inline: InlineStyles }[] {
 	return line
 		.replace(/^\s*\|/, "")
 		.replace(/\|\s*$/, "")
 		.split("|")
-		.map((cell) => stripInlineStyles(cell.trim(), options).text);
+		.map((cell) => stripInlineStyles(cell.trim(), options));
 }
 
 export function parseBlocks(markdown: string, options: ParseOptions = {}): Block[] {
@@ -414,14 +415,20 @@ export function parseBlocks(markdown: string, options: ParseOptions = {}): Block
 		// Table: a header row directly followed by a divider row.
 		if (line.includes("|") && i + 1 < lines.length && TABLE_DIVIDER_RE.test(lines[i + 1])) {
 			flushAll();
-			const rows: string[][] = [parseTableRow(line, options)];
+			const cells = [parseTableRow(line, options)];
 			i += 2;
 			while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
-				rows.push(parseTableRow(lines[i], options));
+				cells.push(parseTableRow(lines[i], options));
 				i++;
 			}
 			i--;
-			blocks.push({ type: "table", rows });
+			const rows = cells.map((row) => row.map((cell) => cell.text));
+			const inline = cells.map((row) => row.map((cell) => (Object.keys(cell.inline).length > 0 ? cell.inline : null)));
+			blocks.push(
+				inline.some((row) => row.some((cell) => cell !== null))
+					? { type: "table", rows, inline }
+					: { type: "table", rows },
+			);
 			continue;
 		}
 

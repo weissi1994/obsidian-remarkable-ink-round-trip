@@ -105,3 +105,32 @@ describe("inline style rendering", () => {
 		expect(diff.trustworthy).toBe(true);
 	});
 });
+
+describe("inline styles in table cells", () => {
+	const TABLE = ["| Task | State |", "|---|---|", "| Review **pull request** | ==open== |", "| Plan | ~~done~~ |"].join("\n");
+
+	it("records each cell's styling, and leaves plain tables as they were", () => {
+		const [table] = parseBlocks(TABLE, { html: true });
+		expect(table).toMatchObject({
+			type: "table",
+			rows: [["Task", "State"], ["Review pull request", "open"], ["Plan", "done"]],
+			inline: [[null, null], [{ bold: [1, 2] }, { highlight: [{ word: 0 }] }], [null, { strike: [0] }]],
+		});
+		expect(parseBlocks("| a | b |\n|---|---|\n| c | d |")).toEqual([{ type: "table", rows: [["a", "b"], ["c", "d"]] }]);
+	});
+
+	it("draws styled cell words — heavier, highlighted, struck — without moving them", () => {
+		const styled = render(true, TABLE).render;
+		const plain = render(false, TABLE.replace(/\*\*|==|~~/g, "")).render;
+		const boxes = (r: typeof styled) => r.layout.lines.flatMap((l) => l.words.map((w) => [w.text, w.x, w.width]));
+		expect(boxes(styled)).toEqual(boxes(plain));
+		expect(wordStrokes(styled, "pull")[0].thicknessScale).toBeGreaterThan(wordStrokes(styled, "Review")[0].thicknessScale);
+		const bands = styled.pages.flat().filter((s) => s.tool === PEN.highlighter && s.color === PEN_COLOR.yellow);
+		expect(bands.length).toBeGreaterThan(0);
+	});
+
+	it("stays plain for a send made before inline styling", () => {
+		const r = render(false, TABLE).render;
+		expect(wordStrokes(r, "pull")[0].thicknessScale).toBe(wordStrokes(r, "Review")[0].thicknessScale);
+	});
+});

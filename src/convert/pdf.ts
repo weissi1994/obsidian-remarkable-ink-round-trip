@@ -368,6 +368,12 @@ function trackInline(ts: Typesetter, text: string, inline: InlineStyles | undefi
 	ts.code = { styles, words, word: 0, used: 0 };
 }
 
+/** Arm style tracking for one table cell: each cell is its own run of words. */
+function trackCell(ts: Typesetter, text: string, inline: InlineStyles | null | undefined): void {
+	ts.code = undefined;
+	if (inline !== null && inline !== undefined) trackInline(ts, text, inline);
+}
+
 /** Runs of consecutive words on one line sharing a style. */
 function runsOf(words: PlacedWord[], has: (style: WordStyle) => boolean): [PlacedWord, PlacedWord][] {
 	const runs: [PlacedWord, PlacedWord][] = [];
@@ -826,6 +832,7 @@ function drawGridRows(
 	rows: string[][],
 	plans: { writing: boolean; label: boolean; cellLines: string[][]; height: number }[],
 	g: { size: number; step: number; total: number; offsets: number[]; inset: number; padTop: number; padBottom: number },
+	inline?: (InlineStyles | null)[][],
 ): void {
 	const left = ts.opts.margin;
 	const right = ts.opts.margin + g.total;
@@ -857,8 +864,9 @@ function drawGridRows(
 		if (!plan.writing) {
 			const font = rowIndex === 0 ? ts.bold : ts.body;
 			let lowest = top - g.padTop;
-			row.forEach((_cell, c) => {
+			row.forEach((cell, c) => {
 				let y = top - g.padTop;
+				trackCell(ts, cell, inline?.[rowIndex]?.[c]);
 				for (const line of plan.cellLines[c]) {
 					y -= g.step;
 					if (y < ts.opts.margin) break;
@@ -905,7 +913,7 @@ export function computeColumnWidths(
 	return naturals.map((n, i) => floors[i] + (flexNat[i] * flexTotal) / flexSum);
 }
 
-function drawTable(ts: Typesetter, rows: string[][]): void {
+function drawTable(ts: Typesetter, rows: string[][], inline?: (InlineStyles | null)[][]): void {
 	// Content-weighted columns; cell text wraps across lines (beta finding
 	// GP_E2_S11: truncation lost content on real documents).
 	const size = ts.opts.fontSize - 1;
@@ -992,7 +1000,7 @@ function drawTable(ts: Typesetter, rows: string[][]): void {
 	}
 
 	if (grid) {
-		drawGridRows(ts, rows, plans, { size, step, total, offsets, inset, padTop, padBottom });
+		drawGridRows(ts, rows, plans, { size, step, total, offsets, inset, padTop, padBottom }, inline);
 		ts.y -= size * 0.8;
 		return;
 	}
@@ -1023,8 +1031,9 @@ function drawTable(ts: Typesetter, rows: string[][]): void {
 		ensureRoom(ts, Math.min(rowHeight, ts.opts.pageHeight - 2 * ts.opts.margin));
 		const top = ts.y;
 		let lowest = top;
-		row.forEach((_cell, c) => {
+		row.forEach((cell, c) => {
 			let y = top;
+			trackCell(ts, cell, inline?.[rowIndex]?.[c]);
 			for (const line of cellLines[c]) {
 				y -= step;
 				if (y < ts.opts.margin) break;
@@ -1137,7 +1146,7 @@ function drawBlock(ts: Typesetter, block: Block): void {
 			drawCode(ts, block.lines);
 			break;
 		case "table":
-			drawTable(ts, block.rows);
+			drawTable(ts, block.rows, block.inline);
 			break;
 		case "hr":
 			drawHr(ts);

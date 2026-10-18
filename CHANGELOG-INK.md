@@ -7,6 +7,9 @@
   when colour accents are on), and padded cells so no line touches the text.
   Columns no longer break a word they have room for. Notebooks sent earlier
   keep their old tables.
+- **Styled text in table cells:** bold, italic, inline code, highlights,
+  underline and strike-through in a cell are drawn as they are elsewhere in the
+  note, instead of plain.
 - **Faster, steadier re-sends:** the notebook a re-send replaces is moved to the
   trash in the same cloud update as the upload, halving the writes to the
   account's root index — fewer rate-limit waits and fewer clashes with the
