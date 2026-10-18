@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { parseBlocks, stripInline, stripInlineCode } from "../convert/mdblocks";
+import { parseBlocks, stripInline, stripInlineStyles } from "../convert/mdblocks";
 import { builtinFont, HandFont } from "../ink/glyphs";
 import { drawingStrokes, InkDrawing } from "../ink/inkdrawing";
 import { inkOptionsFor } from "../ink/inkfonts";
@@ -46,10 +46,11 @@ function render(accents: boolean) {
 describe("inline code words", () => {
 	it("flags the words of code spans without changing the text", () => {
 		const raw = "Run `npm test` and **then** `x`.";
-		const { text, code } = stripInlineCode(raw);
+		const { text, inline } = stripInlineStyles(raw);
 		expect(text).toBe(stripInline(raw));
 		expect(text.split(" ")).toEqual(["Run", "npm", "test", "and", "then", "x."]);
-		expect(code).toEqual([1, 2, 5]);
+		expect(inline.code).toEqual([1, 2, 5]);
+		expect(inline.bold).toEqual([4]);
 	});
 
 	it("keeps blocks without inline code in their old shape", () => {
@@ -59,9 +60,9 @@ describe("inline code words", () => {
 	it("carries the flags through quotes, continuations and task items", () => {
 		const blocks = parseBlocks(NOTE);
 		const quote = blocks.find((b) => b.type === "quote");
-		expect(quote).toMatchObject({ code: [3] });
+		expect(quote).toMatchObject({ inline: { code: [3] } });
 		const r = render(true).render;
-		const coded = r.layout.lines.flatMap((l) => l.words).filter((w) => w.code === true);
+		const coded = r.layout.lines.flatMap((l) => l.words).filter((w) => w.style?.code === true);
 		expect(coded.map((w) => w.text)).toEqual(expect.arrayContaining(["npm", "test", "tsc", "--noEmit", "code"]));
 		expect(coded.map((w) => w.text)).not.toContain("Run");
 		expect(coded.map((w) => w.text)).not.toContain("check");

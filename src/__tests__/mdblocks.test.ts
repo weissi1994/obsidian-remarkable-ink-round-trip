@@ -79,34 +79,35 @@ describe("pagebreak marker (GP_E6_S1)", () => {
 
 describe("styled label paragraphs (GP_E6_S7)", () => {
 	it("marks a whole-bold paragraph as a bold label", () => {
-		expect(parseBlocks("**Doel**")).toEqual([{ type: "paragraph", text: "Doel", style: "bold" }]);
-		expect(parseBlocks("__Doel__")).toEqual([{ type: "paragraph", text: "Doel", style: "bold" }]);
+		const bold = { type: "paragraph", text: "Doel", style: "bold", inline: { bold: [0] } };
+		expect(parseBlocks("**Doel**")).toEqual([bold]);
+		expect(parseBlocks("__Doel__")).toEqual([bold]);
 	});
 
 	it("marks a whole-italic paragraph as an italic label", () => {
 		expect(parseBlocks("*Krachtblok — trekken*")).toEqual([
-			{ type: "paragraph", text: "Krachtblok — trekken", style: "italic" },
+			{ type: "paragraph", text: "Krachtblok — trekken", style: "italic", inline: { italic: [0, 1, 2] } },
 		]);
 		expect(parseBlocks("_cursief_")).toEqual([
-			{ type: "paragraph", text: "cursief", style: "italic" },
+			{ type: "paragraph", text: "cursief", style: "italic", inline: { italic: [0] } },
 		]);
 	});
 
-	it("keeps mixed or partial styling as a plain paragraph (GP_E6_S8, parked)", () => {
+	it("keeps mixed styling a plain-font paragraph, with the styled words flagged", () => {
 		expect(parseBlocks("**Doel** van vandaag")).toEqual([
-			{ type: "paragraph", text: "Doel van vandaag" },
+			{ type: "paragraph", text: "Doel van vandaag", inline: { bold: [0] } },
 		]);
 		expect(parseBlocks("zie **Doel** hier")).toEqual([
-			{ type: "paragraph", text: "zie Doel hier" },
+			{ type: "paragraph", text: "zie Doel hier", inline: { bold: [1] } },
 		]);
 		expect(parseBlocks("**twee** **spans**")).toEqual([
-			{ type: "paragraph", text: "twee spans" },
+			{ type: "paragraph", text: "twee spans", inline: { bold: [0, 1] } },
 		]);
 	});
 
-	it("keeps a multi-line paragraph that starts bold plain", () => {
+	it("keeps a multi-line paragraph that starts bold in the body font", () => {
 		expect(parseBlocks("**Doel**\nmet vervolgtekst")).toEqual([
-			{ type: "paragraph", text: "Doel met vervolgtekst" },
+			{ type: "paragraph", text: "Doel met vervolgtekst", inline: { bold: [0] } },
 		]);
 	});
 });

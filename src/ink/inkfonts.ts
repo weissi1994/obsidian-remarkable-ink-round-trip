@@ -84,5 +84,6 @@ export function inkOptionsFor(
 		seed,
 		imageStyle: snapshot.imageStyle,
 		accents: snapshot.accents === true,
+		inline: snapshot.inline === true,
 	};
 }

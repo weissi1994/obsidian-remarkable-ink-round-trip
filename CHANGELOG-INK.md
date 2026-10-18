@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Inline styling in handwriting:** bold words are written with a heavier pen,
+  italic ones slanted, `~~struck~~` and `<u>underlined</u>` words get a pen line
+  through or under them, and `==highlights==` / `<mark style="background: …">`
+  a highlighter band in the nearest tablet colour. Words keep their exact
+  places, so marks still anchor; notebooks sent earlier replay unchanged. A
+  mark made on the tablet now comes back to it styled after the sync.
 - **Two-way sync, handwriting only.** Notes are kept in sync with the tablet as
   handwritten notebooks: erased, moved and marked words and handwritten remarks
   are merged into the note itself, and a changed note is re-sent. Edits made on

@@ -27,7 +27,7 @@ import {
 } from "../convert/pdf";
 import { CAP_RATIO, HandFont } from "./glyphs";
 import { FIRST_STROKE_COUNTER, InkLine, InkPoint, PEN, PEN_COLOR, buildInkPageRm } from "./rmwrite";
-import { hatchImage, ImageStyle, InkImage } from "./inkimage";
+import { hatchImage, highlighterColorOf, ImageStyle, InkImage } from "./inkimage";
 import { diagramKey, drawingSize, drawingStrokes, InkDrawing } from "./inkdrawing";
 
 /** A device's notebook canvas: grid in device units and its pixel density. */
@@ -104,10 +104,15 @@ export interface InkRenderOptions {
 	 * made before the feature, which must replay without them.
 	 */
 	accents?: boolean;
+	/**
+	 * Inline styling: bold and italic words, highlighted, struck and
+	 * underlined ones. Absent on sends made before it, which replay plain.
+	 */
+	inline?: boolean;
 }
 
 /** Highlighter colour per accent; the rM 2 and 1 show every one as grey. */
-export const ACCENT_COLORS: Record<HighlightKind, number> = {
+export const ACCENT_COLORS: Record<Exclude<HighlightKind, "mark">, number> = {
 	"code": PEN_COLOR.blue,
 	"inline-code": PEN_COLOR.pink,
 	"quote": PEN_COLOR.yellow,
@@ -179,7 +184,16 @@ export interface InkRender {
 type DrawOp =
 	| { kind: "text"; text: string; x: number; y: number; size: number; font: HandFont; color?: DrawColor }
 	| { kind: "image"; name: string; x: number; y: number; width: number; height: number }
-	| { kind: "highlight"; x: number; y: number; width: number; height: number; highlight: HighlightKind }
+	| {
+			kind: "highlight";
+			x: number;
+			y: number;
+			width: number;
+			height: number;
+			highlight: HighlightKind;
+			rgb?: string;
+	  }
+	| { kind: "decoration"; x1: number; x2: number; y: number; size: number; decoration: "strike" | "underline" }
 	| {
 			kind: "line";
 			x1: number;
@@ -255,7 +269,18 @@ class RecordingBackend implements TypesetBackend {
 				});
 			},
 			drawHighlight: (o) => {
-				ops.push({ kind: "highlight", x: o.x, y: o.y, width: o.width, height: o.height, highlight: o.kind });
+				ops.push({
+					kind: "highlight",
+					x: o.x,
+					y: o.y,
+					width: o.width,
+					height: o.height,
+					highlight: o.kind,
+					rgb: o.rgb,
+				});
+			},
+			drawDecoration: (o) => {
+				ops.push({ kind: "decoration", x1: o.x1, x2: o.x2, y: o.y, size: o.size, decoration: o.kind });
 			},
 			drawImage: (name, o) => {
 				ops.push({ kind: "image", name, x: o.x, y: o.y, width: o.width, height: o.height });
@@ -293,6 +318,15 @@ function prng(seed: number): () => number {
 /* ------------------------------------------------------------------ */
 /* Rendering                                                           */
 /* ------------------------------------------------------------------ */
+
+/** The highlighter colour for a marked word; yellow when none was given. */
+function markColorOf(rgb: string | undefined): number {
+	if (rgb === undefined) return PEN_COLOR.yellow;
+	const hex = rgb.length === 4 ? [...rgb.slice(1)].map((c) => c + c).join("") : rgb.slice(1);
+	const value = parseInt(hex, 16);
+	if (!Number.isFinite(value)) return PEN_COLOR.yellow;
+	return highlighterColorOf((value >> 16) & 255, (value >> 8) & 255, value & 255) ?? PEN_COLOR.yellow;
+}
 
 /** Grey for anything the typesetter drew lighter than near-black. */
 function penColorFor(color: DrawColor | undefined, pen: InkPen): number {
@@ -388,8 +422,19 @@ export function renderInk(
 		};
 
 		for (const op of ops) {
-			if (op.kind === "highlight") {
-				if (options.accents !== true) continue;
+			if (op.kind === "decoration") {
+				if (options.inline !== true) continue;
+				// Through the middle of the lower-case letters, or just under
+				// the baseline.
+				const cap = op.size * CAP_RATIO;
+				const y = op.decoration === "strike" ? op.y + cap * 0.42 : op.y - op.size * 0.14;
+				add(null, [toDevice(op.x1, y), toDevice(op.x2, y)], options.pen.color, options.pen.thicknessScale);
+			} else if (op.kind === "highlight") {
+				if (op.highlight === "mark" ? options.inline !== true : options.accents !== true) continue;
+				const color =
+					op.highlight === "mark"
+						? markColorOf(op.rgb)
+						: ACCENT_COLORS[op.highlight];
 				const top = toDevice(op.x, op.y + op.height);
 				const bottom = toDevice(op.x + op.width, op.y);
 				const height = bottom.y - top.y;
@@ -407,7 +452,7 @@ export function renderInk(
 							{ x: top.x + inset, y },
 							{ x: bottom.x - inset, y },
 						],
-						ACCENT_COLORS[op.highlight],
+						color,
 						1,
 						{ tool: PEN.highlighter, width: Math.round(band * 1.1 * 4) },
 					);
@@ -415,8 +460,8 @@ export function renderInk(
 			} else if (op.kind === "text") {
 				const placed = byPlacement.get(`${page}|${op.x}|${op.y}|${op.text}`);
 				const color = penColorFor(op.color, options.pen);
-				const weight = op.font.style.weight ?? 1;
-				const slant = op.font.style.slant ?? 0;
+				const fontWeight = op.font.style.weight ?? 1;
+				const fontSlant = op.font.style.slant ?? 0;
 				const cap = op.size * CAP_RATIO;
 				const space = op.font.widthOfTextAtSize(" ", op.size);
 				let cursor = op.x;
@@ -429,7 +474,14 @@ export function renderInk(
 						continue;
 					}
 					const wordId = placed?.words[wordIndex]?.id ?? null;
+					const style = options.inline === true ? placed?.words[wordIndex]?.style : undefined;
 					wordIndex++;
+					// Bold and italic do not change a word's width, so styling it
+					// moves nothing on the page.
+					const weight =
+						style?.bold === true ? Math.max(fontWeight, options.fonts.bold.style.weight ?? 1) : fontWeight;
+					const slant =
+						style?.italic === true && fontSlant === 0 ? (options.fonts.italic.style.slant ?? 0) : fontSlant;
 					const random = prng(hash32(`${options.seed}|${page}|${wordId ?? `d${cursor}`}`));
 					const amount = Math.max(0, Math.min(1, options.jitter));
 					// Per-word wobble: baseline and a hint of size. Kept well

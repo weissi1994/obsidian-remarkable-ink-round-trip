@@ -6,8 +6,8 @@
  * - `![[embeds]]` resolved inline (with recursion/cycle guards),
  * - `[[wikilinks]]` flattened to their display text,
  * - callouts flattened to titled blockquotes,
- * - `%%comments%%`, `<!-- comments -->` and inline formatting tags removed
- *   (what a merged tablet mark leaves: `<u>`, `<mark style=…>`).
+ * - `%%comments%%` and `<!-- comments -->` removed (inline formatting tags
+ *   stay: the block parser reads them as styling).
  *
  * Vault access stays outside: callers inject an EmbedResolver, so this module
  * is pure and unit-testable (and mobile-safe per N7 — no Node APIs).
@@ -62,21 +62,19 @@ const IMAGE_EXTENSIONS = new Set([
 
 /** Parse a frontmatter block into flat key → raw string value pairs. */
 const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
-const INLINE_TAG_RE = /<\/?(?:u|mark|span|s|del|ins|b|strong|i|em|sub|sup|small|font)(?:\s[^<>]*)?>/gi;
 
 /**
- * Drop HTML comments and inline formatting tags, keeping the words, outside
- * fenced code — a notebook has no way to render them, and written out they
- * would come back as stray letters.
+ * Drop HTML comments — the markers around a summary block among them —
+ * outside fenced code: written out they would come back as stray letters.
  */
-export function stripInlineHtml(text: string): string {
+export function stripHtmlComments(text: string): string {
 	const out: string[] = [];
 	let fenced = false;
-	for (const line of text.replace(HTML_COMMENT_RE, "").split("\n")) {
-		if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
-		out.push(fenced || /^\s*(```|~~~)/.test(line) ? line : line.replace(INLINE_TAG_RE, ""));
+	for (const chunk of text.split(/(?=^\s*(?:```|~~~))/m)) {
+		if (/^\s*(```|~~~)/.test(chunk)) fenced = !fenced;
+		out.push(fenced ? chunk : chunk.replace(HTML_COMMENT_RE, ""));
 	}
-	return out.join("\n");
+	return out.join("");
 }
 
 /** A note split into its frontmatter block (with delimiters) and its body. */
@@ -410,7 +408,7 @@ export function preprocess(
 		displayTextForLink(target.trim(), alias),
 	);
 	text = flattenCallouts(text);
-	text = stripInlineHtml(text);
+	text = stripHtmlComments(text);
 
 	const titleBlock = options.frontmatterAsTitleBlock
 		? renderTitleBlock(fields, hidden)

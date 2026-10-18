@@ -205,16 +205,17 @@ describe("preprocess", () => {
 	});
 });
 
-describe("inline HTML from merged tablet marks", () => {
-	it("keeps the words and drops the tags and markers", () => {
+describe("HTML comments", () => {
+	it("drops the summary markers but leaves formatting tags for the parser", () => {
 		const out = preprocess(
-			'Read <u>this</u> and <mark style="background: #ffe066">that</mark>.\n\n<!-- remarkable-round-trip:begin -->\nNote\n<!-- remarkable-round-trip:end -->',
+			"Read <u>this</u>.\n\n<!-- remarkable-round-trip:begin -->\nNote\n<!-- remarkable-round-trip:end -->",
 		).markdown;
-		expect(out).toBe("Read this and that.\n\n\nNote\n");
+		expect(out).toBe("Read <u>this</u>.\n\n\nNote\n");
 	});
 
 	it("leaves code fences alone", () => {
-		const out = preprocess("```html\n<u>x</u>\n```").markdown;
-		expect(out).toContain("<u>x</u>");
+		const out = preprocess("```html\n<!-- kept -->\n```\n<!-- gone -->after").markdown;
+		expect(out).toContain("<!-- kept -->");
+		expect(out).not.toContain("gone");
 	});
 });

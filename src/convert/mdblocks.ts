@@ -1,22 +1,37 @@
 /**
- * Minimal markdown block parser for the PDF typesetter (PRD F3, K1).
+ * Minimal markdown block parser for the typesetter (PRD F3, K1).
  *
  * Consumes preprocessed markdown (see preprocess.ts) and produces a flat list
  * of typed blocks. Inline markers (bold/italic/highlight/strike/inline code)
- * are stripped to plain text: the e-ink layout deliberately favors clean,
- * predictable typography over rich inline styling in this MVP.
+ * are stripped to plain text, so the layout only ever sees words; which words
+ * carried which style rides along separately (`inline`) for the ink renderer
+ * to draw — styling never moves a word.
  */
 
+/** A highlighted word and the colour it was marked in, when given. */
+export interface HighlightWord {
+	word: number;
+	rgb?: string;
+}
+
 /**
- * `code` on a text block: indices of its whitespace-separated words that were
- * inline code (fork: colour accents). Present only when there are any, so
- * blocks without inline code keep their pre-fork shape.
+ * Inline styling of a text block, as indices of its whitespace-separated
+ * words. Present only when there is any, so plain blocks keep their shape.
  */
+export interface InlineStyles {
+	code?: number[];
+	bold?: number[];
+	italic?: number[];
+	strike?: number[];
+	underline?: number[];
+	highlight?: HighlightWord[];
+}
+
 export type Block =
-	| { type: "heading"; level: number; text: string; code?: number[] }
-	| { type: "paragraph"; text: string; style?: "bold" | "italic"; code?: number[] }
+	| { type: "heading"; level: number; text: string; inline?: InlineStyles }
+	| { type: "paragraph"; text: string; style?: "bold" | "italic"; inline?: InlineStyles }
 	| { type: "list"; items: ListItem[] }
-	| { type: "quote"; lines: string[]; code?: number[] }
+	| { type: "quote"; lines: string[]; inline?: InlineStyles }
 	| { type: "code"; lines: string[]; lang?: string }
 	| { type: "table"; rows: string[][] }
 	| { type: "hr" }
@@ -43,7 +58,7 @@ export interface ListItem {
 	ordered: boolean;
 	marker: string;
 	text: string;
-	code?: number[];
+	inline?: InlineStyles;
 }
 
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
@@ -101,43 +116,146 @@ function stripMarkers(text: string): string {
 		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
 }
 
-const CODE_OPEN = "\u0001";
-const CODE_CLOSE = "\u0002";
+export interface ParseOptions {
+	/**
+	 * Read inline HTML formatting (`<u>`, `<mark style=…>`, `<b>`, `<i>`,
+	 * `<s>`…) as styling and drop the tags from the text. Off for sends made
+	 * before it existed: their text kept the tags, and must replay so.
+	 */
+	html?: boolean;
+}
+
+type StyleKind = "code" | "bold" | "italic" | "strike" | "underline" | "highlight";
+
+// Private-use sentinels: one open/close pair per style, never in real text.
+const OPEN: Record<StyleKind, string> = {
+	code: "",
+	bold: "",
+	italic: "",
+	strike: "",
+	underline: "",
+	highlight: "",
+};
+const CLOSE: Record<StyleKind, string> = {
+	code: "",
+	bold: "",
+	italic: "",
+	strike: "",
+	underline: "",
+	highlight: "",
+};
+/** Wraps the colour of a highlight, right after its open sentinel. */
+const COLOR = "";
+const KIND_OF = new Map<string, { kind: StyleKind; open: boolean }>();
+for (const kind of Object.keys(OPEN) as StyleKind[]) {
+	KIND_OF.set(OPEN[kind], { kind, open: true });
+	KIND_OF.set(CLOSE[kind], { kind, open: false });
+}
+const SENTINELS_RE = /[-]|[^]*/g;
+
+const wrap = (kind: StyleKind) => (_all: string, inner: string) => `${OPEN[kind]}${inner}${CLOSE[kind]}`;
+
+const HTML_TAGS: { re: RegExp; kind: StyleKind | null }[] = [
+	{ re: /<(u|ins)(?:\s[^<>]*)?>([\s\S]*?)<\/\1>/gi, kind: "underline" },
+	{ re: /<(b|strong)(?:\s[^<>]*)?>([\s\S]*?)<\/\1>/gi, kind: "bold" },
+	{ re: /<(i|em)(?:\s[^<>]*)?>([\s\S]*?)<\/\1>/gi, kind: "italic" },
+	{ re: /<(s|del|strike)(?:\s[^<>]*)?>([\s\S]*?)<\/\1>/gi, kind: "strike" },
+];
+const LEFTOVER_TAG_RE = /<\/?(?:u|ins|b|strong|i|em|s|del|strike|mark|span|sub|sup|small|font)(?:\s[^<>]*)?>/gi;
+
+/** Inline HTML formatting → style sentinels; other formatting tags dropped. */
+function markHtml(text: string): string {
+	let out = text.replace(/<mark(\s[^<>]*)?>([\s\S]*?)<\/mark>/gi, (_all, attrs: string | undefined, inner: string) => {
+		const rgb = /background(?:-color)?\s*:\s*(#[0-9a-f]{6}|#[0-9a-f]{3})\b/i.exec(attrs ?? "")?.[1];
+		return `${OPEN.highlight}${rgb === undefined ? "" : `${COLOR}${rgb}${COLOR}`}${inner}${CLOSE.highlight}`;
+	});
+	for (const { re, kind } of HTML_TAGS) {
+		out = out.replace(re, (_all, _tag: string, inner: string) => (kind === null ? inner : `${OPEN[kind]}${inner}${CLOSE[kind]}`));
+	}
+	return out.replace(LEFTOVER_TAG_RE, "");
+}
+
+/** stripInline's chain, leaving a sentinel pair where each marker was. */
+function markInline(raw: string, html: boolean): string {
+	return (html ? markHtml(raw) : raw)
+		.replace(/`([^`]*)`/g, wrap("code"))
+		.replace(/\*\*([^*]+)\*\*/g, wrap("bold"))
+		.replace(/__([^_]+)__/g, wrap("bold"))
+		.replace(/(?<![\w*])\*([^*\n]+)\*(?![\w*])/g, wrap("italic"))
+		.replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, wrap("italic"))
+		.replace(/==([^=]+)==/g, wrap("highlight"))
+		.replace(/~~([^~]+)~~/g, wrap("strike"))
+		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+}
+
+const EMPTY: InlineStyles = {};
 
 /**
- * stripInline, plus which of the resulting words were inline code. The text
- * is always exactly stripInline's; when sentinel-marking the spans would
- * change it, no word is flagged rather than risk a different layout.
+ * stripInline, plus which of the resulting words carried which style. Without
+ * `html` the text is always exactly stripInline's — the layout older sends
+ * replay — and when marking would change it, no word is flagged.
  */
-export function stripInlineCode(raw: string): { text: string; code: number[] } {
-	const text = stripInline(raw);
-	if (!raw.includes("`")) return { text, code: [] };
-	const marked = stripMarkers(raw.replace(/`([^`]*)`/g, `${CODE_OPEN}$1${CODE_CLOSE}`));
-	if (marked.split(CODE_OPEN).join("").split(CODE_CLOSE).join("") !== text) return { text, code: [] };
-	const code: number[] = [];
+export function stripInlineStyles(raw: string, options: ParseOptions = {}): { text: string; inline: InlineStyles } {
+	const html = options.html === true;
+	const legacy = stripInline(raw);
+	if (!html && !/[`*_=~]/.test(raw)) return { text: legacy, inline: EMPTY };
+	const marked = markInline(raw, html);
+	const text = marked.replace(SENTINELS_RE, "");
+	if (!html && text !== legacy) return { text: legacy, inline: EMPTY };
+
+	const active: Record<StyleKind, number> = { code: 0, bold: 0, italic: 0, strike: 0, underline: 0, highlight: 0 };
+	const colors: (string | undefined)[] = [];
+	const found: Record<StyleKind, Set<number>> = {
+		code: new Set(),
+		bold: new Set(),
+		italic: new Set(),
+		strike: new Set(),
+		underline: new Set(),
+		highlight: new Set(),
+	};
+	const wordColor = new Map<number, string>();
 	let token = 0;
 	let inToken = false;
-	let inCode = false;
-	let flagged = false;
-	for (const ch of marked) {
-		if (ch === CODE_OPEN || ch === CODE_CLOSE) {
-			inCode = ch === CODE_OPEN;
+	const chars = [...marked];
+	for (let i = 0; i < chars.length; i++) {
+		const ch = chars[i];
+		if (ch === COLOR) {
+			let rgb = "";
+			for (i++; i < chars.length && chars[i] !== COLOR; i++) rgb += chars[i];
+			colors[colors.length - 1] = rgb;
+			continue;
+		}
+		const sentinel = KIND_OF.get(ch);
+		if (sentinel !== undefined) {
+			active[sentinel.kind] = Math.max(0, active[sentinel.kind] + (sentinel.open ? 1 : -1));
+			if (sentinel.kind === "highlight") {
+				if (sentinel.open) colors.push(undefined);
+				else colors.pop();
+			}
 			continue;
 		}
 		if (/\s/.test(ch)) {
-			if (inToken) {
-				if (flagged) code.push(token);
-				token++;
-			}
+			if (inToken) token++;
 			inToken = false;
-			flagged = false;
 			continue;
 		}
 		inToken = true;
-		if (inCode) flagged = true;
+		for (const kind of Object.keys(active) as StyleKind[]) {
+			if (active[kind] > 0) found[kind].add(token);
+		}
+		const rgb = colors[colors.length - 1];
+		if (active.highlight > 0 && rgb !== undefined) wordColor.set(token, rgb);
 	}
-	if (inToken && flagged) code.push(token);
-	return { text, code };
+	const inline: InlineStyles = {};
+	for (const kind of ["code", "bold", "italic", "strike", "underline"] as const) {
+		if (found[kind].size > 0) inline[kind] = [...found[kind]].sort((a, b) => a - b);
+	}
+	if (found.highlight.size > 0) {
+		inline.highlight = [...found.highlight]
+			.sort((a, b) => a - b)
+			.map((word) => (wordColor.has(word) ? { word, rgb: wordColor.get(word) } : { word }));
+	}
+	return { text, inline };
 }
 
 /** Number of whitespace-separated words, as the typesetter counts them. */
@@ -145,41 +263,66 @@ export function wordCount(text: string): number {
 	return text.split(/\s+/).filter((w) => w !== "").length;
 }
 
-/** Append `next` (with its inline-code words) to `prev`, joined by a space. */
-function joinCode(prev: { text: string; code: number[] }, next: { text: string; code: number[] }) {
-	const offset = wordCount(prev.text);
-	return { text: `${prev.text} ${next.text}`, code: [...prev.code, ...next.code.map((i) => i + offset)] };
+/** Shift every word index of `inline` by `offset`, dropping those that fall below 0. */
+export function shiftInline(inline: InlineStyles | undefined, offset: number): InlineStyles {
+	const out: InlineStyles = {};
+	if (inline === undefined) return out;
+	for (const kind of ["code", "bold", "italic", "strike", "underline"] as const) {
+		const words = inline[kind]?.map((i) => i + offset).filter((i) => i >= 0);
+		if (words !== undefined && words.length > 0) out[kind] = words;
+	}
+	const highlight = inline.highlight
+		?.map((h) => ({ ...h, word: h.word + offset }))
+		.filter((h) => h.word >= 0);
+	if (highlight !== undefined && highlight.length > 0) out.highlight = highlight;
+	return out;
 }
 
-function withCode<T extends object>(block: T, code: number[]): T & { code?: number[] } {
-	return code.length > 0 ? { ...block, code } : block;
+/** Append `next` (with its styled words) to `prev`, joined by a space. */
+function joinInline(
+	prev: { text: string; inline: InlineStyles },
+	next: { text: string; inline: InlineStyles },
+): { text: string; inline: InlineStyles } {
+	const shifted = shiftInline(next.inline, wordCount(prev.text));
+	const inline: InlineStyles = { ...prev.inline };
+	for (const kind of ["code", "bold", "italic", "strike", "underline"] as const) {
+		const words = [...(prev.inline[kind] ?? []), ...(shifted[kind] ?? [])];
+		if (words.length > 0) inline[kind] = words;
+	}
+	const highlight = [...(prev.inline.highlight ?? []), ...(shifted.highlight ?? [])];
+	if (highlight.length > 0) inline.highlight = highlight;
+	return { text: `${prev.text} ${next.text}`, inline };
 }
 
-function parseTableRow(line: string): string[] {
+function withInline<T extends object>(block: T, inline: InlineStyles): T & { inline?: InlineStyles } {
+	return Object.keys(inline).length > 0 ? { ...block, inline } : block;
+}
+
+function parseTableRow(line: string, options: ParseOptions): string[] {
 	return line
 		.replace(/^\s*\|/, "")
 		.replace(/\|\s*$/, "")
 		.split("|")
-		.map((cell) => stripInline(cell.trim()));
+		.map((cell) => stripInlineStyles(cell.trim(), options).text);
 }
 
-export function parseBlocks(markdown: string): Block[] {
+export function parseBlocks(markdown: string, options: ParseOptions = {}): Block[] {
 	const lines = markdown.split("\n");
 	const blocks: Block[] = [];
 	let paragraph: string[] = [];
 	let list: ListItem[] = [];
 	let quote: string[] = [];
-	let quoteCode: { text: string; code: number[] } | null = null;
+	let quoteInline: { text: string; inline: InlineStyles } | null = null;
 
 	const flushParagraph = () => {
 		if (paragraph.length > 0) {
 			const raw = paragraph.join(" ").trim();
 			const style = paragraphStyle(raw);
-			const { text, code } = stripInlineCode(raw);
+			const { text, inline } = stripInlineStyles(raw, options);
 			blocks.push(
-				withCode(
+				withInline(
 					style === undefined ? { type: "paragraph", text } : { type: "paragraph", text, style },
-					code,
+					inline,
 				),
 			);
 			paragraph = [];
@@ -193,9 +336,9 @@ export function parseBlocks(markdown: string): Block[] {
 	};
 	const flushQuote = () => {
 		if (quote.length > 0) {
-			blocks.push(withCode({ type: "quote", lines: quote }, quoteCode?.code ?? []));
+			blocks.push(withInline({ type: "quote", lines: quote }, quoteInline?.inline ?? EMPTY));
 			quote = [];
-			quoteCode = null;
+			quoteInline = null;
 		}
 	};
 	const flushAll = () => {
@@ -240,8 +383,8 @@ export function parseBlocks(markdown: string): Block[] {
 		const heading = line.match(HEADING_RE);
 		if (heading) {
 			flushAll();
-			const { text, code } = stripInlineCode(heading[2].trim());
-			blocks.push(withCode({ type: "heading", level: heading[1].length, text }, code));
+			const { text, inline } = stripInlineStyles(heading[2].trim(), options);
+			blocks.push(withInline({ type: "heading", level: heading[1].length, text }, inline));
 			continue;
 		}
 
@@ -260,10 +403,10 @@ export function parseBlocks(markdown: string): Block[] {
 		if (line.trimStart().startsWith(">")) {
 			flushParagraph();
 			flushList();
-			const part = stripInlineCode(line.replace(/^\s*>\s?/, ""));
+			const part = stripInlineStyles(line.replace(/^\s*>\s?/, ""), options);
 			quote.push(part.text);
 			// drawQuote joins the lines with a space; the word indices follow.
-			quoteCode = quoteCode === null ? part : joinCode(quoteCode, part);
+			quoteInline = quoteInline === null ? part : joinInline(quoteInline, part);
 			continue;
 		}
 		flushQuote();
@@ -271,10 +414,10 @@ export function parseBlocks(markdown: string): Block[] {
 		// Table: a header row directly followed by a divider row.
 		if (line.includes("|") && i + 1 < lines.length && TABLE_DIVIDER_RE.test(lines[i + 1])) {
 			flushAll();
-			const rows: string[][] = [parseTableRow(line)];
+			const rows: string[][] = [parseTableRow(line, options)];
 			i += 2;
 			while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
-				rows.push(parseTableRow(lines[i]));
+				rows.push(parseTableRow(lines[i], options));
 				i++;
 			}
 			i--;
@@ -287,16 +430,16 @@ export function parseBlocks(markdown: string): Block[] {
 			flushParagraph();
 			const indent = item[1].replace(/\t/g, "  ").length;
 			const marker = item[2];
-			const { text, code } = stripInlineCode(item[3].trim());
+			const { text, inline } = stripInlineStyles(item[3].trim(), options);
 			list.push(
-				withCode(
+				withInline(
 					{
 						depth: Math.floor(indent / 2),
 						ordered: /\d/.test(marker),
 						marker: marker,
 						text,
 					},
-					code,
+					inline,
 				),
 			);
 			continue;
@@ -304,9 +447,12 @@ export function parseBlocks(markdown: string): Block[] {
 
 		if (list.length > 0) {
 			// Continuation line of the previous list item.
-			const { code: lastCode = [], ...last } = list[list.length - 1];
-			const joined = joinCode({ text: last.text, code: lastCode }, stripInlineCode(line.trim()));
-			list[list.length - 1] = withCode({ ...last, text: joined.text }, joined.code);
+			const { inline: lastInline = EMPTY, ...last } = list[list.length - 1];
+			const joined = joinInline(
+				{ text: last.text, inline: lastInline },
+				stripInlineStyles(line.trim(), options),
+			);
+			list[list.length - 1] = withInline({ ...last, text: joined.text }, joined.inline);
 			continue;
 		}
 

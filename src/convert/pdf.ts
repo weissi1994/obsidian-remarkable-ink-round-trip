@@ -14,7 +14,9 @@ import {
 	dropLeadingTitleHeading,
 	imagePlaceholderText,
 	type Block,
+	type InlineStyles,
 	type ListItem,
+	shiftInline,
 	wordCount,
 } from "./mdblocks";
 
@@ -68,8 +70,18 @@ export interface PlacedWord {
 	text: string;
 	x: number;
 	width: number;
-	/** Inline code in the source (fork: colour accents). */
+	/** Inline styling in the source; drawn by the ink renderer, never measured. */
+	style?: WordStyle;
+}
+
+export interface WordStyle {
 	code?: true;
+	bold?: true;
+	italic?: true;
+	strike?: true;
+	underline?: true;
+	/** Highlighted: the colour it was marked in, or true for the default. */
+	highlight?: string | true;
 }
 
 /** What kind of source block a line came from (GP_E3_S12). */
@@ -272,12 +284,22 @@ export interface DrawPage {
 	 * Ink fork: a coloured band behind text — a code block or quote line, or
 	 * a run of inline code. Bottom-left origin, points. PDF ignores it.
 	 */
-	drawHighlight?(options: { x: number; y: number; width: number; height: number; kind: HighlightKind }): void;
+	drawHighlight?(options: {
+		x: number;
+		y: number;
+		width: number;
+		height: number;
+		kind: HighlightKind;
+		/** For "mark": the colour the text was highlighted in. */
+		rgb?: string;
+	}): void;
+	/** Ink fork: a line through or under a run of words (baseline y). */
+	drawDecoration?(options: { x1: number; x2: number; y: number; size: number; kind: "strike" | "underline" }): void;
 	/** A pre-embedded PNG for an image block; a backend without one leaves the space blank. */
 	drawPng?(block: Block, options: { x: number; y: number; width: number; height: number }): void;
 }
 
-export type HighlightKind = "code" | "inline-code" | "quote";
+export type HighlightKind = "code" | "inline-code" | "quote" | "mark";
 
 /** Fonts and pages: everything a typesetting pass draws with. */
 export interface TypesetBackend {
@@ -307,12 +329,12 @@ interface Typesetter {
 	ordered?: number;
 	/** Running word counter, so a mark can name the exact words it covers. */
 	wordId: number;
-	/** Inline-code words of the current block, consumed as words are placed. */
-	code?: InlineCode;
+	/** Styled words of the current block, consumed as words are placed. */
+	code?: InlineTrack;
 }
 
-interface InlineCode {
-	flags: Set<number>;
+interface InlineTrack {
+	styles: Map<number, WordStyle>;
 	/** The block's words as wrapText splits them. */
 	words: string[];
 	word: number;
@@ -320,13 +342,35 @@ interface InlineCode {
 	used: number;
 }
 
-/** Arm inline-code tracking for the text the current block is about to place. */
-function trackInlineCode(ts: Typesetter, text: string, code: number[] | undefined): void {
-	if (code === undefined || code.length === 0) return;
+/** Arm style tracking for the text the current block is about to place. */
+function trackInline(ts: Typesetter, text: string, inline: InlineStyles | undefined): void {
+	if (inline === undefined) return;
+	const styles = new Map<number, WordStyle>();
+	const set = (word: number, patch: WordStyle) => styles.set(word, { ...styles.get(word), ...patch });
+	for (const word of inline.code ?? []) set(word, { code: true });
+	for (const word of inline.bold ?? []) set(word, { bold: true });
+	for (const word of inline.italic ?? []) set(word, { italic: true });
+	for (const word of inline.strike ?? []) set(word, { strike: true });
+	for (const word of inline.underline ?? []) set(word, { underline: true });
+	for (const h of inline.highlight ?? []) set(h.word, { highlight: h.rgb ?? true });
+	if (styles.size === 0) return;
 	const words = toWinAnsi(text, ts.opts.typo)
 		.split(/\s+/)
 		.filter((w) => w !== "");
-	ts.code = { flags: new Set(code), words, word: 0, used: 0 };
+	ts.code = { styles, words, word: 0, used: 0 };
+}
+
+/** Runs of consecutive words on one line sharing a style. */
+function runsOf(words: PlacedWord[], has: (style: WordStyle) => boolean): [PlacedWord, PlacedWord][] {
+	const runs: [PlacedWord, PlacedWord][] = [];
+	for (let i = 0; i < words.length; i++) {
+		if (words[i].style === undefined || !has(words[i].style!)) continue;
+		let j = i;
+		while (j + 1 < words.length && words[j + 1].style !== undefined && has(words[j + 1].style!)) j++;
+		runs.push([words[i], words[j]]);
+		i = j;
+	}
+	return runs;
 }
 
 function newPage(ts: Typesetter): void {
@@ -348,21 +392,42 @@ function put(
 	font: MeasureFont,
 ): void {
 	const words = text.trim() !== "" ? placeWords(ts, text, x, font, size) : [];
+	const pad = font.widthOfTextAtSize(" ", size) * 0.4;
 	if (ts.page.drawHighlight !== undefined) {
-		const space = font.widthOfTextAtSize(" ", size);
-		for (let i = 0; i < words.length; i++) {
-			if (words[i].code !== true) continue;
-			let j = i;
-			while (j + 1 < words.length && words[j + 1].code === true) j++;
-			const pad = space * 0.4;
+		for (const [first, last] of runsOf(words, (style) => style.code === true)) {
 			ts.page.drawHighlight({
-				x: words[i].x - pad,
+				x: first.x - pad,
 				y: y - size * 0.3,
-				width: words[j].x + words[j].width - words[i].x + 2 * pad,
+				width: last.x + last.width - first.x + 2 * pad,
 				height: size * 1.15,
 				kind: "inline-code",
 			});
-			i = j;
+		}
+		// One band per colour: a run changes colour where the marking did.
+		const colourOf = (word: PlacedWord) => (word.style?.highlight === true ? "" : (word.style?.highlight ?? ""));
+		for (const [first, last] of runsOf(words, (style) => style.highlight !== undefined)) {
+			const run = words.slice(words.indexOf(first), words.indexOf(last) + 1);
+			let start = 0;
+			for (let k = 1; k <= run.length; k++) {
+				if (k < run.length && colourOf(run[k]) === colourOf(run[start])) continue;
+				const rgb = colourOf(run[start]);
+				ts.page.drawHighlight({
+					x: run[start].x - pad,
+					y: y - size * 0.3,
+					width: run[k - 1].x + run[k - 1].width - run[start].x + 2 * pad,
+					height: size * 1.15,
+					kind: "mark",
+					...(rgb === "" ? {} : { rgb }),
+				});
+				start = k;
+			}
+		}
+	}
+	if (ts.page.drawDecoration !== undefined) {
+		for (const kind of ["strike", "underline"] as const) {
+			for (const [first, last] of runsOf(words, (style) => style[kind] === true)) {
+				ts.page.drawDecoration({ x1: first.x, x2: last.x + last.width, y, size, kind });
+			}
 		}
 	}
 	ts.page.drawText(text, { x, y, size, font, color: rgb(0, 0, 0) });
@@ -412,13 +477,14 @@ function placeWords(
 		}
 		const width = font.widthOfTextAtSize(part, size);
 		const word: PlacedWord = { id: ts.wordId++, text: part, x: cursor, width };
-		const code = ts.code;
-		if (code !== undefined && code.word < code.words.length) {
-			if (code.flags.has(code.word)) word.code = true;
-			code.used += part.length;
-			if (code.used >= code.words[code.word].length) {
-				code.word++;
-				code.used = 0;
+		const track = ts.code;
+		if (track !== undefined && track.word < track.words.length) {
+			const style = track.styles.get(track.word);
+			if (style !== undefined) word.style = style;
+			track.used += part.length;
+			if (track.used >= track.words[track.word].length) {
+				track.word++;
+				track.used = 0;
 			}
 		}
 		words.push(word);
@@ -535,9 +601,9 @@ function contentWidth(ts: Typesetter, indent = 0): number {
 	return ts.opts.pageWidth - 2 * ts.opts.margin - indent;
 }
 
-function drawHeading(ts: Typesetter, level: number, text: string, code?: number[]): void {
+function drawHeading(ts: Typesetter, level: number, text: string, inline?: InlineStyles): void {
 	beginBlock(ts, level === 0 ? "title" : "heading", Math.max(level, 1));
-	trackInlineCode(ts, text, code);
+	trackInline(ts, text, inline);
 	const size = HEADING_SIZES[level] ?? 11;
 	const gapBefore = size * 0.8;
 	// Keep-with-next (GP_E6_S5, typo 4): a heading only starts on a page if
@@ -555,10 +621,10 @@ function drawParagraph(
 	ts: Typesetter,
 	text: string,
 	style?: "bold" | "italic",
-	code?: number[],
+	inline?: InlineStyles,
 ): void {
 	beginBlock(ts, "paragraph");
-	trackInlineCode(ts, text, code);
+	trackInline(ts, text, inline);
 	// A whole-span label like "**Doel**" renders in its font (GP_E6_S7,
 	// typo 7): the line stays single-font, so wrapping, the word map and the
 	// projection stay trivially correct. Mixed inline styling is GP_E6_S8.
@@ -598,11 +664,7 @@ function drawList(ts: Typesetter, items: ListItem[]): void {
 		const text = task ? task.rest : item.text;
 		// The "[ ]" marker's words are not drawn as text.
 		const skipped = task ? wordCount(item.text) - wordCount(text) : 0;
-		trackInlineCode(
-			ts,
-			text,
-			item.code?.map((i) => i - skipped).filter((i) => i >= 0),
-		);
+		trackInline(ts, text, shiftInline(item.inline, -skipped));
 		const lines = wrapText(toWinAnsi(text, ts.opts.typo), ts.body, size, contentWidth(ts, indent), ts.opts.typo);
 		const step = size * ts.opts.lineHeight;
 		ensureRoom(ts, step);
@@ -690,12 +752,12 @@ function drawCheckbox(ts: Typesetter, x: number, y: number, size: number, checke
 	}
 }
 
-function drawQuote(ts: Typesetter, quoteLines: string[], code?: number[]): void {
+function drawQuote(ts: Typesetter, quoteLines: string[], inline?: InlineStyles): void {
 	beginBlock(ts, "quote");
 	const size = ts.opts.fontSize;
 	const indent = 14;
 	const text = quoteLines.join(" ").trim();
-	trackInlineCode(ts, text, code);
+	trackInline(ts, text, inline);
 	const lines = wrapText(toWinAnsi(text, ts.opts.typo), ts.italic, size, contentWidth(ts, indent), ts.opts.typo);
 	const step = size * ts.opts.lineHeight;
 	for (const line of lines) {
@@ -959,16 +1021,16 @@ function drawImage(ts: Typesetter, block: { name: string; width: number; height:
 function drawBlock(ts: Typesetter, block: Block): void {
 	switch (block.type) {
 		case "heading":
-			drawHeading(ts, block.level, block.text, block.code);
+			drawHeading(ts, block.level, block.text, block.inline);
 			break;
 		case "paragraph":
-			drawParagraph(ts, block.text, block.style, block.code);
+			drawParagraph(ts, block.text, block.style, block.inline);
 			break;
 		case "list":
 			drawList(ts, block.items);
 			break;
 		case "quote":
-			drawQuote(ts, block.lines, block.code);
+			drawQuote(ts, block.lines, block.inline);
 			break;
 		case "code":
 			drawCode(ts, block.lines);

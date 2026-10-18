@@ -106,6 +106,8 @@ export interface InkSnapshot {
 	imageStyle?: "colour-hatch" | "mono-hatch";
 	/** Colour accents were drawn (highlighter bands, diagram fills); absent = not. */
 	accents?: true;
+	/** Inline styling was drawn and inline HTML read as styling; absent = neither. */
+	inline?: true;
 	/** The title the notebook was written with (its first line). */
 	title?: string;
 	/**

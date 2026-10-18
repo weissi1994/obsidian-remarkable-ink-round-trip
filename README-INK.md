@@ -189,14 +189,16 @@ and where it landed decides which word it now follows.
 - **Notebooks sent before two-way sync** (or as PDF, EPUB or editable text by an
   earlier version) carry no merge base: their tablet changes are added to the
   note as a summary block, and the next sync re-sends them as handwriting.
-- **What a mark becomes** follows *Settings → What a pen mark becomes*; a
-  strike-through, underline or highlight written into the note comes back to the
-  tablet as plain words — a notebook can't show markdown styling.
+- **What a mark becomes** follows *Settings → What a pen mark becomes*, and the
+  styling survives the round trip: a word you struck, underlined or highlighted
+  on the tablet comes back to it struck, underlined or highlighted.
 - **Keep the plugin folder** when moving vaults: `hands/` holds your learned
   handwriting and `sent/` the text of each send — what the sync compares and
   merges against.
-- **Inline styling** (a bold word inside a sentence) is written plain, as in the
-  upstream PDF; whole bold or italic paragraphs keep their weight and slant.
+- **Inline styling** is drawn without moving a word: **bold** with a heavier
+  pen, *italic* slanted, `~~strike~~` and `<u>underline</u>` as pen lines,
+  `==highlight==` and `<mark style="background: …">` with the highlighter in the
+  nearest tablet colour. Notebooks sent before this keep their plain look.
 - **Pages are bigger than a PDF send.** A full page is a few hundred KB of
   strokes; a long note takes a moment longer to sync.
 
