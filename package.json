@@ -1,7 +1,7 @@
 {
 	"name": "remarkable-ink-round-trip",
 	"version": "1.2.0",
-	"description": "reMarkable Ink Round-Trip for Obsidian — notes as real pen strokes (single-line font or your own handwriting), with erase/move/mark-up coming back into the note. Fork of reMarkable Round-Trip.",
+	"description": "reMarkable Ink Round-Trip for Obsidian — notes kept in two-way sync with your reMarkable as real pen strokes (a single-line font or your own handwriting): what you erase, move, mark or write on the tablet is merged back into the note. Fork of reMarkable Round-Trip.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
@@ -21,7 +21,6 @@
 	],
 	"license": "GPL-3.0-or-later",
 	"dependencies": {
-		"pdf-lib": "^1.17.1",
 		"rmapi-js": "^11.1.2"
 	},
 	"devDependencies": {
@@ -32,6 +31,7 @@
 		"eslint-plugin-obsidianmd": "^0.4.1",
 		"jszip": "^3.10.1",
 		"obsidian": "~1.13.1",
+		"pdf-lib": "^1.17.1",
 		"stylelint": "^17.15.0",
 		"stylelint-config-obsidianmd": "^0.1.0",
 		"tslib": "2.8.1",

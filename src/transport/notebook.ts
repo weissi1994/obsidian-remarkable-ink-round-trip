@@ -2,9 +2,8 @@
  * Upload a multi-page notebook of pen strokes through the raw sync API
  * (ink fork).
  *
- * The bundle is the one the typed-text notebook already proved on real
- * devices (transport/textnotebook.ts): content, metadata, pagedata, the page
- * files, one entries list, root update. Only the page list grows. Page ids
+ * The bundle: content, metadata, pagedata, the page files, one entries list,
+ * root update. Page ids
  * are chosen here, before the first attempt, and come back to the caller:
  * the import maps device pages to layout pages by these ids, which is sturdier
  * than trusting any page ordering field across firmware versions.
@@ -14,7 +13,26 @@
  */
 
 import { withGenerationRetry, type RetryOptions } from "./mirror";
-import type { RawSyncApi } from "./textnotebook";
+
+/** The slice of rmapi-js' raw api this module consumes (structural, testable). */
+export interface RawSyncApi {
+	getRootHash(): Promise<[string, number, number]>;
+	getEntries(id: string, hash: string): Promise<{ entries: RawEntry[] }>;
+	getHash(id: string, hash: string): Promise<Uint8Array>;
+	putFile(id: string, bytes: Uint8Array): Promise<[RawEntry, Promise<void>]>;
+	putText(id: string, content: string): Promise<[RawEntry, Promise<void>]>;
+	putEntries(
+		id: string,
+		entries: readonly RawEntry[],
+		schemaVersion: number,
+	): Promise<[RawEntry, Promise<void>]>;
+	putRootHash(hash: string, generation: number): Promise<[string, number]>;
+}
+
+export interface RawEntry {
+	id: string;
+	hash: string;
+}
 
 export interface NotebookUploadResult {
 	docId: string;

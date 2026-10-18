@@ -2,7 +2,7 @@
  * Writing pen strokes into a v6 `.rm` page (ink fork).
  *
  * The block list follows rmscene (MIT, Rick Lupton) — the same reference the
- * upstream text writer (convert/rmtext.ts) and stroke reader were built
+ * stroke reader was built
  * against: author table, migration and page info, the scene info carrying the
  * paper size, the root group and "Layer 1", then one line item per stroke,
  * chained left-to-right as a CRDT sequence inside the layer.
@@ -15,7 +15,7 @@
  * which generated words were erased or moved.
  */
 
-import { ByteWriter, HEADER, type CrdtId } from "../convert/rmtext";
+import { ByteWriter, HEADER, type CrdtId } from "./rmbytes";
 
 const BLOCK_AUTHOR_IDS = 0x09;
 const BLOCK_MIGRATION_INFO = 0x00;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RawEntry, RawSyncApi } from "../transport/textnotebook";
+import type { RawEntry, RawSyncApi } from "../transport/notebook";
 import { readNotebook, sendNotebook, uploadNotebook } from "../transport/notebook";
 import { ocrBody, ocrPrompt, parseOcrResponse, transcribe } from "../transport/ocr";
 import type { HttpRequest } from "../transport/http";
@@ -131,7 +131,6 @@ describe("ink send", () => {
 		const persisted: string[] = [];
 		const deps: SendDeps = {
 			client: {
-				upload: () => Promise.reject(new Error("not this path")),
 				uploadInk: async (_name, pages) => ({ deviceDocId: "dev-9", pageIds: pages.map((_, i) => `p${i}`) }),
 			},
 			ink: {
@@ -151,7 +150,6 @@ describe("ink send", () => {
 					persisted.push(docId);
 				},
 			},
-			format: "ink",
 			resolveEmbed: () => ({ kind: "missing" }),
 			persistDocId: async () => undefined,
 			layout: { fontSize: 11, lineHeight: 1.5, margin: 32 },

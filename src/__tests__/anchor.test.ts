@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
-import { PdfLayout, renderPdf } from "../convert/pdf";
+import { PdfLayout } from "../convert/pdf";
+import { renderPdf } from "./helpers/pdfrender";
 import {
 	Bounds,
 	clusterStrokes,

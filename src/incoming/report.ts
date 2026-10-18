@@ -41,8 +41,8 @@ export function renderImportReport(input: ImportReportInput): string {
 					? result.removed === true
 						? `– ${result.notePath}: no longer on the reMarkable account — removed from the import administration`
 						: `– ${result.notePath}: no longer on the reMarkable account`
-					: result.skipReason === "write-mode"
-						? `– ${result.notePath}: sent as editable text — the annotation import does not apply`
+					: result.skipReason === "legacy"
+						? `– ${result.notePath}: sent as PDF, EPUB or text by an earlier version — it is re-sent as handwriting`
 						: result.skipReason === "superseded"
 							? `– ${result.notePath}: replaced by a newer push while importing — stale device copy skipped`
 							: `– ${result.notePath}: unchanged since the last import`,
@@ -128,16 +128,20 @@ function describeWrite(
 		const missed =
 			written.unplaced === undefined || written.unplaced === 0
 				? ""
-				: `, ${written.unplaced} highlight(s) listed separately`;
-		return `written as: annotated copy of the note${missed}`;
+				: `, ${written.unplaced} highlight(s) not placed`;
+		const conflicts =
+			written.conflicts === undefined || written.conflicts === 0
+				? ""
+				: `, ${written.conflicts} place(s) changed on both sides (see “Also changed on the reMarkable”)`;
+		return `written as: merged into the note${missed}${conflicts}`;
 	}
 	switch (written.reason) {
 		case "in-source-note":
 			return "written as: summary (annotations go into the source note itself)";
 		case "no-layout":
 			return (
-				"written as: summary — the note changed since it was sent, or it went " +
-				"over as EPUB. Send it again for an annotated copy."
+				"written as: summary at the end of the note — the notebook could not be " +
+				"matched to the text that was sent. Send it again to restore the link."
 			);
 		case "no-source":
 			return "written as: summary — the source note could not be read";
@@ -195,8 +199,8 @@ function diagnose(input: ImportReportInput): string {
 	const why = scanned.some((r) => r.scan?.sourceState === "changed")
 		? "the note has been edited since it was sent, so its page layout no longer describes " +
 			"this text. Send the note again to restore the link."
-		: "the note has changed since it was sent, or it went over as EPUB, which has no fixed " +
-			"page layout. Send the note again to restore the link.";
+		: "the handwriting as it was sent could not be regenerated (its send record or " +
+			"handwriting version is gone). Send the note again to restore the link.";
 	const anchoring =
 		anchored > 0
 			? ` ${anchored} are tied to the sentence they were written against.`

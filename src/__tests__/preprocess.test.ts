@@ -204,3 +204,17 @@ describe("preprocess", () => {
 		expect(result.markdown).toBe("Zichtbaar  blijft\n");
 	});
 });
+
+describe("inline HTML from merged tablet marks", () => {
+	it("keeps the words and drops the tags and markers", () => {
+		const out = preprocess(
+			'Read <u>this</u> and <mark style="background: #ffe066">that</mark>.\n\n<!-- remarkable-round-trip:begin -->\nNote\n<!-- remarkable-round-trip:end -->',
+		).markdown;
+		expect(out).toBe("Read this and that.\n\n\nNote\n");
+	});
+
+	it("leaves code fences alone", () => {
+		const out = preprocess("```html\n<u>x</u>\n```").markdown;
+		expect(out).toContain("<u>x</u>");
+	});
+});

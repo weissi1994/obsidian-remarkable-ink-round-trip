@@ -15,8 +15,6 @@ function fakeApi(initial: MirrorEntry[] = []) {
 	const calls = {
 		listItems: 0,
 		putFolder: [] as string[],
-		putPdf: [] as string[],
-		putEpub: [] as string[],
 		moves: [] as [string, string][],
 	};
 	let nextId = 1;
@@ -37,16 +35,6 @@ function fakeApi(initial: MirrorEntry[] = []) {
 			nextId++;
 			items.push(entry);
 			return Promise.resolve({ id: entry.id, hash: entry.hash });
-		},
-		putPdf: (visibleName, _buffer, opts) => {
-			calls.putPdf.push(`${opts?.parent ?? ""}:${visibleName}`);
-			const id = `doc-${nextId++}`;
-			return Promise.resolve({ id, hash: `hash-${id}` });
-		},
-		putEpub: (visibleName, _buffer, opts) => {
-			calls.putEpub.push(`${opts?.parent ?? ""}:${visibleName}`);
-			const id = `doc-${nextId++}`;
-			return Promise.resolve({ id, hash: `hash-${id}` });
 		},
 		move: (hash, parent) => {
 			calls.moves.push([hash, parent]);
@@ -170,28 +158,7 @@ describe("MirrorTransport.ensureFolderPath", () => {
 	});
 });
 
-describe("MirrorTransport upload + replace", () => {
-	it("uploads without the .pdf suffix into the given parent", async () => {
-		const { api, calls } = fakeApi();
-		const mirror = new MirrorTransport(api, "");
-		const result = await mirror.upload("Nota.pdf", new Uint8Array([1]), {
-			parentId: "dir-9",
-		});
-		expect(calls.putPdf).toEqual(["dir-9:Nota"]);
-		expect(result.deviceDocId).toMatch(/^doc-/);
-	});
-
-	it("routes an EPUB to putEpub and strips the .epub suffix", async () => {
-		const { api, calls } = fakeApi();
-		const mirror = new MirrorTransport(api, "");
-		await mirror.upload("Nota.epub", new Uint8Array([1]), {
-			parentId: "dir-9",
-			format: "epub",
-		});
-		expect(calls.putEpub).toEqual(["dir-9:Nota"]);
-		expect(calls.putPdf).toEqual([]);
-	});
-
+describe("MirrorTransport replace", () => {
 	it("moves the previous device copy to trash, ignoring already-gone docs", async () => {
 		const { api, calls } = fakeApi([
 			{
@@ -276,27 +243,6 @@ describe("generation conflicts", () => {
 			}, NO_WAIT),
 		).rejects.toThrow(/gewoon kapot/);
 		expect(calls).toBe(1);
-	});
-
-	it("retries an upload that hits a busy cloud, refreshing the tree", async () => {
-		const { api, calls } = fakeApi();
-		let attempts = 0;
-		const flaky: MirrorApi = {
-			...api,
-			putPdf: (name, buffer, opts) => {
-				attempts++;
-				if (attempts === 1)
-					return Promise.reject(new Error("precondition failed"));
-				return api.putPdf(name, buffer, opts);
-			},
-		};
-		const mirror = new MirrorTransport(flaky, "", NO_WAIT);
-		const result = await mirror.upload("Nota.pdf", new Uint8Array([1]), {
-			parentId: "dir-1",
-		});
-		expect(attempts).toBe(2);
-		expect(calls.putPdf).toEqual(["dir-1:Nota"]);
-		expect(result.deviceDocId).toMatch(/^doc-/);
 	});
 
 	it("explains a persistent conflict in plain language", () => {

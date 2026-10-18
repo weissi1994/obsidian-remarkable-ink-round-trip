@@ -7,7 +7,7 @@ import {
 	substituteVaultImages,
 	type Block,
 } from "../convert/mdblocks";
-import { renderPdf } from "../convert/pdf";
+import { renderPdf } from "./helpers/pdfrender";
 
 /** A minimal valid 1×1 white PNG, for embed-path tests. */
 const TINY_PNG = Uint8Array.from(

@@ -36,7 +36,6 @@ import {
 	settingsFrom,
 	storedFrom,
 } from "./settings";
-import { LayoutChoiceModal } from "./layoutmodal";
 import { remarkable } from "rmapi-js";
 import { HttpClient } from "./transport/http";
 import {
@@ -53,14 +52,9 @@ import {
 } from "./transport/diagnose";
 import { ByteCompatReport, installByteCompat } from "./transport/bytescompat";
 import { EmbedContent } from "./preprocess/preprocess";
-import { ANNOTATIONS_FRONTMATTER_KEY, DOCID_FRONTMATTER_KEY } from "./id/docid";
-import {
-	NoteInput,
-	SendFormat,
-	SendResult,
-	notesNeedingUpload,
-	sendBatch,
-} from "./sync/send";
+import { DOCID_FRONTMATTER_KEY } from "./id/docid";
+import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
+import { mergeTabletChanges } from "./sync/twoway";
 import {
 	DocumentFile,
 	ImportedMark,
@@ -72,36 +66,13 @@ import {
 } from "./incoming/pull";
 import { renderImportReport } from "./incoming/report";
 import { paintPlan, planRender } from "./incoming/strokerender";
-import {
-	imageRefTargets,
-	parseBlocks,
-	substituteDiagrams,
-	substituteVaultImages,
-} from "./convert/mdblocks";
-import { PdfLayout, renderPdf } from "./convert/pdf";
-import { renderMermaidDiagrams } from "./convert/mermaid";
-import type { DiagramImage } from "./convert/mermaid";
 import { MappingEntry, contentHash } from "./id/mapping";
-import { displayTextForLink, preprocess } from "./preprocess/preprocess";
-import {
-	AnnotationOutcome,
-	companionPath,
-	renderAnnotationBlock,
-	upsertAnnotationBlock,
-} from "./incoming/annotationnote";
+import { displayTextForLink, preprocess, splitNote } from "./preprocess/preprocess";
+import type { AnnotationOutcome } from "./incoming/annotationnote";
 import { WatchQueue, parseFolderList } from "./sync/watcher";
 import { PullQueue, PushQueue, SyncQueueCoordinator } from "./sync/queues";
-import {
-	RawSyncApi,
-	readTextNotebook,
-	sendTextNotebook,
-} from "./transport/textnotebook";
-import {
-	TextImportOutcome,
-	importEditedText,
-	splitFrontmatter,
-} from "./sync/textimport";
-import { TextConflictModal } from "./textconflictmodal";
+import type { RawSyncApi } from "./transport/notebook";
+import type { Highlight } from "./incoming/highlights";
 import { flattenSelection, relativeFolderPath } from "./sync/selection";
 import { shouldAnnounceUpdate } from "./updatenotice";
 import { InkEdge } from "./inkedge";
@@ -138,8 +109,8 @@ export default class RoundTripPlugin extends Plugin {
 	private fetchShim: { restore: () => void } | null = null;
 	/** Unknown data.json keys, preserved across saves (see extrasFrom). */
 	private extraData: Record<string, unknown> = {};
-	/** Layouts rebuilt during one import run, by document id (GP_E3_S12). */
-	private readonly layoutCache = new Map<string, PdfLayout | null>();
+	private syncRunning: Promise<void> | null = null;
+	private syncTimer: number | null = null;
 	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
 	readonly ink = ((plugin: RoundTripPlugin) =>
 		new InkEdge({
@@ -210,79 +181,36 @@ export default class RoundTripPlugin extends Plugin {
 			const menu = new Menu();
 			menu.addItem((item) =>
 				item
+					.setTitle("Sync now")
+					.setIcon("refresh-cw")
+					.onClick(() => void this.syncNow()),
+			);
+			menu.addItem((item) =>
+				item
 					.setTitle("Sync status")
 					.setIcon("activity")
 					.onClick(() => this.openSyncStatus()),
 			);
-			menu.addSeparator();
-			menu.addItem((item) =>
-				item
-					.setTitle("Import unsynced annotations")
-					.setIcon("import")
-					.onClick(() => void this.pullAnnotations()),
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Import full annotations")
-					.setIcon("rotate-ccw")
-					.onClick(() => void this.pullAnnotations({ force: true })),
-			);
 			menu.showAtMouseEvent(event);
+		});
+		this.addCommand({
+			id: "sync-now",
+			name: "Sync with reMarkable now",
+			callback: () => void this.syncNow(),
 		});
 		this.addCommand({
 			id: "show-sync-status",
 			name: "Show sync status",
 			callback: () => this.openSyncStatus(),
 		});
-
 		this.addCommand({
 			id: "check-cloud-status",
 			name: "Check reMarkable cloud status (read-only)",
 			callback: () => void this.checkCloudStatus(),
 		});
-
-		this.addCommand({
-			id: "import-annotations",
-			name: "Import annotations from reMarkable",
-			callback: () => void this.pullAnnotations(),
-		});
-
-		this.addCommand({
-			id: "import-annotations-force",
-			name: "Re-import all annotations (ignore what was already imported)",
-			callback: () => void this.pullAnnotations({ force: true }),
-		});
-
-		// One note, not the whole account (GP_E5_S14): checking a single
-		// freshly-reviewed note deserves the same precision as sending one.
-		this.addCommand({
-			id: "import-annotations-current-note",
-			name: "Import annotations from reMarkable (current note)",
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				if (!file || this.annotationEntry(file) === undefined) return false;
-				if (!checking) void this.pullAnnotations({ only: file });
-				return true;
-			},
-		});
-
-		// The per-note force twin (GP_E5_S16): look again at ONE document,
-		// ignoring the imported-hash — the full re-import walks the whole
-		// account for what is usually a single freshly-reviewed note.
-		this.addCommand({
-			id: "import-annotations-current-note-force",
-			name: "Re-import annotations from reMarkable (current note)",
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				if (!file || this.annotationEntry(file) === undefined) return false;
-				if (!checking) void this.pullAnnotations({ only: file, force: true });
-				return true;
-			},
-		});
-
 		this.addCommand({
 			id: "send-current-note",
-			name: "Send current note to reMarkable",
+			name: "Sync current note with reMarkable",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md") return false;
@@ -290,43 +218,14 @@ export default class RoundTripPlugin extends Plugin {
 				return true;
 			},
 		});
-
+		// Reads the notebook again even when the tablet reports no change.
 		this.addCommand({
-			id: "send-current-note-choose-layout",
-			name: "Send current note to reMarkable (choose layout)",
-			checkCallback: (checking) => {
-				// EPUB reflows: there is no layout to choose (the settings hide
-				// the layout section there for the same reason).
-				if (this.settings.outputFormat === "epub") return false;
-				const file = this.app.workspace.getActiveFile();
-				if (!file || file.extension !== "md") return false;
-				if (!checking) this.sendWithLayoutChoice([file], `"${file.basename}"`);
-				return true;
-			},
-		});
-
-		// Write-mode (F16, GP_E7_S2): an explicit per-send choice, never a
-		// default — the note travels as a typed-text notebook you edit with
-		// the keyboard, not as a review copy you annotate with the pen.
-		this.addCommand({
-			id: "send-current-note-editable-text",
-			name: "Send current note to reMarkable as editable text",
+			id: "import-annotations-current-note-force",
+			name: "Re-read current note from reMarkable",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
-				if (!file || file.extension !== "md") return false;
-				if (!checking) void this.sendFiles([file], { format: "text" });
-				return true;
-			},
-		});
-
-		// Ink fork: a notebook of real pen strokes — the note in handwriting.
-		this.addCommand({
-			id: "send-current-note-handwriting",
-			name: "Send current note to reMarkable as handwriting",
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				if (!file || file.extension !== "md") return false;
-				if (!checking) void this.sendFiles([file], { format: "ink" });
+				if (!file || this.syncedEntry(file) === undefined) return false;
+				if (!checking) void this.pullAnnotations({ only: [file], force: true });
 				return true;
 			},
 		});
@@ -351,95 +250,23 @@ export default class RoundTripPlugin extends Plugin {
 			callback: () => void this.detectPageSize(),
 		});
 
-		// The way back (F17, GP_E7_S3): equally explicit, equally per note —
-		// only offered for notes whose last send was a write-mode send.
-		this.addCommand({
-			id: "import-edited-text-current-note",
-			name: "Get edited text back from reMarkable (current note)",
-			checkCallback: (checking) => {
-				const file = this.app.workspace.getActiveFile();
-				const entry = file === null ? undefined : this.writeModeEntry(file);
-				if (!file || entry === undefined) return false;
-				if (!checking) void this.importEditedTextFor(file);
-				return true;
-			},
-		});
-
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
 				if (file instanceof TFile && file.extension === "md") {
 					menu.addItem((item) =>
 						item
-							.setTitle("Send to reMarkable")
-							.setIcon("send")
+							.setTitle("Sync with reMarkable")
+							.setIcon("refresh-cw")
 							.onClick(() => void this.sendFiles([file])),
 					);
-					// ONE extra entry that opens the layout modal (GP_E6_S10) —
-					// deliberately not an entry per preset. PDF only: an EPUB
-					// reflows and has no layout to choose.
-					if (this.settings.outputFormat !== "epub")
-						menu.addItem((item) =>
-							item
-								.setTitle("Send to reMarkable (choose layout…)")
-								.setIcon("send")
-								.onClick(() =>
-									this.sendWithLayoutChoice([file], `"${file.basename}"`),
-								),
-						);
-					// Write-mode (GP_E7_S2): per note, on purpose — an editable
-					// text document is a working copy you pick deliberately, not
-					// a bulk format, so folders keep review sends only.
-					menu.addItem((item) =>
-						item
-							.setTitle("Send to reMarkable as editable text")
-							.setIcon("pencil")
-							.onClick(() => void this.sendFiles([file], { format: "text" })),
-					);
-					// Ink fork: unless handwriting is already the default.
-					if (this.settings.outputFormat !== "ink")
-						menu.addItem((item) =>
-							item
-								.setTitle("Send to reMarkable as handwriting")
-								.setIcon("pen-tool")
-								.onClick(() => void this.sendFiles([file], { format: "ink" })),
-						);
-					// …and the way back (GP_E7_S3), only where it applies.
-					if (this.writeModeEntry(file) !== undefined)
-						menu.addItem((item) =>
-							item
-								.setTitle("Get edited text from reMarkable")
-								.setIcon("pencil")
-								.onClick(() => void this.importEditedTextFor(file)),
-						);
-					// Annotations of exactly this note (GP_E5_S14) — only shown
-					// once the note has a review copy on the device. The
-					// re-import twin (GP_E5_S16) ignores the imported-hash.
-					if (this.annotationEntry(file) !== undefined) {
-						menu.addItem((item) =>
-							item
-								.setTitle("Import annotations from reMarkable")
-								.setIcon("import")
-								.onClick(() => void this.pullAnnotations({ only: file })),
-						);
-						menu.addItem((item) =>
-							item
-								.setTitle("Re-import annotations from reMarkable")
-								.setIcon("rotate-ccw")
-								.onClick(
-									() => void this.pullAnnotations({ only: file, force: true }),
-								),
-						);
-					}
 				}
 				if (file instanceof TFolder) {
 					menu.addItem((item) =>
 						item
-							.setTitle("Send folder to reMarkable")
-							.setIcon("send")
-							// The sent folder keeps its internal structure on the
-							// device even when vault mirroring is off (GP_E5_S2):
-							// paths are made relative to the folder's parent, so
-							// the folder itself is created at the device root.
+							.setTitle("Sync folder with reMarkable")
+							.setIcon("refresh-cw")
+							// The folder keeps its internal structure on the device
+							// even when vault mirroring is off (GP_E5_S2).
 							.onClick(
 								() =>
 									void this.sendFiles(collectMarkdownFiles(file), {
@@ -447,19 +274,6 @@ export default class RoundTripPlugin extends Plugin {
 									}),
 							),
 					);
-					if (this.settings.outputFormat !== "epub")
-						menu.addItem((item) =>
-							item
-								.setTitle("Send folder to reMarkable (choose layout…)")
-								.setIcon("send")
-								.onClick(() =>
-									this.sendWithLayoutChoice(
-										collectMarkdownFiles(file),
-										`folder "${file.name}"`,
-										{ structureRoot: folderParentPath(file) },
-									),
-								),
-						);
 				}
 			}),
 		);
@@ -476,31 +290,20 @@ export default class RoundTripPlugin extends Plugin {
 						item
 							.setTitle(
 								notes.length === 1
-									? "Send 1 note to reMarkable"
-									: `Send ${notes.length} notes to reMarkable`,
+									? "Sync 1 note with reMarkable"
+									: `Sync ${notes.length} notes with reMarkable`,
 							)
-							.setIcon("send")
+							.setIcon("refresh-cw")
 							.onClick(() => void this.sendFiles(notes)),
 					);
-					if (this.settings.outputFormat !== "epub")
-						menu.addItem((item) =>
-							item
-								.setTitle(
-									notes.length === 1
-										? "Send 1 note to reMarkable (choose layout…)"
-										: `Send ${notes.length} notes to reMarkable (choose layout…)`,
-								)
-								.setIcon("send")
-								.onClick(() =>
-									this.sendWithLayoutChoice(
-										notes,
-										notes.length === 1 ? "1 note" : `${notes.length} notes`,
-									),
-								),
-						);
 				},
 			),
 		);
+
+		this.app.workspace.onLayoutReady(() => {
+			void this.syncNow({ background: true });
+		});
+		this.setupSyncTimer();
 	}
 
 	private openSyncStatus(): void {
@@ -561,6 +364,7 @@ export default class RoundTripPlugin extends Plugin {
 			await this.loadSettings();
 			this.setupWatcher();
 			this.setupFetchShim();
+			this.setupSyncTimer();
 		});
 	}
 
@@ -569,6 +373,7 @@ export default class RoundTripPlugin extends Plugin {
 			await this.persistSettings();
 			this.setupWatcher();
 			this.setupFetchShim();
+			this.setupSyncTimer();
 		});
 	}
 
@@ -705,61 +510,105 @@ export default class RoundTripPlugin extends Plugin {
 	}
 
 	/**
-	 * Open the per-send layout modal, then send with the chosen layout
-	 * (GP_E6_S10). The refusals sendFiles would give (not paired, nothing to
-	 * send) surface BEFORE the modal opens — filling in a dialog first and
-	 * being refused after is the wrong order.
+	 * Two-way sync (the whole round trip in one go): read every synced
+	 * notebook and merge what changed on the tablet into its note, then send
+	 * every note in the sync folders or with a notebook already that is new
+	 * or out of date — the merged ones included. In the background it stays silent unless
+	 * something actually happened.
 	 */
-	private sendWithLayoutChoice(
-		files: TFile[],
-		subject: string,
-		options: { structureRoot?: string } = {},
-	): void {
-		if (files.length === 0) {
-			notify("No markdown notes to send.");
-			return;
+	syncNow(options: { background?: boolean } = {}): Promise<void> {
+		if (this.settings.deviceToken === "") {
+			if (options.background !== true) {
+				notify("Not paired with a reMarkable account yet — open the plugin settings first.");
+			}
+			return Promise.resolve();
 		}
-		if (!this.createClient().isRegistered) {
-			notify(
-				"Not paired with a reMarkable account yet — open the plugin settings first.",
-			);
-			return;
-		}
-		new LayoutChoiceModal(this.app, this.settings, subject, (choice) => {
-			void this.sendFiles(files, {
-				...options,
-				layout: sendLayout({ ...this.settings, ...choice }),
-			});
-		}).open();
+		if (this.syncRunning !== null) return this.syncRunning;
+		this.syncRunning = (async () => {
+			try {
+				const changed = await this.pullAnnotations({ background: options.background });
+				const files = new Map<string, TFile>();
+				for (const file of this.syncFolderFiles()) files.set(file.path, file);
+				// A note synced once from outside the folders stays in sync too.
+				for (const entry of Object.values(this.settings.mappings)) {
+					if (entry.format !== "ink") continue;
+					const file = this.resolveNote(entry);
+					if (file !== null) files.set(file.path, file);
+				}
+				for (const path of changed) {
+					const file = this.app.vault.getFileByPath(path);
+					if (file !== null) files.set(file.path, file);
+				}
+				if (files.size === 0) return;
+				await this.sendFiles([...files.values()], {
+					auto: true,
+					pullFirst: false,
+					background: options.background,
+				});
+			} finally {
+				this.syncRunning = null;
+			}
+		})();
+		return this.syncRunning;
 	}
 
+	/** Every note in the sync folders, when they are on. */
+	private syncFolderFiles(): TFile[] {
+		if (!this.settings.watchFolderEnabled) return [];
+		const out: TFile[] = [];
+		for (const path of parseFolderList(this.settings.watchFolderPath)) {
+			const folder = this.app.vault.getFolderByPath(path);
+			if (folder !== null) out.push(...collectMarkdownFiles(folder));
+		}
+		return out;
+	}
+
+	/** (Re)start the background sync interval from the current settings. */
+	private setupSyncTimer(): void {
+		if (this.syncTimer !== null) window.clearInterval(this.syncTimer);
+		this.syncTimer = null;
+		const minutes = this.settings.syncIntervalMinutes;
+		if (!(minutes > 0)) return;
+		this.syncTimer = window.setInterval(
+			() => void this.syncNow({ background: true }),
+			minutes * 60_000,
+		);
+		this.registerInterval(this.syncTimer);
+	}
+
+	/**
+	 * Send notes as handwritten notebooks. A note that already has a notebook
+	 * gets that notebook read first, so ink not yet in the note is merged
+	 * before the notebook is replaced. In `auto` mode unchanged notes are
+	 * skipped and an all-skipped run stays silent — errors always surface.
+	 */
 	async sendFiles(
 		files: TFile[],
 		options: {
 			auto?: boolean;
 			structureRoot?: string;
-			/** One-send override (GP_E6_S10); omitted = the stored settings. */
-			layout?: ReturnType<typeof sendLayout>;
-			/**
-			 * One-send format override (GP_E7_S2): "text" sends the note as an
-			 * editable typed-text notebook instead of a review copy. Only ever
-			 * set explicitly — the stored settings cannot choose it.
-			 */
-			format?: SendFormat;
+			/** Read the existing notebooks first (default); a sync already did. */
+			pullFirst?: boolean;
+			background?: boolean;
 		} = {},
 	): Promise<void> {
 		if (files.length === 0) {
-			notify("No markdown notes to send.");
+			if (options.background !== true) notify("No markdown notes to send.");
 			return;
 		}
 		const client = this.createClient();
 		if (!client.isRegistered) {
-			notify(
-				"Not paired with a reMarkable account yet — open the plugin settings first.",
-			);
+			if (options.background !== true) {
+				notify("Not paired with a reMarkable account yet — open the plugin settings first.");
+			}
 			return;
 		}
-		const format: SendFormat = options.format ?? this.settings.outputFormat;
+		if (options.pullFirst !== false) {
+			const synced = files.filter((file) => this.syncedEntry(file) !== undefined);
+			if (synced.length > 0) {
+				await this.pullAnnotations({ only: synced, background: true });
+			}
+		}
 		const notes: NoteInput[] = [];
 		const embedMaps = new Map<string, Map<string, EmbedContent>>();
 		try {
@@ -767,7 +616,7 @@ export default class RoundTripPlugin extends Plugin {
 				notes.push({
 					path: file.path,
 					basename: file.basename,
-					content: await this.app.vault.cachedRead(file),
+					content: await this.app.vault.read(file),
 					existingDocId: getFrontmatterValue(
 						this.app.metadataCache.getFileCache(file)?.frontmatter,
 						DOCID_FRONTMATTER_KEY,
@@ -785,11 +634,9 @@ export default class RoundTripPlugin extends Plugin {
 				queuedNotes = notesNeedingUpload(
 					notes,
 					this.settings.mappings,
-					format,
 					(linkpath, notePath) =>
 						embedMaps.get(notePath)?.get(linkpath) ?? { kind: "missing" },
 					this.settings.frontmatterAsTitleBlock,
-					this.settings.embedImages,
 				);
 			} catch (error) {
 				notify(error instanceof Error ? error.message : String(error), 10000);
@@ -815,9 +662,7 @@ export default class RoundTripPlugin extends Plugin {
 			.enqueue({
 				ensureFolders: async () => {
 					if (queuedFiles.length === 0) return;
-					// Ink fork: a handwritten send needs the selected hand loaded.
-					if (format === "ink") await this.ink.prepareSend();
-					if (!mirrorFoldersActive && format !== "text" && format !== "ink") return;
+					await this.ink.prepareSend();
 					try {
 						const api = await remarkable(
 							this.settings.deviceToken,
@@ -864,30 +709,16 @@ export default class RoundTripPlugin extends Plugin {
 							this.settings.mappings,
 							{
 								client: {
-									upload: (fileName, bytes, uploadOptions) =>
-										activeMirror && mirrorFoldersActive
-											? activeMirror
-													.upload(fileName, bytes, uploadOptions)
-													.catch((error: unknown) => {
-														throw toTransportError(error);
-													})
-											: client.upload(fileName, bytes, uploadOptions),
-									uploadText: activeRaw
-										? (visibleName, markdown, uploadOptions) =>
-												sendTextNotebook(activeRaw, visibleName, markdown, {
-													parentId: uploadOptions.parentId,
-												}).catch((error: unknown) => {
-													throw toTransportError(error);
-												})
-										: undefined,
-									uploadInk: activeRaw
-										? (visibleName, pages, uploadOptions) =>
-												this.ink
-													.upload(activeRaw, visibleName, pages, uploadOptions.parentId)
-													.catch((error: unknown) => {
-														throw toTransportError(error);
-													})
-										: undefined,
+									uploadInk: (visibleName, pages, uploadOptions) => {
+										if (activeRaw === null) {
+											return Promise.reject(new Error("The reMarkable sync API is not available right now."));
+										}
+										return this.ink
+											.upload(activeRaw, visibleName, pages, uploadOptions.parentId)
+											.catch((error: unknown) => {
+												throw toTransportError(error);
+											});
+									},
 								},
 								ink: {
 									render: (blocks, title, docId, layout, images, drawings) =>
@@ -896,7 +727,6 @@ export default class RoundTripPlugin extends Plugin {
 									loadDrawings: (markdown) => this.noteDrawings(markdown),
 									persistSent: (docId, sent) => this.ink.persistSent(docId, sent),
 								},
-								format,
 								resolveParent:
 									activeMirror && mirrorFoldersActive
 										? (notePath) => {
@@ -911,13 +741,11 @@ export default class RoundTripPlugin extends Plugin {
 												return Promise.resolve(parentIds.get(target) ?? "");
 											}
 										: undefined,
-								// Ink fork: a handwritten re-send only retires the old
-								// notebook when mirroring is on — with it off, that
-								// notebook may hold ink not imported yet.
-								replacePrevious:
-									activeMirror && (mirrorFoldersActive || format !== "ink")
-										? (previousId) => activeMirror.trashPrevious(previousId)
-										: undefined,
+								// The old notebook's ink was pulled into the note just
+								// before this send, so it can go.
+								replacePrevious: activeMirror
+									? (previousId) => activeMirror.trashPrevious(previousId)
+									: undefined,
 								resolveEmbed: (linkpath, notePath) =>
 									embedMaps.get(notePath)?.get(linkpath) ?? { kind: "missing" },
 								persistDocId: async (note, docId) => {
@@ -928,17 +756,7 @@ export default class RoundTripPlugin extends Plugin {
 											docId;
 									});
 								},
-								layout: options.layout ?? sendLayout(this.settings),
-								// DOM-bound mermaid rendering lives at the plugin edge,
-								// injected like every other Obsidian capability (fork:
-								// image blocks).
-								renderDiagrams: (markdown) => renderMermaidDiagrams(markdown),
-								// Vault pictures, same edge, same rules (fork: image blocks).
-								resolveImages: this.settings.embedImages
-									? (targets, notePath) =>
-											this.resolveVaultImages(targets, notePath)
-									: undefined,
-								imagesAsBlocks: this.settings.embedImages,
+								layout: sendLayout(this.settings),
 								frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
 								skipUnchanged: options.auto === true,
 							},
@@ -958,6 +776,7 @@ export default class RoundTripPlugin extends Plugin {
 						await this.persistSettings();
 						reportResults(results, {
 							quietWhenAllSkipped: options.auto === true,
+							quiet: options.background === true,
 						});
 					} finally {
 						notice.hide();
@@ -966,134 +785,20 @@ export default class RoundTripPlugin extends Plugin {
 			})
 			.catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
-				notify(`${message} No notes were uploaded.`, 10000);
+				if (options.background === true) console.warn(`reMarkable Ink Round-Trip: ${message}`);
+				else notify(`${message} No notes were uploaded.`, 10000);
 			});
 	}
 
-	/** The mapping entry of a note whose LAST send was write-mode, if any. */
-	private writeModeEntry(file: TFile): MappingEntry | undefined {
+	/** The mapping entry of a note that has a handwritten notebook, if any. */
+	private syncedEntry(file: TFile): MappingEntry | undefined {
 		const docId = getFrontmatterValue(
 			this.app.metadataCache.getFileCache(file)?.frontmatter,
 			DOCID_FRONTMATTER_KEY,
 		);
 		if (typeof docId !== "string") return undefined;
 		const entry = this.settings.mappings[docId];
-		return entry?.format === "text" ? entry : undefined;
-	}
-
-	/**
-	 * Import the edited text of a write-mode note back into the note itself
-	 * (F17, GP_E7_S3). The N5 guarantees — backup before touching, conflict
-	 * ask, no silent merges — live in importEditedText; this edge only wires
-	 * vault, transport and the conflict modal together. The note the user
-	 * invoked this on IS the target, so a moved note needs no path chase.
-	 */
-	private importEditedTextFor(file: TFile): Promise<void> {
-		return this.pullQueue.enqueue(`text:${file.path}`, () =>
-			this.runImportEditedTextFor(file),
-		);
-	}
-
-	private async runImportEditedTextFor(file: TFile): Promise<void> {
-		const entry = this.writeModeEntry(file);
-		if (entry === undefined) {
-			notify("This note's last send was not an editable-text send.");
-			return;
-		}
-		if (this.settings.deviceToken === "") {
-			notify(
-				"Not paired with a reMarkable account yet — open the plugin settings first.",
-			);
-			return;
-		}
-		const notice = this.progress(
-			`Reading "${file.basename}" from the reMarkable…`,
-		);
-		// Filled by readDeviceText below; a mobile user cannot open a console
-		// (devicecheck 2026-08-19, twice), so what the device file looks like
-		// must reach them through the vault log — ALWAYS, not only on
-		// anchoring trouble: the third failed phone test delivered an old log
-		// because the trouble-only guard had nothing to say, and left us
-		// unable to tell "old plugin" from "anchors resolved yet still
-		// wrong". Every text import now leaves its full trace.
-		const diagnosis = { unanchored: 0, lines: [] as string[] };
-		try {
-			const api = await remarkable(
-				this.settings.deviceToken,
-				this.rmapiOptions(),
-			);
-			const { outcome, entry: updated } = await importEditedText(entry, {
-				readDeviceText: async (target) => {
-					try {
-						const result = await readTextNotebook(api.raw, target.deviceDocId);
-						diagnosis.unanchored = result.unanchored;
-						diagnosis.lines = [
-							`device ${target.deviceDocId}`,
-							`${result.topology.length} item(s), ${result.unanchored} unanchored (unanchored items sit at the END of the text)`,
-							"Item map (ids, anchors and lengths only — no content):",
-							...result.topology.map((line) => `  ${line}`),
-							"",
-							`.rm files in the document (first one is read): ${result.pageFiles.join(", ")}`,
-						];
-						if (result.unanchored > 0) {
-							console.warn(
-								`reMarkable Round-Trip: ${result.unanchored} text item(s) had unresolvable anchors and were appended in file order`,
-							);
-						}
-						return result;
-					} catch (error) {
-						if (error instanceof Error && error.message.includes("not found")) {
-							return null;
-						}
-						throw error;
-					}
-				},
-				readNote: () => this.app.vault.read(file),
-				writeNote: (_target, content) => this.app.vault.modify(file, content),
-				writeBackup: (target, content) =>
-					this.writePreviousVersion(file, target, content),
-				writeAside: async (_target, markdown) => {
-					const dir =
-						file.parent === null || file.parent.path === "/"
-							? ""
-							: file.parent.path;
-					const path = `${dir === "" ? "" : `${dir}/`}${file.basename} (from reMarkable).md`;
-					await this.writeVaultFile(path, markdown);
-					return path;
-				},
-				chooseOnConflict: () =>
-					new Promise((resolve) => {
-						new TextConflictModal(this.app, file.basename, resolve).open();
-					}),
-			});
-			if (outcome.kind === "imported" || outcome.kind === "conflict-replaced") {
-				this.settings.mappings = {
-					...this.settings.mappings,
-					[updated.docId]: { ...updated, notePath: file.path },
-				};
-				await this.persistSettings();
-			}
-			await this.deliverReport(
-				[
-					`reMarkable Round-Trip — text import diagnosis (${new Date().toISOString().slice(0, 16).replace("T", " ")})`,
-					`plugin ${this.manifest.version} · "${file.basename}"`,
-					`outcome: ${outcome.kind}`,
-					...diagnosis.lines,
-				].join("\n"),
-			);
-			notify(
-				describeTextImport(file.basename, outcome) +
-					(diagnosis.unanchored === 0
-						? ""
-						: ` Note: ${diagnosis.unanchored} edit(s) could not be anchored and sit at the END of the text.`) +
-					' Diagnosis written to "reMarkable Round-Trip log.md".',
-				diagnosis.unanchored === 0 ? 10000 : 20000,
-			);
-		} catch (error) {
-			notify(toTransportError(error).message, 10000);
-		} finally {
-			notice.hide();
-		}
+		return entry?.format === "ink" ? entry : undefined;
 	}
 
 	/**
@@ -1109,9 +814,8 @@ export default class RoundTripPlugin extends Plugin {
 		entry: MappingEntry,
 		content: string,
 	): Promise<string> {
-		const base = this.settings.annotationFolder.replace(/^\/+|\/+$/g, "");
-		const folder = base === "" ? "previous" : `${base}/previous`;
-		const { head, body } = splitFrontmatter(content);
+		const folder = this.settings.backupFolder.replace(/^\/+|\/+$/g, "") || "previous";
+		const { head, body } = splitNote(content);
 		const safeHead = head.replace(
 			new RegExp(`^${DOCID_FRONTMATTER_KEY}(?=\\s*:)`, "m"),
 			`${DOCID_FRONTMATTER_KEY}-previous`,
@@ -1226,79 +930,60 @@ export default class RoundTripPlugin extends Plugin {
 	}
 
 	/** The mapping entry of a note whose last send was a REVIEW copy, if any. */
-	private annotationEntry(file: TFile): MappingEntry | undefined {
-		const docId = getFrontmatterValue(
-			this.app.metadataCache.getFileCache(file)?.frontmatter,
-			DOCID_FRONTMATTER_KEY,
-		);
-		if (typeof docId !== "string") return undefined;
-		const entry = this.settings.mappings[docId];
-		return entry === undefined || entry.format === "text" ? undefined : entry;
-	}
-
 	/**
-	 * Import annotations for every note we have sent (F10/F11), or — with
-	 * `only` (GP_E5_S14) — for exactly one note: the full run walks hundreds
-	 * of mappings, and checking a single freshly-reviewed note deserves the
-	 * same precision as sending one. Runs on an explicit command only — the
-	 * vault is never written to behind your back.
+	 * Read the notebooks of every synced note — or, with `only`, of those
+	 * notes — and merge what changed on the tablet into the notes. Resolves
+	 * to the paths of the notes it changed.
 	 */
-	pullAnnotations(
-		options: { force?: boolean; only?: TFile } = {},
-	): Promise<void> {
-		const key = `annotations:${options.force === true ? "force" : "changed"}:${options.only?.path ?? "all"}`;
-		return this.pullQueue.enqueue(key, () => this.runPullAnnotations(options));
+	async pullAnnotations(
+		options: { force?: boolean; only?: TFile[]; background?: boolean } = {},
+	): Promise<Set<string>> {
+		const scopeKey = options.only?.map((file) => file.path).join("|") ?? "all";
+		const key = `annotations:${options.force === true ? "force" : "changed"}:${scopeKey}`;
+		// A run deduplicated onto an identical one already queued leaves this
+		// set empty: that run's caller sends what it changed.
+		const changed = new Set<string>();
+		await this.pullQueue.enqueue(key, () => this.runPullAnnotations(options, changed));
+		return changed;
 	}
 
 	private async runPullAnnotations(
-		options: { force?: boolean; only?: TFile } = {},
+		options: { force?: boolean; only?: TFile[]; background?: boolean },
+		changed: Set<string>,
 	): Promise<void> {
+		const quiet = options.background === true;
 		let scope = this.settings.mappings;
 		if (options.only !== undefined) {
-			const entry = this.annotationEntry(options.only);
-			if (entry === undefined) {
-				notify(
-					this.writeModeEntry(options.only) !== undefined
-						? 'This note was sent as editable text — use "Get edited text back from reMarkable" instead.'
-						: "This note has not been sent to the reMarkable yet.",
-				);
-				return;
+			scope = {};
+			for (const file of options.only) {
+				const entry = this.syncedEntry(file);
+				if (entry !== undefined) scope[entry.docId] = entry;
 			}
-			scope = { [entry.docId]: entry };
 		}
 		const mappings = Object.keys(scope).length;
 		if (mappings === 0) {
-			notify("Nothing to import yet — send a note to your reMarkable first.");
+			if (!quiet && options.only !== undefined) notify("This note has no notebook on the reMarkable yet.");
 			return;
 		}
 		if (this.settings.deviceToken === "") {
-			notify(
-				"Not paired with a reMarkable account yet — open the plugin settings first.",
-			);
+			if (!quiet) notify("Not paired with a reMarkable account yet — open the plugin settings first.");
 			return;
 		}
 
 		const log: string[] = [];
-		this.layoutCache.clear();
 		this.inkCache.clear();
 		await this.reconcileNotePaths((line) => log.push(line));
 		const startedAt = new Date().toISOString().slice(0, 16).replace("T", " ");
-		const notice = this.progress(
-			`Checking ${mappings} document(s) for annotations…`,
-		);
+		const notice = quiet ? null : this.progress(`Checking ${mappings} notebook(s) on the reMarkable…`);
 		try {
-			const api = await remarkable(
-				this.settings.deviceToken,
-				this.rmapiOptions(),
-			);
+			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
 			const { results, table } = await pullAnnotations(
 				scope,
 				{
 					force: options.force,
 					yieldToPush: () => this.syncCoordinator.yieldToPush(),
 					isCurrent: (entry) =>
-						this.settings.mappings[entry.docId]?.deviceDocId ===
-						entry.deviceDocId,
+						this.settings.mappings[entry.docId]?.deviceDocId === entry.deviceDocId,
 					log: (line) => log.push(line),
 					listDocumentHashes: async () => {
 						const items = await api.listIds(true);
@@ -1306,75 +991,63 @@ export default class RoundTripPlugin extends Plugin {
 					},
 					listDocumentFiles: async (deviceDocId, hash) => {
 						// The document's file index is addressed as `<id>.docSchema`
-						// — the same name rmapi-js uses internally. Passing the bare
-						// id returned nothing (GP_E3_S6).
-						const { entries } = await api.raw.getEntries(
-							`${deviceDocId}.docSchema`,
-							hash,
-						);
-						return entries.map(
-							(entry): DocumentFile => ({ id: entry.id, hash: entry.hash }),
-						);
+						// — the same name rmapi-js uses internally (GP_E3_S6).
+						const { entries } = await api.raw.getEntries(`${deviceDocId}.docSchema`, hash);
+						return entries.map((entry): DocumentFile => ({ id: entry.id, hash: entry.hash }));
 					},
 					readFile: (file) => api.raw.getText(file.id, file.hash),
 					readBytes: (file) => api.raw.getHash(file.id, file.hash),
 					renderStrokes: this.settings.importHandwriting
 						? (request) => this.renderHandwriting(request)
 						: undefined,
-					loadLayout: (entry) => this.reproduceLayout(entry),
 					checkSource: (entry) => this.checkSource(entry),
-					// Ink fork: regenerate handwritten sends; opt-in OCR.
 					loadInk: (entry) => this.loadInkRender(entry),
 					transcribe: this.settings.ocrEnabled
 						? (request) => this.transcribeStrokes(request)
 						: undefined,
 					keepImageWithTranscript: this.settings.ocrKeepImage,
-					writeAnnotations: async (entry, highlights, marks, sourceState) =>
-						this.writeAnnotations(
-							entry.notePath,
-							highlights,
-							marks,
-							await this.reproduceLayout(entry).catch(() => null),
-							await this.readSourceBody(entry).catch(() => null),
-							this.resolveNote(entry)?.path ?? entry.notePath,
-							sourceState,
-						),
+					writeAnnotations: (entry, highlights, marks, sourceState) =>
+						this.applyTabletChanges(entry, highlights, marks, changed, sourceState),
 				},
-				(done, total) =>
-					updateProgress(notice, `Checking ${done}/${total} for annotations…`, {
-						done,
-						total,
-					}),
+				(done, total) => {
+					if (notice !== null) {
+						updateProgress(notice, `Checking ${done}/${total} on the reMarkable…`, { done, total });
+					}
+				},
 			);
-			// A scoped run returns only its slice; merging keeps the rest.
-			// Entries the run dropped — documents gone from the account
-			// (GP_E5_S17) — must not be resurrected by the merge, so what was
-			// in scope but absent from the result is deleted explicitly.
-			this.settings.mappings = mergePullMappings(
-				this.settings.mappings,
-				scope,
-				table,
-			);
+			// A scoped run returns only its slice; merging keeps the rest, and
+			// drops what the run found gone from the account (GP_E5_S17).
+			this.settings.mappings = mergePullMappings(this.settings.mappings, scope, table);
 			await this.persistSettings();
 
-			const report = `${renderImportReport({
-				results,
-				forced: options.force === true,
-				startedAt,
-				pluginVersion: this.manifest.version,
-				handwritingEnabled: this.settings.importHandwriting,
-			})}\n\n--- details ---\n${log.join("\n")}`;
-			await this.deliverReport(report);
-			reportPullResults(results);
+			const eventful = results.some(
+				(r) => !r.ok || r.removed === true || r.scan?.written !== undefined,
+			);
+			if (eventful || !quiet) {
+				const report = `${renderImportReport({
+					results,
+					forced: options.force === true,
+					startedAt,
+					pluginVersion: this.manifest.version,
+					handwritingEnabled: this.settings.importHandwriting,
+				})}\n\n--- details ---\n${log.join("\n")}`;
+				await this.deliverReport(report, !quiet);
+			}
+			reportPullResults(results, quiet);
 		} catch (error) {
 			const failure = toTransportError(error).message;
+			if (quiet) {
+				console.warn(`reMarkable Ink Round-Trip: sync failed — ${failure}`);
+				return;
+			}
 			await this.deliverReport(
-				`reMarkable Ink Round-Trip — import report (${startedAt})\nplugin ${this.manifest.version}\n\n` +
+				`reMarkable Ink Round-Trip — sync report (${startedAt})\nplugin ${this.manifest.version}\n\n` +
 					`Run failed: ${failure}\n\n--- details ---\n${log.join("\n")}`,
+				true,
 			);
 			notify(failure, 10000);
 		} finally {
-			notice.hide();
+			notice?.hide();
 		}
 	}
 
@@ -1382,11 +1055,13 @@ export default class RoundTripPlugin extends Plugin {
 	 * Make a diagnostic report reachable on mobile: written to a note in the
 	 * vault (so it survives and can be shared) and copied to the clipboard.
 	 */
-	private async deliverReport(report: string): Promise<void> {
-		try {
-			await navigator.clipboard.writeText(report);
-		} catch {
-			// Clipboard may be denied; the note below is the durable copy.
+	private async deliverReport(report: string, clipboard = true): Promise<void> {
+		if (clipboard) {
+			try {
+				await navigator.clipboard.writeText(report);
+			} catch {
+				// Clipboard may be denied; the note below is the durable copy.
+			}
 		}
 		try {
 			const path = "reMarkable Ink Round-Trip log.md";
@@ -1400,34 +1075,6 @@ export default class RoundTripPlugin extends Plugin {
 		} catch {
 			// Writing the log must never break the import itself.
 		}
-	}
-
-	/**
-	 * Reproduce the page layout of a sent document, so imported ink can be
-	 * quoted against the sentence it was written next to (GP_E3_S8).
-	 *
-	 * Not stored but recomputed: a layout map is far bigger than the note it
-	 * describes. That only works while the note still matches what was sent,
-	 * so the content hash decides — and the typography comes from the upload,
-	 * not from today's settings.
-	 */
-	private async reproduceLayout(
-		entry: MappingEntry,
-	): Promise<PdfLayout | null> {
-		// Rebuilding means typesetting the note again; one import asks for the
-		// same layout twice (marks, then the annotated copy).
-		const cached = this.layoutCache.get(entry.docId);
-		if (cached !== undefined) return cached;
-		// Ink fork: a handwritten send's layout comes from its own renderer —
-		// but only while the note still matches, the same rule as for PDFs.
-		const layout =
-			entry.format === "ink"
-				? (await this.checkSource(entry)) === "changed"
-					? null
-					: ((await this.loadInkRender(entry).catch(() => null))?.layout ?? null)
-				: await this.buildLayout(entry);
-		this.layoutCache.set(entry.docId, layout);
-		return layout;
 	}
 
 	/**
@@ -1450,8 +1097,7 @@ export default class RoundTripPlugin extends Plugin {
 
 	/**
 	 * Bring the recorded paths back in line with the vault before a run, so a
-	 * moved note keeps its annotations — and its companion note stays next to
-	 * it rather than at the old address.
+	 * moved or renamed note keeps its notebook.
 	 */
 	private async reconcileNotePaths(log: (line: string) => void): Promise<void> {
 		let changed = false;
@@ -1475,72 +1121,15 @@ export default class RoundTripPlugin extends Plugin {
 		const file = this.resolveNote(entry);
 		if (file === null) return "missing";
 		const moved = file.path !== entry.notePath;
-		// Preprocess exactly as the layout rebuild does, or the two would
-		// disagree about whether the note changed.
+		// Preprocess exactly as a send does, or the two would disagree about
+		// whether the note changed.
 		const embeds = await this.buildEmbedMap(file);
-		const pre = preprocess(await this.app.vault.cachedRead(file), {
+		const pre = preprocess(await this.app.vault.read(file), {
 			resolveEmbed: (linkpath) => embeds.get(linkpath) ?? { kind: "missing" },
 			frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
-			imagesAsBlocks: this.settings.embedImages,
 		});
 		if (contentHash(pre.markdown) !== entry.contentHash) return "changed";
 		return moved ? "moved" : "match";
-	}
-
-	/**
-	 * The note's own markdown, frontmatter removed — what the marks get
-	 * projected onto (GP_E3_S13).
-	 */
-	private async readSourceBody(entry: MappingEntry): Promise<string | null> {
-		if (entry.pdfLayout === undefined) return null;
-		const file = this.resolveNote(entry);
-		if (file === null) return null;
-		const raw = await this.app.vault.cachedRead(file);
-		// Frontmatter belongs to the source note, not to a copy of its body.
-		return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
-	}
-
-	private async buildLayout(entry: MappingEntry): Promise<PdfLayout | null> {
-		const typography = entry.pdfLayout;
-		if (typography === undefined) return null; // EPUB, or sent before 0.8.0
-		const file = this.resolveNote(entry);
-		if (file === null) return null;
-
-		const embeds = await this.buildEmbedMap(file);
-		const pre = preprocess(await this.app.vault.cachedRead(file), {
-			resolveEmbed: (linkpath) => embeds.get(linkpath) ?? { kind: "missing" },
-			frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
-			imagesAsBlocks: this.settings.embedImages,
-		});
-		// A changed note means the geometry no longer matches the document on
-		// the device; quoting from it would put the wrong sentence under the
-		// ink, which is worse than no quote at all (N3).
-		if (contentHash(pre.markdown) !== entry.contentHash) return null;
-
-		// Replay diagrams from the recorded geometry — never a re-render:
-		// mermaid output is not stable across versions, and a shifted
-		// diagram height would move every anchor below it (fork: image
-		// blocks; the GP_E3_S15 lesson, applied to pictures).
-		let blocks = parseBlocks(pre.markdown);
-		if (typography.images !== undefined && typography.images.length > 0) {
-			blocks = substituteDiagrams(blocks, typography.images);
-		}
-		// Pictures replay from recorded geometry for the same reason diagrams
-		// do: re-reading them would work, but a picture that changed on disk
-		// would shift every anchor below it. An entry with no recorded
-		// geometry still needs the pass, so leftover placeholders take their
-		// text shape exactly as they did at send time.
-		if (imageRefTargets(blocks).length > 0) {
-			blocks = substituteVaultImages(blocks, typography.vaultImages ?? []);
-		}
-		const { layout } = await renderPdf(
-			blocks,
-			{ title: file.basename, docId: entry.docId },
-			// Documents sent before 0.29.0 carry no typo version: replay the
-			// behaviour they were typeset with (GP_E3_S15 lesson).
-			{ ...typography, typo: typography.typo ?? 1 },
-		);
-		return layout;
 	}
 
 	/* ------------------------- ink fork methods ------------------------- */
@@ -1881,207 +1470,74 @@ export default class RoundTripPlugin extends Plugin {
 	}
 
 	/**
-	 * Load standalone vault images as PNG pictures (fork: image blocks).
-	 *
-	 * Everything goes through a canvas rather than being embedded as-is: it
-	 * gives one format pdf-lib always accepts (it takes only PNG and JPEG,
-	 * while a vault holds webp, gif, avif and svg too) and it yields the
-	 * natural pixel size in the same step. A picture that cannot be read or
-	 * decoded comes back null, and substitution turns it back into the
-	 * placeholder text — never a failed send.
+	 * Merge what changed on the tablet into the note itself (sync/twoway.ts),
+	 * keeping a copy of the note before it is touched.
 	 */
-	private async resolveVaultImages(
-		targets: string[],
-		notePath: string,
-	): Promise<(DiagramImage | null)[]> {
-		const out: (DiagramImage | null)[] = [];
-		for (const target of targets) {
-			try {
-				out.push(await this.loadVaultImage(target, notePath));
-			} catch (error) {
-				console.error(
-					`reMarkable Round-Trip: image "${target}" could not be loaded, sending it as placeholder text`,
-					error,
-				);
-				out.push(null);
-			}
-		}
-		return out;
-	}
-
-	private async loadVaultImage(
-		target: string,
-		notePath: string,
-	): Promise<DiagramImage | null> {
-		// Obsidian resolves a link the way the editor would, so "pic.png",
-		// "assets/pic.png" and a full vault path all land on the same file.
-		const file =
-			this.app.metadataCache.getFirstLinkpathDest(target.split("#")[0], notePath) ??
-			this.app.vault.getFileByPath(target);
-		if (file === null) return null;
-
-		const bytes = await this.app.vault.readBinary(file);
-		const blob = new Blob([bytes]);
-		const url = URL.createObjectURL(blob);
-		try {
-			const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-				const el = new Image();
-				el.onload = () => resolve(el);
-				el.onerror = () => reject(new Error(`could not decode ${file.path}`));
-				el.src = url;
-			});
-			const widthPx = image.naturalWidth;
-			const heightPx = image.naturalHeight;
-			if (!(widthPx > 0) || !(heightPx > 0)) return null;
-
-			const canvas = createEl("canvas");
-			canvas.width = widthPx;
-			canvas.height = heightPx;
-			const context = canvas.getContext("2d");
-			if (context === null) throw new Error("no 2D canvas available for rendering");
-			// The device page is white; an explicit fill keeps a transparent
-			// PNG from picking up whatever is behind it.
-			context.fillStyle = "#ffffff";
-			context.fillRect(0, 0, widthPx, heightPx);
-			context.drawImage(image, 0, 0);
-
-			const png = await new Promise<Blob>((resolve, reject) =>
-				canvas.toBlob(
-					(b) => (b !== null ? resolve(b) : reject(new Error("canvas.toBlob produced nothing"))),
-					"image/png",
-				),
-			);
-			return {
-				w: widthPx * (72 / 96),
-				h: heightPx * (72 / 96),
-				png: new Uint8Array(await png.arrayBuffer()),
-			};
-		} finally {
-			URL.revokeObjectURL(url);
-		}
-	}
-
-	/** Write one note's annotations to its configured destination (F11). */
-	private async writeAnnotations(
-		notePath: string,
-		highlights: Parameters<typeof renderAnnotationBlock>[0]["highlights"],
-		marks: ImportedMark[] = [],
-		layout: PdfLayout | null = null,
-		source: string | null = null,
-		currentPath: string = notePath,
+	private async applyTabletChanges(
+		entry: MappingEntry,
+		highlights: Highlight[],
+		marks: ImportedMark[],
+		changed: Set<string>,
 		sourceState?: SourceState,
-	): Promise<AnnotationOutcome> {
-		// A moved note keeps its annotations beside it, not at the old address.
-		const sourceName = (currentPath.split("/").pop() ?? currentPath).replace(
-			/\.md$/i,
-			"",
-		);
-		const rendered = renderAnnotationBlock({
-			sourcePath: currentPath,
-			sourceName,
+	): Promise<AnnotationOutcome | void> {
+		if (highlights.length === 0 && marks.length === 0) return;
+		const file = this.resolveNote(entry);
+		if (file === null) return { form: "summary", reason: "no-source" };
+		const raw = await this.app.vault.read(file);
+		const { head, body: ours } = splitNote(raw);
+		const sent = await this.ink.readSent(entry.docId).catch(() => null);
+		const base = sent?.body ?? (sourceState === "match" ? ours : null);
+		const layout = (await this.loadInkRender(entry).catch(() => null))?.layout ?? null;
+		const { body, outcome } = mergeTabletChanges({
+			base,
+			ours,
+			layout,
 			highlights,
 			marks,
-			layout,
-			source,
-			inSourceNote: this.settings.annotationTarget === "source",
 			styles: this.settings.markStyles,
 			erasedAs: this.settings.erasedAs,
-			sourceChanged: sourceState === "changed",
+			sourcePath: file.path,
+			sourceName: file.basename,
 			importedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
 		});
-
-		const targetPath =
-			this.settings.annotationTarget === "source"
-				? currentPath
-				: companionPath(currentPath, this.settings.annotationFolder);
-
-		const existing = this.app.vault.getFileByPath(targetPath);
-		if (existing) {
-			const current = await this.app.vault.read(existing);
-			await this.app.vault.modify(
-				existing,
-				upsertAnnotationBlock(current, rendered.text),
-			);
-			await this.linkSourceToAnnotations(currentPath, targetPath);
-			return rendered.outcome;
-		}
-		// A companion note may need its folder created first.
-		const folder = targetPath.split("/").slice(0, -1).join("/");
-		if (folder !== "" && !this.app.vault.getFolderByPath(folder)) {
-			await this.app.vault.createFolder(folder);
-		}
-		await this.app.vault.create(targetPath, `${rendered.text}\n`);
-		await this.linkSourceToAnnotations(currentPath, targetPath);
-		return rendered.outcome;
-	}
-
-	/**
-	 * Keep an `annotations` property in the source note pointing at its
-	 * companion note (GP_E5_S15, opt-in). The reverse link needs no work:
-	 * the companion's header always reads "Annotations from [[source]]".
-	 */
-	private async linkSourceToAnnotations(
-		sourcePath: string,
-		targetPath: string,
-	): Promise<void> {
-		if (!this.settings.linkSourceToAnnotations) return;
-		if (
-			this.settings.annotationTarget !== "companion" ||
-			targetPath === sourcePath
-		)
-			return;
-		const source = this.app.vault.getFileByPath(sourcePath);
-		if (!source) return;
-		const link = `[[${targetPath.replace(/\.md$/i, "")}]]`;
-		await this.app.fileManager.processFrontMatter(source, (fm) => {
-			(fm as Record<string, unknown>)[ANNOTATIONS_FRONTMATTER_KEY] = link;
-		});
+		if (body === ours) return outcome;
+		await this.writePreviousVersion(file, entry, raw);
+		await this.app.vault.modify(file, head + body);
+		changed.add(file.path);
+		return outcome;
 	}
 }
 
-function reportPullResults(results: PullResult[]): void {
+function reportPullResults(results: PullResult[], quiet: boolean): void {
 	const failures = results.filter(
 		(r): r is Extract<PullResult, { ok: false }> => !r.ok,
 	);
-	const imported = results.filter((r) => r.ok && r.skipped !== true);
-	const total = imported.reduce(
-		(sum, r) => sum + (r.ok ? r.highlightCount : 0),
-		0,
-	);
-
 	if (failures.length > 0) {
 		const detail = failures
 			.slice(0, 3)
 			.map((f) => `${f.notePath.split("/").pop()}: ${f.error}`)
 			.join("\n");
-		notify(
-			`${failures.length} document(s) could not be imported.\n${detail}`,
-			10000,
-		);
+		const message = `${failures.length} notebook(s) could not be read.\n${detail}`;
+		if (quiet) console.warn(`reMarkable Ink Round-Trip: ${message}`);
+		else notify(message, 10000);
 		return;
 	}
-	const removed = results.filter((r) => r.ok && r.removed === true).length;
-	const cleanup =
-		removed > 0
-			? ` ${removed} stale document(s) removed from the import administration.`
-			: "";
-	if (imported.length === 0) {
-		notify(`No new annotations — everything is already up to date.${cleanup}`);
+	const read = results.filter((r) => r.ok && r.skipped !== true);
+	const merged = read.filter((r) => r.ok && r.scan?.written !== undefined);
+	const conflicts = merged.reduce(
+		(sum, r) => sum + (r.ok ? (r.scan?.written?.conflicts ?? 0) : 0),
+		0,
+	);
+	if (merged.length === 0) {
+		if (!quiet) notify("Nothing new on the reMarkable — everything is up to date.");
 		return;
 	}
-	// A note edited after it was sent still yields annotations, but unplaced
-	// ones — say so here rather than only in the report (F14).
-	const changed = imported.filter(
-		(r) => r.ok && r.scan?.sourceState === "changed",
-	).length;
-	const conflict =
-		changed > 0
-			? `\n${changed} note(s) changed since they were sent, so their marks could not be ` +
-				"placed in the text. Send them again."
-			: "";
 	notify(
-		`Imported ${total} highlight(s) from ${imported.length} document(s).${cleanup}${conflict}`,
-		changed > 0 ? 10000 : undefined,
+		`Brought tablet changes into ${merged.length} note(s).` +
+			(conflicts > 0
+				? ` ${conflicts} place(s) were edited on both sides: look for “Also changed on the reMarkable”.`
+				: ""),
+		conflicts > 0 ? 15000 : undefined,
 	);
 }
 
@@ -2132,35 +1588,9 @@ function collectMarkdownFiles(folder: TFolder): TFile[] {
 	return files;
 }
 
-/** One honest sentence per write-mode import outcome (GP_E7_S3). */
-function describeTextImport(name: string, outcome: TextImportOutcome): string {
-	switch (outcome.kind) {
-		case "imported":
-			return `"${name}" now carries the reMarkable text. Previous version: ${outcome.backupPath}`;
-		case "conflict-replaced":
-			return `"${name}" now carries the reMarkable text. The newer vault version is kept at ${outcome.backupPath}`;
-		case "conflict-kept":
-			return `"${name}" kept as it is. The reMarkable text is at ${outcome.asidePath}`;
-		case "cancelled":
-			return "Nothing changed.";
-		case "unchanged":
-			return `No differences — "${name}" and the reMarkable copy say the same.`;
-		case "device-unchanged":
-			return `The reMarkable copy of "${name}" has no edits — nothing to import.`;
-		case "no-text":
-			return "That document carries no typed text, so there is nothing to bring back.";
-		case "not-on-device":
-			return "The document is no longer on the reMarkable account — nothing was changed.";
-		case "note-missing":
-			return `Could not read "${name}" from the vault — nothing was changed.`;
-		case "not-write-mode":
-			return "This note's last send was not an editable-text send.";
-	}
-}
-
 function reportResults(
 	results: SendResult[],
-	options: { quietWhenAllSkipped?: boolean } = {},
+	options: { quietWhenAllSkipped?: boolean; quiet?: boolean } = {},
 ): void {
 	const failures = results.filter(
 		(r): r is Extract<SendResult, { ok: false }> => !r.ok,
@@ -2169,6 +1599,7 @@ function reportResults(
 	if (failures.length === 0) {
 		const sent = results.filter((r) => r.ok && r.skipped !== true);
 		if (sent.length === 0 && options.quietWhenAllSkipped) return;
+		if (options.quiet) return;
 		const base =
 			sent.length === 1
 				? `Sent "${sent[0].path.split("/").pop()}" to reMarkable.`
@@ -2183,10 +1614,9 @@ function reportResults(
 			.slice(0, 3)
 			.map((f) => `${f.path.split("/").pop()}: ${f.error}`)
 			.join("\n");
-		notify(
-			`${results.length - failures.length}/${results.length} sent; ${failures.length} failed.\n${detail}`,
-			10000,
-		);
+		const message = `${results.length - failures.length}/${results.length} sent; ${failures.length} failed.\n${detail}`;
+		if (options.quiet) console.warn(`reMarkable Ink Round-Trip: ${message}`);
+		else notify(message, 10000);
 	}
 }
 

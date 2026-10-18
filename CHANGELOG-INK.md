@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Two-way sync, handwriting only.** Notes are kept in sync with the tablet as
+  handwritten notebooks: erased, moved and marked words and handwritten remarks
+  are merged into the note itself, and a changed note is re-sent. Edits made on
+  both sides merge word by word; where both changed the same words the note
+  keeps yours and shows the tablet's in an *Also changed on the reMarkable*
+  callout. A backup of the note is saved before tablet changes go in.
+- Syncs on startup, every few minutes (*Settings → Sync → Check the reMarkable
+  every*) and with **Sync with reMarkable now**. Notes in the sync folders sync
+  automatically; any other note joins with *Sync with reMarkable* and stays in.
+- **Removed:** PDF and EPUB output, editable-text notebooks and *Get edited text
+  back*, *Send … as …* and *choose layout* commands, companion notes and their
+  settings, and the separate *reMarkable model* setting (folded into *Notebook
+  page size*). Notebooks sent by those routes are re-sent as handwriting on the
+  next sync; their unimported annotations are not read any more.
 - **Colour accents:** code blocks get a blue highlighter band, inline code a
   pink one and quotes/callouts a yellow one — drawn with the tablet's own
   highlighter, so the text stays on top. Coloured areas in Mermaid diagrams

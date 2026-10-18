@@ -13,7 +13,6 @@ import { GenerationError } from "rmapi-js";
 
 import { TransportError } from "./http";
 import { adviseFailure, classifyFailure } from "./failure";
-import type { UploadResult } from "./cloud";
 
 /** The slice of rmapi-js' RemarkableApi that mirroring needs. */
 export interface MirrorApi {
@@ -30,16 +29,6 @@ export interface MirrorApi {
 		visibleName: string,
 		opts?: { parent?: string },
 		refresh?: boolean,
-	): Promise<{ id: string; hash: string }>;
-	putPdf(
-		visibleName: string,
-		buffer: Uint8Array,
-		opts?: { parent?: string; refresh?: boolean },
-	): Promise<{ id: string; hash: string }>;
-	putEpub(
-		visibleName: string,
-		buffer: Uint8Array,
-		opts?: { parent?: string; refresh?: boolean },
 	): Promise<{ id: string; hash: string }>;
 	move(hash: string, parent: string, refresh?: boolean): Promise<unknown>;
 }
@@ -216,26 +205,6 @@ export class MirrorTransport {
 			this.folderIds.set(prefix, parent);
 		}
 		return parent;
-	}
-
-	/** Upload a document into the given collection ("" = root). */
-	async upload(
-		fileName: string,
-		bytes: Uint8Array,
-		options: { parentId?: string; format?: "pdf" | "epub" } = {},
-	): Promise<UploadResult> {
-		const { parentId = "", format = "pdf" } = options;
-		const visibleName = fileName.replace(/\.(pdf|epub)$/i, "");
-		const entry = await withGenerationRetry((refresh) => {
-			// A retry means the tree moved under us; our cached folder ids may
-			// be stale too, so drop them before trying again.
-			if (refresh) this.invalidate();
-			const opts = { parent: parentId, refresh };
-			return format === "epub"
-				? this.api.putEpub(visibleName, bytes, opts)
-				: this.api.putPdf(visibleName, bytes, opts);
-		}, this.retry);
-		return { deviceDocId: entry.id, hash: entry.hash };
 	}
 
 	/**

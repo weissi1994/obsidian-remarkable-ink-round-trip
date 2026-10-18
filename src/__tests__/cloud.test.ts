@@ -3,7 +3,6 @@ import {
 	OFFICIAL_ENDPOINTS,
 	RemarkableCloudClient,
 	rmfakecloudEndpoints,
-	toBase64,
 } from "../transport/cloud";
 import { HttpRequest, HttpResponse, TransportError } from "../transport/http";
 
@@ -48,84 +47,6 @@ describe("register", () => {
 	});
 });
 
-describe("upload", () => {
-	const pdfBytes = new Uint8Array([1, 2, 3]);
-
-	it("refuses to upload when not paired", async () => {
-		const { http } = fakeHttp(() => ({}));
-		const client = new RemarkableCloudClient({ http });
-		await expect(client.upload("n.pdf", pdfBytes)).rejects.toThrow(/Not connected/);
-	});
-
-	it("refreshes the user token and posts the PDF with rm-meta", async () => {
-		const { http, calls } = fakeHttp((req) => {
-			if (req.url.includes("/token/json/2/user/new")) return { text: "user-token" };
-			return { text: JSON.stringify({ docID: "cloud-doc-1", hash: "h1" }) };
-		});
-		const client = new RemarkableCloudClient({ http, deviceToken: "device-token" });
-		const result = await client.upload("Nota.pdf", pdfBytes);
-
-		expect(result).toEqual({ deviceDocId: "cloud-doc-1", hash: "h1" });
-		expect(calls[0].headers?.Authorization).toBe("Bearer device-token");
-		const upload = calls[1];
-		expect(upload.url).toBe(`${OFFICIAL_ENDPOINTS.docHost}/doc/v2/files`);
-		expect(upload.headers?.Authorization).toBe("Bearer user-token");
-		expect(upload.headers?.["Content-Type"]).toBe("application/pdf");
-		expect(JSON.parse(atob(upload.headers?.["rm-meta"] ?? ""))).toEqual({
-			file_name: "Nota.pdf",
-		});
-		expect(new Uint8Array(upload.body as ArrayBuffer)).toEqual(pdfBytes);
-	});
-
-	it("sends an EPUB with the EPUB content type", async () => {
-		const { http, calls } = fakeHttp((req) =>
-			req.url.includes("/user/new")
-				? { text: "user-token" }
-				: { text: JSON.stringify({ docID: "d" }) },
-		);
-		const client = new RemarkableCloudClient({ http, deviceToken: "t" });
-		await client.upload("Nota.epub", pdfBytes, { format: "epub" });
-		expect(calls[1].headers?.["Content-Type"]).toBe("application/epub+zip");
-	});
-
-	it("passes a parent collection through rm-meta", async () => {
-		const { http, calls } = fakeHttp((req) =>
-			req.url.includes("/user/new")
-				? { text: "user-token" }
-				: { text: JSON.stringify({ docID: "d" }) },
-		);
-		const client = new RemarkableCloudClient({ http, deviceToken: "t" });
-		await client.upload("Nota.pdf", pdfBytes, { parentId: "dir-7" });
-		expect(JSON.parse(atob(calls[1].headers?.["rm-meta"] ?? ""))).toEqual({
-			file_name: "Nota.pdf",
-			parent: "dir-7",
-		});
-	});
-
-	it("retries once with a fresh user token on 401", async () => {
-		let uploads = 0;
-		const { http, calls } = fakeHttp((req) => {
-			if (req.url.includes("/user/new")) return { text: `user-token-${calls.length}` };
-			uploads++;
-			return uploads === 1
-				? { status: 401 }
-				: { text: JSON.stringify({ docID: "cloud-doc-2" }) };
-		});
-		const client = new RemarkableCloudClient({ http, deviceToken: "device-token" });
-		const result = await client.upload("n.pdf", pdfBytes);
-		expect(result.deviceDocId).toBe("cloud-doc-2");
-		expect(uploads).toBe(2);
-	});
-
-	it("surfaces an API-change signal on unexpected response bodies", async () => {
-		const { http } = fakeHttp((req) =>
-			req.url.includes("/user/new") ? { text: "user-token" } : { text: "<html>" },
-		);
-		const client = new RemarkableCloudClient({ http, deviceToken: "device-token" });
-		await expect(client.upload("n.pdf", pdfBytes)).rejects.toThrow(/API may have changed/);
-	});
-});
-
 describe("rmfakecloud endpoints", () => {
 	it("routes auth and docs to one self-hosted base URL", async () => {
 		const endpoints = rmfakecloudEndpoints("https://rm.example.org/");
@@ -133,23 +54,10 @@ describe("rmfakecloud endpoints", () => {
 			authHost: "https://rm.example.org",
 			docHost: "https://rm.example.org",
 		});
-		const { http, calls } = fakeHttp((req) =>
-			req.url.includes("/user/new")
-				? { text: "user-token" }
-				: { text: JSON.stringify({ docID: "d" }) },
-		);
-		const client = new RemarkableCloudClient({ http, endpoints, deviceToken: "t" });
-		await client.upload("n.pdf", new Uint8Array([1]));
+		const { http, calls } = fakeHttp(() => ({ text: "device-token" }));
+		const client = new RemarkableCloudClient({ http, endpoints });
+		await client.register("abcdefgh");
+		expect(calls.length).toBeGreaterThan(0);
 		expect(calls.every((c) => c.url.startsWith("https://rm.example.org/"))).toBe(true);
-	});
-});
-
-describe("toBase64", () => {
-	it("handles non-ASCII file names", () => {
-		const encoded = toBase64(JSON.stringify({ file_name: "Café Ideeën.pdf" }));
-		const decoded = new TextDecoder().decode(
-			Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0)),
-		);
-		expect((JSON.parse(decoded) as { file_name: string }).file_name).toBe("Café Ideeën.pdf");
 	});
 });

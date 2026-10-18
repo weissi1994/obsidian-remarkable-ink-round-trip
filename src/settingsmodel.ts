@@ -7,7 +7,6 @@
  */
 
 import type { MappingTable } from "./id/mapping";
-import type { SettingsFormat } from "./sync/send";
 import type { PendingSheet } from "./ink/handsheet";
 import {
 	DEFAULT_MARK_STYLES,
@@ -25,36 +24,18 @@ export interface RoundTripSettings {
 	/** Use a self-hosted rmfakecloud endpoint instead of the official cloud. */
 	useCustomEndpoint: boolean;
 	customEndpointUrl: string;
-	/**
-	 * Delivered document format (F3); PDF anchors annotations, EPUB reflows,
-	 * "ink" writes a notebook of real pen strokes (ink fork).
-	 */
-	outputFormat: SettingsFormat;
 	/** Render frontmatter as a small title block instead of dropping it. */
 	frontmatterAsTitleBlock: boolean;
 	fontSize: number;
 	lineHeight: number;
 	margin: number;
-	/** Watch folders (F6): auto-send notes dropped into these comma-separated vault folders. */
+	/** Sync folders (F6): notes in these comma-separated vault folders are kept in two-way sync. */
 	watchFolderEnabled: boolean;
 	watchFolderPath: string;
-	/** Where imported annotations land (F11): companion note or in the source. */
-	annotationTarget: "companion" | "source";
-	/** Vault folder for companion notes; empty = vault root. */
-	annotationFolder: string;
-	/**
-	 * Keep a link to the companion note in the source note's properties
-	 * (GP_E5_S15). Off by default: it writes frontmatter into a note the
-	 * user wrote, which is opt-in territory.
-	 */
-	linkSourceToAnnotations: boolean;
-	/**
-	 * Send standalone vault images as pictures instead of placeholder text
-	 * (fork: image blocks). Off by default: turning it on changes the
-	 * typeset output, so already-sent notes need one fresh send before their
-	 * annotations anchor against the new layout.
-	 */
-	embedImages: boolean;
+	/** Minutes between background syncs; 0 = only on startup and on demand. */
+	syncIntervalMinutes: number;
+	/** Vault folder for the copy of a note taken before tablet changes go in. */
+	backupFolder: string;
 	/** Import handwritten annotations as PNG images (F12). */
 	importHandwriting: boolean;
 	/** Vault folder for the rendered handwriting images. */
@@ -65,8 +46,6 @@ export interface RoundTripSettings {
 	deviceBaseFolder: string;
 	/** How each recognised pen mark is written into the copy (GP_E3_S19). */
 	markStyles: MarkStyles;
-	/** Which reMarkable's screen the PDF page is sized for (GP_E6_S2). */
-	deviceModel: DeviceModel;
 	/** Named typography bundle; "custom" uses the three sliders (GP_E6_S3). */
 	layoutPreset: LayoutPreset;
 	/** Automatic page breaks before headings (GP_E6_S4). */
@@ -99,7 +78,7 @@ export interface RoundTripSettings {
 	inkDiagrams: "handwritten" | "code";
 	/** Highlighter colour behind code and quotes, and for diagram fills. */
 	inkAccents: boolean;
-	/** What an erased handwritten word becomes in the annotated copy. */
+	/** What a word erased on the tablet becomes in the note. */
 	erasedAs: "delete" | "strikethrough";
 	/** Opt-in OCR of handwritten remarks via an OpenAI-compatible endpoint. */
 	ocrEnabled: boolean;
@@ -114,29 +93,25 @@ export interface RoundTripSettings {
 }
 
 /** Canvases a handwritten notebook can be written for (ink fork). */
-export type InkDevice = "auto" | "rm2" | "paperpro" | "move" | "custom";
+export type InkDevice = "rm2" | "paperpro" | "move" | "custom";
 
 export const DEFAULT_SETTINGS: RoundTripSettings = {
 	deviceToken: "",
 	useCustomEndpoint: false,
 	customEndpointUrl: "",
-	outputFormat: "pdf",
 	frontmatterAsTitleBlock: false,
 	fontSize: 11,
 	lineHeight: 1.5,
 	margin: 40,
 	watchFolderEnabled: false,
 	watchFolderPath: "reMarkable-out",
-	annotationTarget: "companion",
-	annotationFolder: "reMarkable-in",
-	linkSourceToAnnotations: false,
+	syncIntervalMinutes: 5,
+	backupFolder: "reMarkable-in/previous",
 	importHandwriting: true,
 	markStyles: { ...DEFAULT_MARK_STYLES },
 	handwritingFolder: "reMarkable-in/handwriting",
-	embedImages: false,
 	mirrorFolders: true,
 	deviceBaseFolder: "Obsidian",
-	deviceModel: "rm2",
 	layoutPreset: "custom",
 	pageBreakAtHeading: "smart",
 	showUpdateNotice: true,
@@ -146,7 +121,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	inkPen: "medium",
 	inkColor: 0,
 	inkJitter: 0.4,
-	inkDevice: "auto",
+	inkDevice: "rm2",
 	inkCustomProfile: { width: 954, height: 1696, dpi: 264 },
 	handVersion: "",
 	pendingSheet: null,
@@ -177,6 +152,11 @@ export function settingsFrom(stored: Partial<RoundTripSettings>): RoundTripSetti
 	if (knownStored.length > 0 && stored.pageBreakAtHeading === undefined) {
 		settings.pageBreakAtHeading = "off";
 	}
+	// The notebook canvas used to follow a separate "reMarkable model".
+	const legacy = stored as { inkDevice?: string; deviceModel?: string };
+	if (legacy.inkDevice === "auto" || legacy.inkDevice === undefined) {
+		settings.inkDevice = legacy.deviceModel === "paperpro" ? "paperpro" : "rm2";
+	}
 	return settings;
 }
 
@@ -203,23 +183,6 @@ export function storedFrom(
 ): Record<string, unknown> {
 	return { ...extras, ...settings };
 }
-
-/** reMarkable screens the typesetter can target (GP_E6_S2). */
-export type DeviceModel = "rm2" | "paperpro";
-
-/**
- * Screen sizes in PDF points (device pixels / DPI × 72). The reMarkable 1,
- * 2 and Paper Pure share a screen; the Paper Pro differs. Sizing the page to
- * the actual screen keeps the 1:1 page grid (K2) that anchoring relies on.
- * Both are 3:4 portrait — the shape the incoming ink transform assumes. The
- * Paper Pro Move (954×1696, 9:16) is deliberately NOT offered: its aspect
- * would make the device-to-page mapping anisotropic, and no Move is
- * available to validate against. Own story once one is.
- */
-export const DEVICE_PAGE_SIZES: Record<DeviceModel, { pageWidth: number; pageHeight: number }> = {
-	rm2: { pageWidth: 447, pageHeight: 596 }, // 1404×1872 @ 226 dpi (rM1/rM2/Paper Pure)
-	paperpro: { pageWidth: 509, pageHeight: 679 }, // 1620×2160 @ 229 dpi
-};
 
 /** Named typography bundles (GP_E6_S3); "custom" falls back to the sliders. */
 export type LayoutPreset = "readable" | "form" | "compact" | "custom";
@@ -265,32 +228,19 @@ export function packFor(settings: RoundTripSettings): boolean {
 }
 
 /**
- * Per-send layout choices a user can override for one send (GP_E6_S10);
- * everything else (device model, output format) stays a stored setting.
- */
-export type LayoutChoice = Pick<
-	RoundTripSettings,
-	"layoutPreset" | "fontSize" | "lineHeight" | "margin" | "pageBreakAtHeading"
->;
-
-/**
- * The complete layout a send should use — preset bundle (or sliders), the
- * chosen device's page size, heading-break level and section packing. The
- * ONE place this is composed: the settings path and the per-send override
- * (GP_E6_S10) both go through here, so they can never drift apart.
+ * The complete layout a send should use — preset bundle (or sliders),
+ * heading-break level and section packing. The page size comes from the
+ * notebook canvas (inkDevice) at render time.
  */
 export function sendLayout(settings: RoundTripSettings): {
 	fontSize: number;
 	lineHeight: number;
 	margin: number;
-	pageWidth: number;
-	pageHeight: number;
 	breakAtHeading: number;
 	packSections: boolean;
 } {
 	return {
 		...layoutFor(settings),
-		...DEVICE_PAGE_SIZES[settings.deviceModel],
 		breakAtHeading: breakLevelFor(settings),
 		packSections: packFor(settings),
 	};

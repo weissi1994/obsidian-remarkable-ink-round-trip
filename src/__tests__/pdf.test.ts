@@ -5,13 +5,12 @@ import { parseBlocks } from "../convert/mdblocks";
 import {
 	computeColumnWidths,
 	parseTaskMarker,
-	renderPdf,
 	toWinAnsi,
 	wrapText,
-	DOCID_SUBJECT_PREFIX,
 	PAGE_WIDTH,
 	PAGE_HEIGHT,
 } from "../convert/pdf";
+import { DOCID_SUBJECT_PREFIX, renderPdf } from "./helpers/pdfrender";
 
 const META = { title: "Testnotitie", docId: "0f8fad5b-d9cb-469f-a165-70867728950e" };
 

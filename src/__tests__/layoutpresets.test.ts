@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { RoundTripSettings } from "../settingsmodel";
 import {
 	DEFAULT_SETTINGS,
-	DEVICE_PAGE_SIZES,
 	LAYOUT_PRESETS,
 	breakLevelFor,
 	layoutFor,
@@ -34,24 +33,6 @@ describe("layout presets (GP_E6_S3)", () => {
 	});
 });
 
-describe("device page sizes (GP_E6_S2)", () => {
-	it("keeps the default on the reMarkable 1/2 screen", () => {
-		expect(DEVICE_PAGE_SIZES[DEFAULT_SETTINGS.deviceModel]).toEqual({
-			pageWidth: 447,
-			pageHeight: 596,
-		});
-	});
-
-	it("keeps every screen at 3:4 portrait, the shape the ink transform assumes", () => {
-		// The Paper Pro Move (9:16) is deliberately absent: its aspect would
-		// make the device-to-page mapping anisotropic (see settingsmodel.ts).
-		for (const { pageWidth, pageHeight } of Object.values(DEVICE_PAGE_SIZES)) {
-			expect(pageWidth / pageHeight).toBeGreaterThan(0.73);
-			expect(pageWidth / pageHeight).toBeLessThan(0.77);
-		}
-	});
-});
-
 describe("heading-break level (GP_E6_S4, smart via GP_E6_S9)", () => {
 	it("maps the setting to the typesetter's level; smart breaks no level", () => {
 		expect(breakLevelFor({ ...DEFAULT_SETTINGS, pageBreakAtHeading: "off" })).toBe(0);
@@ -69,12 +50,10 @@ describe("heading-break level (GP_E6_S4, smart via GP_E6_S9)", () => {
 	});
 
 	it("composes the full send layout from settings — the one truth (GP_E6_S10)", () => {
-		expect(sendLayout({ ...DEFAULT_SETTINGS, deviceModel: "paperpro" })).toEqual({
+		expect(sendLayout(DEFAULT_SETTINGS)).toEqual({
 			fontSize: 11,
 			lineHeight: 1.5,
 			margin: 40,
-			pageWidth: 509,
-			pageHeight: 679,
 			breakAtHeading: 0,
 			packSections: true,
 		});
@@ -110,5 +89,21 @@ describe("heading-break level (GP_E6_S4, smart via GP_E6_S9)", () => {
 			settingsFrom({ spikeSchrijfmodus: true } as Partial<RoundTripSettings>)
 				.pageBreakAtHeading,
 		).toBe("smart");
+	});
+});
+
+describe("notebook canvas migration", () => {
+	const legacy = (stored: Record<string, unknown>) =>
+		settingsFrom(stored).inkDevice;
+
+	it("turns the old “same as the reMarkable model” into that model", () => {
+		expect(legacy({ inkDevice: "auto", deviceModel: "paperpro" })).toBe("paperpro");
+		expect(legacy({ inkDevice: "auto", deviceModel: "rm2" })).toBe("rm2");
+		expect(legacy({ deviceModel: "paperpro" })).toBe("paperpro");
+	});
+
+	it("keeps an explicit canvas", () => {
+		expect(legacy({ inkDevice: "move", deviceModel: "paperpro" })).toBe("move");
+		expect(legacy({})).toBe("rm2");
 	});
 });

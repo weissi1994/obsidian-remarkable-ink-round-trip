@@ -2,15 +2,12 @@
  * Stable document IDs (PRD F5, K3).
  *
  * A UUID in the source note's frontmatter (`remarkable-id`) plus the same ID
- * in the uploaded PDF's metadata is the only reliable link between a note and
- * its annotated counterpart: file names and paths are unstable, the ID is not.
+ * on the device is the only reliable link between a note and its
+ * notebook: file names and paths are unstable, the ID is not.
  */
 
 /** Frontmatter key that carries the stable document ID. */
 export const DOCID_FRONTMATTER_KEY = "remarkable-id";
-
-/** Frontmatter key linking a source note to its companion note (GP_E5_S15). */
-export const ANNOTATIONS_FRONTMATTER_KEY = "annotations";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

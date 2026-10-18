@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
 	BEGIN_MARKER,
 	END_MARKER,
-	companionPath,
 	renderAnnotationBlock,
 	upsertAnnotationBlock,
 } from "../incoming/annotationnote";
@@ -106,17 +105,5 @@ describe("upsertAnnotationBlock", () => {
 		const result = upsertAnnotationBlock(broken, block);
 		expect(result).toContain("tekst");
 		expect(result).toContain(block);
-	});
-});
-
-describe("companionPath", () => {
-	it("puts the companion note in the configured folder", () => {
-		expect(companionPath("map/Nota.md", "reMarkable-in")).toBe(
-			"reMarkable-in/Nota — annotations.md",
-		);
-	});
-
-	it("falls back to the vault root when no folder is set", () => {
-		expect(companionPath("map/Nota.md", "")).toBe("Nota — annotations.md");
 	});
 });

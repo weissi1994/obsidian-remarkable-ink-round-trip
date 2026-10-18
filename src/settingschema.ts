@@ -12,19 +12,11 @@
  */
 
 import { MARK_STYLE_LABELS } from "./incoming/markstyles";
-import type { DeviceModel, HeadingBreak, InkDevice, LayoutPreset } from "./settingsmodel";
+import type { HeadingBreak, InkDevice, LayoutPreset } from "./settingsmodel";
 import { BUILTIN_FONTS } from "./ink/glyphs";
-
-/** GP_E6_S2: which screen the PDF page is sized for. Typed against the
- * model union so a new DeviceModel without a label is a compile error. */
-export const DEVICE_MODEL_LABELS: Record<DeviceModel, string> = {
-	rm2: "reMarkable 1 / 2 / Paper Pure",
-	paperpro: "reMarkable Paper Pro",
-};
 
 /** Ink fork: canvases a handwritten notebook can be written for. */
 export const INK_DEVICE_LABELS: Record<InkDevice, string> = {
-	auto: "Same as the reMarkable model above",
 	rm2: "reMarkable 1 / 2 / Paper Pure (1404×1872)",
 	paperpro: "reMarkable Paper Pro (1620×2160)",
 	move: "reMarkable Paper Pro Move (954×1696)",
@@ -118,20 +110,6 @@ export function conditionsOf(spec: SettingSpec): VisibleWhen[] {
 	return Array.isArray(spec.visibleWhen) ? spec.visibleWhen : [spec.visibleWhen];
 }
 
-/**
- * The slider bounds of a schema entry; the layout modal (GP_E6_S10) reuses
- * them so bounds are never redeclared. Throws on a non-slider key — covered
- * by a test so a schema rename cannot silently strand the modal.
- */
-export function sliderSpec(key: string): { min: number; max: number; step: number } {
-	for (const section of SETTING_SECTIONS) {
-		for (const item of section.items) {
-			if (item.key === key && item.control.type === "slider") return item.control;
-		}
-	}
-	throw new Error(`No slider spec for "${key}" in the settings schema.`);
-}
-
 /** Is this setting shown, given the current values? */
 export function isVisible(spec: SettingSpec, settings: unknown): boolean {
 	return conditionsOf(spec).every((c) => {
@@ -180,42 +158,52 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 		],
 	},
 	{
-		heading: "Document format",
+		heading: "Sync",
+		note:
+			"Notes travel as handwritten notebooks and come back the same way: what you " +
+			"erase, move, mark or write on the tablet is merged into the note itself, " +
+			"and what you change in the note is written into a fresh notebook. Edits " +
+			"made on both sides are merged; where both changed the same words, the " +
+			"note keeps yours and shows the tablet's next to it.",
 		items: [
 			{
-				key: "outputFormat",
-				name: "Send notes as",
+				key: "watchFolderEnabled",
+				name: "Sync folders",
 				desc:
-					"PDF keeps a fixed page layout, which is what annotations anchor to — " +
-					"the right choice if you plan to write on the document. EPUB reflows, " +
-					"so the device picks the font size and it handles non-Latin scripts " +
-					"better; best for reading only.",
-				control: {
-					type: "dropdown",
-					options: {
-						pdf: "PDF — fixed layout, best for annotating",
-						epub: "EPUB — reflowable, best for reading",
-						ink: "Handwriting — real pen strokes you can erase, move and annotate",
-					},
-				},
+					"Keep every note in the folders below in sync — new notes are sent, " +
+					"changed notes re-sent after a short quiet period. Notes elsewhere " +
+					"sync once you send them (right-click → Sync with reMarkable).",
+				control: { type: "toggle" },
 				refresh: true,
+			},
+			{
+				key: "watchFolderPath",
+				name: "Folders to sync",
+				desc: "Vault paths, comma-separated, e.g. reMarkable, Work/print",
+				control: { type: "text", placeholder: "reMarkable-out", sanitise: "path" },
+				visibleWhen: { key: "watchFolderEnabled", equals: true },
+			},
+			{
+				key: "syncIntervalMinutes",
+				name: "Check the reMarkable every",
+				desc:
+					"Minutes between background syncs; 0 checks only when Obsidian starts " +
+					"and when you run “Sync with reMarkable now”.",
+				control: { type: "slider", min: 0, max: 60, step: 5 },
+			},
+			{
+				key: "backupFolder",
+				name: "Folder for backups",
+				desc:
+					"Before tablet changes go into a note, its previous version is saved " +
+					"here (one copy per note, replaced each time).",
+				control: { type: "text", placeholder: "reMarkable-in/previous", sanitise: "path" },
 			},
 		],
 	},
 	{
-		// Typography only shapes the PDF; an EPUB is laid out by the reader, so
-		// showing these there would promise control the plugin does not have.
 		heading: "Page layout",
 		items: [
-			{
-				key: "deviceModel",
-				name: "reMarkable model",
-				desc:
-					"Pages are sized to this screen, so what you send fills the " +
-					"device exactly. The reMarkable 1, 2 and Paper Pure share a screen.",
-				control: { type: "dropdown", options: DEVICE_MODEL_LABELS },
-				visibleWhen: { key: "outputFormat", equals: "pdf" },
-			},
 			{
 				key: "pageBreakAtHeading",
 				name: "Start a new page at headings",
@@ -226,7 +214,6 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 					"on its own page. A \\pagebreak line works everywhere, " +
 					"whatever this says.",
 				control: { type: "dropdown", options: HEADING_BREAK_LABELS },
-				visibleWhen: { key: "outputFormat", in: ["pdf", "ink"] },
 			},
 			{
 				key: "layoutPreset",
@@ -235,7 +222,6 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 					"What the page is for. Each choice sets type size, line spacing " +
 					"and margins; pick Custom to use the sliders yourself.",
 				control: { type: "dropdown", options: LAYOUT_PRESET_LABELS },
-				visibleWhen: { key: "outputFormat", in: ["pdf", "ink"] },
 				refresh: true,
 			},
 			{
@@ -243,40 +229,30 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				name: "Font size",
 				desc: "Body text size in points (headings scale along).",
 				control: { type: "slider", min: 9, max: 14, step: 0.5 },
-				visibleWhen: [
-					{ key: "outputFormat", in: ["pdf", "ink"] },
-					{ key: "layoutPreset", equals: "custom" },
-				],
+				visibleWhen: { key: "layoutPreset", equals: "custom" },
 			},
 			{
 				key: "lineHeight",
 				name: "Line spacing",
 				desc: "Line height as a multiple of the font size; roomier reads better on e-ink.",
 				control: { type: "slider", min: 1.2, max: 1.9, step: 0.1 },
-				visibleWhen: [
-					{ key: "outputFormat", in: ["pdf", "ink"] },
-					{ key: "layoutPreset", equals: "custom" },
-				],
+				visibleWhen: { key: "layoutPreset", equals: "custom" },
 			},
 			{
 				key: "margin",
 				name: "Page margin",
 				desc: "Margin in points around the text — also your annotation space.",
 				control: { type: "slider", min: 24, max: 64, step: 4 },
-				visibleWhen: [
-					{ key: "outputFormat", in: ["pdf", "ink"] },
-					{ key: "layoutPreset", equals: "custom" },
-				],
+				visibleWhen: { key: "layoutPreset", equals: "custom" },
 			},
 		],
 	},
 	{
 		heading: "Handwriting",
 		note:
-			"Notes sent as handwriting arrive as real pen strokes in a notebook: erase " +
-			"a word or move it with the lasso, write between the lines, and the import " +
-			"brings it all back into the note. Applies to “Send … as handwriting” and " +
-			"to every send when Send notes as is Handwriting.",
+			"Notes arrive as real pen strokes in a notebook: erase a word or move it " +
+			"with the lasso, write between the lines, and the sync brings it all back " +
+			"into the note.",
 		items: [
 			{
 				key: "inkDevice",
@@ -373,8 +349,8 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				key: "erasedAs",
 				name: "A word you erase on the tablet becomes",
 				desc:
-					"Removed from the annotated copy, or kept there struck through so " +
-					"you can still see what went.",
+					"Removed from the note, or kept there struck through so you can " +
+					"still see what went.",
 				control: {
 					type: "dropdown",
 					options: { delete: "Removed (default)", strikethrough: "Struck through" },
@@ -449,49 +425,15 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 		],
 	},
 	{
-		heading: "Annotations back into the vault",
+		heading: "Handwriting back into the vault",
 		items: [
-			{
-				key: "annotationTarget",
-				name: "Where imported annotations land",
-				desc:
-					"A companion note keeps your source note untouched and links back to it. " +
-					"Writing into the source note itself is possible, but the plugin then " +
-					"edits a note you wrote — it only ever replaces its own marked block.",
-				control: {
-					type: "dropdown",
-					options: {
-						companion: "Companion note (recommended)",
-						source: "Section inside the source note",
-					},
-				},
-				refresh: true,
-			},
-			{
-				key: "annotationFolder",
-				name: "Folder for companion notes",
-				desc: "Vault path, e.g. reMarkable-in; empty puts them in the vault root.",
-				control: { type: "text", placeholder: "reMarkable-in", sanitise: "path" },
-				visibleWhen: { key: "annotationTarget", equals: "companion" },
-			},
-			{
-				key: "linkSourceToAnnotations",
-				name: "Link the source note to its annotations",
-				desc:
-					"After an import, the source note gets an “annotations” property " +
-					"linking to its companion note, so the two are one click apart. " +
-					"The companion note always links back to the source. This is the " +
-					"only thing the plugin ever writes into your note besides its id.",
-				control: { type: "toggle" },
-				visibleWhen: { key: "annotationTarget", equals: "companion" },
-			},
 			{
 				key: "importHandwriting",
 				name: "Import handwriting as images",
 				desc:
 					"Handwritten notes and freehand marks are pen strokes, not text. " +
-					"With this on, each written page is rendered to a PNG and embedded " +
-					"with the annotations so you can read it back.",
+					"With this on, each remark you write is rendered to a PNG and " +
+					"embedded in the note where you wrote it.",
 				control: { type: "toggle" },
 				refresh: true,
 			},
@@ -532,43 +474,13 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 		],
 	},
 	{
-		heading: "Watch folder",
-		items: [
-			{
-				key: "watchFolderEnabled",
-				name: "Auto-send from a vault folder",
-				desc:
-					"Notes created or changed in the folders below are converted and " +
-					"uploaded automatically (after a short quiet period). Unchanged " +
-					"notes are skipped.",
-				control: { type: "toggle" },
-			},
-			{
-				key: "watchFolderPath",
-				name: "Folders to watch",
-				desc: "Vault paths, comma-separated, e.g. reMarkable-out, Work/print",
-				control: { type: "text", placeholder: "reMarkable-out", sanitise: "path" },
-			},
-		],
-	},
-	{
 		heading: "Content",
 		items: [
-			{
-				key: "embedImages",
-				name: "Send images as pictures",
-				desc:
-					"Off (default): an image on its own line travels as the text " +
-					"'[image: name]'. On: it is drawn into the page. Notes sent before " +
-					"you switch this on need one fresh send before their annotations " +
-					"line up again.",
-				control: { type: "toggle" },
-			},
 			{
 				key: "frontmatterAsTitleBlock",
 				name: "Frontmatter as title block",
 				desc:
-					"Off (default): frontmatter is left out of the PDF. On: your fields " +
+					"Off (default): frontmatter is left out of the notebook. On: your fields " +
 					"(tags, author, dates…) are listed under the title; the plugin's own " +
 					"remarkable-id stays hidden.",
 				control: { type: "toggle" },

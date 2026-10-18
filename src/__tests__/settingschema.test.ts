@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, extrasFrom, settingsFrom, storedFrom } from "../settingsmodel";
-import { sliderSpec } from "../settingschema";
 import {
 	SETTING_SECTIONS,
 	checkEndpoint,
@@ -100,7 +99,7 @@ describe("reading and writing by dotted key", () => {
 		expect(DEFAULT_SETTINGS.markStyles.circle).toBe("bold");
 		// Untouched branches come along unchanged.
 		expect(updated.markStyles.strikethrough).toBe("strikethrough");
-		expect(updated.outputFormat).toBe(DEFAULT_SETTINGS.outputFormat);
+		expect(updated.inkPen).toBe(DEFAULT_SETTINGS.inkPen);
 	});
 
 	it("answers undefined for a key that is not there", () => {
@@ -115,10 +114,10 @@ describe("visibility", () => {
 		expect(isVisible(spec, { ...DEFAULT_SETTINGS, useCustomEndpoint: true })).toBe(true);
 	});
 
-	it("hides the typography sliders for EPUB, which reflows on the device", () => {
+	it("shows the typography sliders only for the custom layout", () => {
 		const spec = specs.find((item) => item.key === "fontSize")!;
 		expect(isVisible(spec, DEFAULT_SETTINGS)).toBe(true);
-		expect(isVisible(spec, { ...DEFAULT_SETTINGS, outputFormat: "epub" })).toBe(false);
+		expect(isVisible(spec, { ...DEFAULT_SETTINGS, layoutPreset: "readable" })).toBe(false);
 	});
 });
 
@@ -136,21 +135,6 @@ describe("input cleanup", () => {
 	});
 });
 
-describe("sliderSpec (GP_E6_S10)", () => {
-	it("finds the three layout sliders the modal depends on", () => {
-		// A schema rename would otherwise only surface when a user opens the
-		// layout modal and picks Custom.
-		for (const key of ["fontSize", "lineHeight", "margin"] as const) {
-			const spec = sliderSpec(key);
-			expect(spec.min).toBeLessThan(spec.max);
-			expect(spec.step).toBeGreaterThan(0);
-		}
-	});
-
-	it("throws loudly for a key that is not a slider", () => {
-		expect(() => sliderSpec("layoutPreset")).toThrow(/No slider spec/);
-	});
-});
 
 describe("unknown data.json keys survive a save (GP_E7_S1 bevinding, 0.35.1)", () => {
 	it("carries hand-added keys through the exact save composition", () => {

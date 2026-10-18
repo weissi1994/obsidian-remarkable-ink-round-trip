@@ -6,7 +6,8 @@
  * - `![[embeds]]` resolved inline (with recursion/cycle guards),
  * - `[[wikilinks]]` flattened to their display text,
  * - callouts flattened to titled blockquotes,
- * - `%%comments%%` removed.
+ * - `%%comments%%`, `<!-- comments -->` and inline formatting tags removed
+ *   (what a merged tablet mark leaves: `<u>`, `<mark style=…>`).
  *
  * Vault access stays outside: callers inject an EmbedResolver, so this module
  * is pure and unit-testable (and mobile-safe per N7 — no Node APIs).
@@ -60,6 +61,31 @@ const IMAGE_EXTENSIONS = new Set([
 ]);
 
 /** Parse a frontmatter block into flat key → raw string value pairs. */
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+const INLINE_TAG_RE = /<\/?(?:u|mark|span|s|del|ins|b|strong|i|em|sub|sup|small|font)(?:\s[^<>]*)?>/gi;
+
+/**
+ * Drop HTML comments and inline formatting tags, keeping the words, outside
+ * fenced code — a notebook has no way to render them, and written out they
+ * would come back as stray letters.
+ */
+export function stripInlineHtml(text: string): string {
+	const out: string[] = [];
+	let fenced = false;
+	for (const line of text.replace(HTML_COMMENT_RE, "").split("\n")) {
+		if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+		out.push(fenced || /^\s*(```|~~~)/.test(line) ? line : line.replace(INLINE_TAG_RE, ""));
+	}
+	return out.join("\n");
+}
+
+/** A note split into its frontmatter block (with delimiters) and its body. */
+export function splitNote(source: string): { head: string; body: string } {
+	const match = source.match(FRONTMATTER_RE);
+	const head = match === null ? "" : match[0];
+	return { head, body: source.slice(head.length) };
+}
+
 export function parseFrontmatter(source: string): {
 	fields: Record<string, string>;
 	body: string;
@@ -384,6 +410,7 @@ export function preprocess(
 		displayTextForLink(target.trim(), alias),
 	);
 	text = flattenCallouts(text);
+	text = stripInlineHtml(text);
 
 	const titleBlock = options.frontmatterAsTitleBlock
 		? renderTitleBlock(fields, hidden)

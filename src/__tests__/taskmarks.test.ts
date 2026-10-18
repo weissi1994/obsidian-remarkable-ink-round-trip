@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
-import { PdfLayout, renderPdf } from "../convert/pdf";
+import { PdfLayout } from "../convert/pdf";
+import { renderPdf } from "./helpers/pdfrender";
 import { readMarks } from "../incoming/marks";
 import { projectOntoSource } from "../incoming/sourceprojection";
 import {

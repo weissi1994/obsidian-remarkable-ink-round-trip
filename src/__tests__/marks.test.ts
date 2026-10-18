@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
-import { LaidOutLine, PdfLayout, renderPdf } from "../convert/pdf";
+import { LaidOutLine, PdfLayout } from "../convert/pdf";
+import { renderPdf } from "./helpers/pdfrender";
 import { readMarks } from "../incoming/marks";
 import {
 	PAGE_HEIGHT as DEVICE_HEIGHT,

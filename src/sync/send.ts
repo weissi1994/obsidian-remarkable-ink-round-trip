@@ -1,24 +1,13 @@
 /**
- * Send orchestration (PRD F1, F8-basis): note → preprocess → PDF → upload,
- * with per-file results for batch runs. Pure logic over injected adapters so
- * the whole flow is unit-testable without Obsidian or a device.
+ * Send orchestration (PRD F1, F8-basis): note → preprocess → handwritten
+ * notebook → upload, with per-file results for batch runs. Pure logic over
+ * injected adapters so the whole flow is unit-testable without Obsidian or a
+ * device.
  */
 
-import {
-	preprocess,
-	parseFrontmatter,
-	EmbedResolver,
-} from "../preprocess/preprocess";
-import { canonicalText } from "../convert/textdoc";
-import {
-	imageRefTargets,
-	parseBlocks,
-	substituteDiagrams,
-	substituteVaultImages,
-} from "../convert/mdblocks";
-import { renderPdf, resolveLayoutOptions, PdfLayoutOptions } from "../convert/pdf";
-import type { DiagramImage } from "../convert/mermaid";
-import { renderEpub } from "../convert/epub";
+import { preprocess, splitNote, EmbedResolver } from "../preprocess/preprocess";
+import { parseBlocks } from "../convert/mdblocks";
+import { resolveLayoutOptions, PdfLayoutOptions } from "../convert/pdf";
 import { ensureDocId } from "../id/docid";
 import { InkSnapshot, MappingTable, contentHash, recordUpload } from "../id/mapping";
 import type { Block } from "../convert/mdblocks";
@@ -35,52 +24,31 @@ export interface NoteInput {
 	existingDocId?: unknown;
 }
 
-/** Document file formats the upload client takes (PRD F3). */
-export type OutputFormat = "pdf" | "epub";
-
-/** What the settings can choose: a review file, or a handwritten notebook (ink fork). */
-export type SettingsFormat = OutputFormat | "ink";
-
-/**
- * Everything one send can deliver: the settings formats plus "text" — the
- * write-mode notebook (F16), an explicit per-send choice, never a default.
- */
-export type SendFormat = SettingsFormat | "text";
+/** What a send keeps so the import can regenerate it and merge into the note. */
+export interface SentRecord {
+	title: string;
+	/** The preprocessed text the notebook was written from. */
+	markdown: string;
+	/** The note body (no frontmatter) as it was when sent: the merge base. */
+	body?: string;
+	images?: Record<string, InkImage>;
+	drawings?: Record<string, InkDrawing>;
+}
 
 export interface SendDeps {
 	client: {
-		upload(
-			fileName: string,
-			bytes: Uint8Array,
-			options: { parentId?: string; format: OutputFormat },
-		): Promise<UploadResult>;
 		/**
-		 * Upload the note as an editable typed-text notebook (F16). Optional
-		 * because it needs the raw sync API: the plugin edge wires it in
-		 * whenever that session exists, and a text send without it fails with
-		 * a clear message instead of silently degrading to PDF.
+		 * Upload a notebook of pen-stroke pages. Returns the page ids it
+		 * chose, which the import maps back to layout pages.
 		 */
-		uploadText?(
-			visibleName: string,
-			markdown: string,
-			options: { parentId?: string },
-		): Promise<UploadResult>;
-		/**
-		 * Ink fork: upload a notebook of pen-stroke pages. Returns the page ids
-		 * it chose, which the import maps back to layout pages.
-		 */
-		uploadInk?(
+		uploadInk(
 			visibleName: string,
 			pages: Uint8Array[],
 			options: { parentId?: string },
 		): Promise<UploadResult & { pageIds: string[] }>;
 	};
-	/**
-	 * Ink fork: turn a note into handwritten pages. Absent means handwriting
-	 * is unavailable here (e.g. the owner's hand is selected but missing),
-	 * and an ink send fails with a clear message.
-	 */
-	ink?: {
+	/** Turn a note into handwritten pages. */
+	ink: {
 		render(
 			blocks: Block[],
 			title: string,
@@ -94,18 +62,8 @@ export interface SendDeps {
 		/** The note's embedded pictures, quantised, by placeholder name. */
 		loadImages?(note: NoteInput): Promise<Record<string, InkImage>>;
 		/** Keep the sent text, so the import can regenerate it after edits. */
-		persistSent?(
-			docId: string,
-			sent: {
-				title: string;
-				markdown: string;
-				images?: Record<string, InkImage>;
-				drawings?: Record<string, InkDrawing>;
-			},
-		): Promise<void>;
+		persistSent?(docId: string, sent: SentRecord): Promise<void>;
 	};
-	/** Delivered format; PDF is the default because it anchors annotations. */
-	format?: SendFormat;
 	/** Resolve an embed for a given note (notePath disambiguates targets). */
 	resolveEmbed: (
 		linkpath: string,
@@ -125,23 +83,6 @@ export interface SendDeps {
 	 */
 	replacePrevious?: (previousDeviceDocId: string) => Promise<void>;
 	layout?: PdfLayoutOptions;
-	/**
-	 * Render mermaid fences to PNGs (fork: image blocks). Optional and
-	 * DOM-bound: the plugin edge wires in renderMermaidDiagrams; tests and
-	 * environments without it send fences as code blocks, exactly as
-	 * before. One null slot per failed diagram — substitution keeps that
-	 * fence as code. Any thrown error degrades the whole send the same way.
-	 */
-	renderDiagrams?: (markdown: string) => Promise<(DiagramImage | null)[]>;
-	/**
-	 * Load standalone vault images (fork: image blocks). Same seam and same
-	 * failure rule as renderDiagrams: DOM-bound, so the edge injects it, and
-	 * a null slot falls back to the placeholder text the plugin has always
-	 * produced. Targets arrive in occurrence order.
-	 */
-	resolveImages?: (targets: string[], notePath: string) => Promise<(DiagramImage | null)[]>;
-	/** Turn standalone images into pictures rather than placeholder text. */
-	imagesAsBlocks?: boolean;
 	frontmatterAsTitleBlock?: boolean;
 	/**
 	 * Skip the upload when the preprocessed content matches the recorded
@@ -170,47 +111,36 @@ export type SendResult = SendSuccess | SendFailure;
 
 export function prepareNoteContent(
 	note: NoteInput,
-	format: SendFormat,
 	resolveEmbed: (
 		linkpath: string,
 		notePath: string,
 	) => ReturnType<EmbedResolver>,
 	frontmatterAsTitleBlock = false,
-	imagesAsBlocks = false,
 ): { markdown: string; missingEmbeds: string[] } {
-	if (format === "text") {
-		return { markdown: parseFrontmatter(note.content).body, missingEmbeds: [] };
-	}
-	const processed = preprocess(note.content, {
+	return preprocess(note.content, {
 		resolveEmbed: (linkpath) => resolveEmbed(linkpath, note.path),
 		frontmatterAsTitleBlock,
-		imagesAsBlocks,
 	});
-	return processed;
 }
 
+/**
+ * Notes whose notebook is missing or out of date. A note last sent in a
+ * format other than handwriting always counts: it is re-sent as ink.
+ */
 export function notesNeedingUpload(
 	notes: NoteInput[],
 	table: MappingTable,
-	format: SendFormat,
 	resolveEmbed: (
 		linkpath: string,
 		notePath: string,
 	) => ReturnType<EmbedResolver>,
 	frontmatterAsTitleBlock = false,
-	imagesAsBlocks = false,
 ): NoteInput[] {
 	return notes.filter((note) => {
 		if (typeof note.existingDocId !== "string") return true;
 		const previous = table[note.existingDocId];
-		if (previous === undefined) return true;
-		const { markdown } = prepareNoteContent(
-			note,
-			format,
-			resolveEmbed,
-			frontmatterAsTitleBlock,
-			imagesAsBlocks,
-		);
+		if (previous === undefined || previous.format !== "ink") return true;
+		const { markdown } = prepareNoteContent(note, resolveEmbed, frontmatterAsTitleBlock);
 		return previous.contentHash !== contentHash(markdown);
 	});
 }
@@ -224,31 +154,20 @@ export async function sendNote(
 	try {
 		const { docId, isNew } = ensureDocId(note.existingDocId);
 		if (isNew) await deps.persistDocId(note, docId);
-		const format: SendFormat = deps.format ?? "pdf";
-
-		// Write-mode (F16): the note BODY travels as editable text, exactly as
-		// it is on disk — no embed inlining (an edit inside an inlined embed
-		// could never flow back to the right file) and no frontmatter (vault
-		// metadata is not text to edit; the note keeps its own frontmatter and
-		// the import, GP_E7_S3, leaves it standing). Review formats keep their
-		// full preprocessing below.
 		const { markdown, missingEmbeds } = prepareNoteContent(
 			note,
-			format,
 			deps.resolveEmbed,
 			deps.frontmatterAsTitleBlock,
-			deps.imagesAsBlocks,
 		);
-		let diagrams: (DiagramImage | null)[] = [];
-		let pictures: (DiagramImage | null)[] = [];
 		const hash = contentHash(markdown);
-		if (deps.skipUnchanged && table[docId]?.contentHash === hash) {
+		const current = table[docId];
+		if (deps.skipUnchanged && current?.format === "ink" && current.contentHash === hash) {
 			return {
 				result: {
 					ok: true,
 					path: note.path,
 					docId,
-					deviceDocId: table[docId].deviceDocId,
+					deviceDocId: current.deviceDocId,
 					missingEmbeds,
 					skipped: true,
 				},
@@ -258,91 +177,21 @@ export async function sendNote(
 		const parentId = deps.resolveParent
 			? await deps.resolveParent(note.path)
 			: undefined;
-		let upload: UploadResult;
-		let inkSnapshot: InkSnapshot | undefined;
-		if (format === "text") {
-			if (deps.client.uploadText === undefined) {
-				throw new Error(
-					"Editable-text sends need the reMarkable sync API, which is not available right now.",
-				);
-			}
-			upload = await deps.client.uploadText(note.basename, markdown, {
-				parentId,
-			});
-		} else if (format === "ink") {
-			if (deps.client.uploadInk === undefined || deps.ink === undefined) {
-				throw new Error(
-					"Handwritten sends need the reMarkable sync API, which is not available right now.",
-				);
-			}
-			const blocks = parseBlocks(markdown);
-			const images = (await deps.ink.loadImages?.(note)) ?? {};
-			const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
-			const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
-			// Keep the text BEFORE uploading: a failed write after a landed
-			// upload would orphan the notebook and duplicate it on retry.
-			await deps.ink.persistSent?.(docId, {
-				title: note.basename,
-				markdown,
-				images: rendered.snapshot.imageStyle === undefined ? undefined : images,
-				drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
-			});
-			const result = await deps.client.uploadInk(note.basename, rendered.pages, { parentId });
-			upload = result;
-			inkSnapshot = { ...rendered.snapshot, pageIds: result.pageIds };
-		} else {
-			let blocks = parseBlocks(markdown);
-			// Diagrams render only for PDF (fork: image blocks): EPUB reflows
-			// and records no geometry to anchor against. The content hash is
-			// taken from the markdown above, before substitution, so
-			// "unchanged, skip" stays independent of how mermaid renders.
-			if (format === "pdf" && deps.renderDiagrams !== undefined) {
-				try {
-					diagrams = await deps.renderDiagrams(markdown);
-				} catch (error) {
-					// Degrading to code blocks is correct, but doing it silently hid a
-					// ReferenceError for a whole release — say so before falling back.
-					console.error("reMarkable Round-Trip: diagram rendering failed", error);
-					diagrams = [];
-				}
-				if (diagrams.length > 0) blocks = substituteDiagrams(blocks, diagrams);
-			}
-			// Vault pictures, same rules as diagrams: PDF only (EPUB reflows
-			// and records no geometry to anchor against), failures fall back
-			// to placeholder text, and the hash above is taken before this so
-			// "unchanged, skip" never depends on how a picture loaded.
-			if (format === "pdf" && deps.resolveImages !== undefined) {
-				const targets = imageRefTargets(blocks);
-				if (targets.length > 0) {
-					try {
-						pictures = await deps.resolveImages(targets, note.path);
-					} catch (error) {
-						console.error(
-							"reMarkable Round-Trip: loading vault images failed, sending them as placeholder text",
-							error,
-						);
-						pictures = [];
-					}
-				}
-				// Runs even with nothing loaded: leftover placeholders must
-				// become their text form rather than reach the typesetter.
-				if (targets.length > 0) blocks = substituteVaultImages(blocks, pictures);
-			}
-			const bytes =
-				format === "epub"
-					? await renderEpub(blocks, { title: note.basename, docId })
-					: (
-							await renderPdf(
-								blocks,
-								{ title: note.basename, docId },
-								deps.layout,
-							)
-						).bytes;
-			upload = await deps.client.upload(`${note.basename}.${format}`, bytes, {
-				parentId,
-				format,
-			});
-		}
+		const blocks = parseBlocks(markdown);
+		const images = (await deps.ink.loadImages?.(note)) ?? {};
+		const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
+		const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
+		// Keep the text BEFORE uploading: a failed write after a landed
+		// upload would orphan the notebook and duplicate it on retry.
+		await deps.ink.persistSent?.(docId, {
+			title: note.basename,
+			markdown,
+			body: splitNote(note.content).body,
+			images: rendered.snapshot.imageStyle === undefined ? undefined : images,
+			drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
+		});
+		const upload = await deps.client.uploadInk(note.basename, rendered.pages, { parentId });
+		const inkSnapshot: InkSnapshot = { ...rendered.snapshot, pageIds: upload.pageIds };
 
 		const previous = table[docId];
 		if (
@@ -362,38 +211,8 @@ export async function sendNote(
 			notePath: note.path,
 			deviceDocId: upload.deviceDocId,
 			contentHash: hash,
-			// The import routes branch on this: annotation pull skips "text"
-			// documents (their import is the write-mode route, GP_E7_S3).
-			format,
-			// What an unedited device copy reads back as (GP_E7_S3) — the
-			// import's "was the device actually edited?" reference.
-			textHash:
-				format === "text" ? contentHash(canonicalText(markdown)) : undefined,
-			// EPUB reflows and a text notebook has no fixed page geometry, so
-			// only PDF records layout to anchor imported ink against (GP_E3_S8).
-			pdfLayout:
-				format === "pdf" || format === "ink"
-					? {
-							...resolveLayoutOptions(deps.layout),
-							// Recorded per upload so the import replays the
-							// same geometry without re-rendering mermaid
-							// (fork: image blocks; see mapping.ts).
-							...(diagrams.length > 0
-								? {
-										images: diagrams.map((d) =>
-											d === null ? null : { w: d.w, h: d.h },
-										),
-									}
-								: {}),
-							...(pictures.length > 0
-								? {
-										vaultImages: pictures.map((p) =>
-											p === null ? null : { w: p.w, h: p.h },
-										),
-									}
-								: {}),
-						}
-					: undefined,
+			format: "ink",
+			pdfLayout: resolveLayoutOptions(deps.layout),
 			// Ink fork: everything the import needs to regenerate the strokes.
 			ink: inkSnapshot,
 		});

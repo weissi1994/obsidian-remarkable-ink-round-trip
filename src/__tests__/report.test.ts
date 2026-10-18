@@ -136,7 +136,7 @@ describe("renderImportReport", () => {
 			},
 		];
 		expect(renderImportReport({ ...base, results: copy })).toContain(
-			"written as: annotated copy of the note",
+			"written as: merged into the note",
 		);
 
 		const fell: PullResult[] = [
@@ -164,7 +164,7 @@ describe("renderImportReport", () => {
 			},
 		];
 		expect(renderImportReport({ ...base, results: changed })).toContain(
-			"the note changed since it was sent",
+			"could not be matched to the text that was sent",
 		);
 	});
 
@@ -214,7 +214,7 @@ describe("renderImportReport", () => {
 		);
 	});
 
-	it("blames the edit, not EPUB, when the source check knows the note changed", () => {
+	it("blames the edit when the source check knows the note changed", () => {
 		const results: PullResult[] = [
 			{
 				ok: true,
@@ -236,7 +236,7 @@ describe("renderImportReport", () => {
 			results,
 		});
 		expect(report).toContain("has been edited since it was sent");
-		expect(report).not.toContain("or it went over as EPUB");
+		expect(report).not.toContain("could not be regenerated");
 	});
 
 	it("mentions pages the reader added on the device", () => {
@@ -384,7 +384,7 @@ describe("renderImportReport", () => {
 		);
 	});
 
-	it("names a write-mode document as out of scope for the annotation import", () => {
+	it("names a document from an earlier, non-handwritten send", () => {
 		const results: PullResult[] = [
 			{
 				ok: true,
@@ -392,11 +392,11 @@ describe("renderImportReport", () => {
 				notePath: "Nota.md",
 				highlightCount: 0,
 				skipped: true,
-				skipReason: "write-mode",
+				skipReason: "legacy",
 			},
 		];
 		expect(renderImportReport({ ...base, results })).toContain(
-			"sent as editable text",
+			"re-sent as handwriting",
 		);
 	});
 

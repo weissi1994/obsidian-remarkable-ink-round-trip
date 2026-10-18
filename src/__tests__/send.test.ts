@@ -1,25 +1,45 @@
 import { describe, expect, it } from "vitest";
-import { PDFDocument } from "pdf-lib";
 import {
 	NoteInput,
 	SendDeps,
+	SentRecord,
 	notesNeedingUpload,
 	prepareNoteContent,
 	sendBatch,
 	sendNote,
 } from "../sync/send";
-import { DOCID_SUBJECT_PREFIX, TYPO_VERSION } from "../convert/pdf";
+import { TYPO_VERSION } from "../convert/pdf";
 import { isValidDocId } from "../id/docid";
 import { MappingTable, contentHash } from "../id/mapping";
+import { DEVICE_PROFILES } from "../ink/inkrender";
 
 function makeDeps(overrides: Partial<SendDeps> = {}) {
-	const uploads: { fileName: string; bytes: Uint8Array }[] = [];
+	const uploads: { name: string; pages: Uint8Array[] }[] = [];
 	const persisted: { path: string; docId: string }[] = [];
+	const sent: Record<string, SentRecord> = {};
 	const deps: SendDeps = {
 		client: {
-			upload: (fileName, bytes) => {
-				uploads.push({ fileName, bytes });
-				return Promise.resolve({ deviceDocId: `device-${uploads.length}` });
+			uploadInk: (name, pages) => {
+				uploads.push({ name, pages });
+				return Promise.resolve({ deviceDocId: `device-${uploads.length}`, pageIds: ["p1"] });
+			},
+		},
+		ink: {
+			render: () => ({
+				pages: [new Uint8Array([1])],
+				snapshot: {
+					font: "readability",
+					fallbackFont: "readability",
+					pen: "medium",
+					color: 0,
+					jitter: 0.4,
+					profile: DEVICE_PROFILES.rm2,
+					shape: 1,
+				},
+			}),
+			persistSent: (docId, record) => {
+				sent[docId] = record;
+				return Promise.resolve();
 			},
 		},
 		resolveEmbed: () => ({ kind: "missing" }),
@@ -29,7 +49,7 @@ function makeDeps(overrides: Partial<SendDeps> = {}) {
 		},
 		...overrides,
 	};
-	return { deps, uploads, persisted };
+	return { deps, uploads, persisted, sent };
 }
 
 const NOTE: NoteInput = {
@@ -39,62 +59,61 @@ const NOTE: NoteInput = {
 };
 
 describe("notesNeedingUpload", () => {
-	it("filters unchanged automatic notes before cloud work is queued", () => {
-		const docId = "0f8fad5b-d9cb-469f-a165-70867728950e";
-		const note = { ...NOTE, existingDocId: docId };
-		const { markdown } = prepareNoteContent(note, "pdf", () => ({
-			kind: "missing",
-		}));
-		const table: MappingTable = {
-			[docId]: {
-				docId,
-				notePath: note.path,
-				deviceDocId: "device-a",
-				uploadedAt: "2026-09-03T00:00:00Z",
-				contentHash: contentHash(markdown),
-			},
-		};
+	const docId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+	const note = { ...NOTE, existingDocId: docId };
+	const missing = () => ({ kind: "missing" as const });
+	const tableFor = (format: "ink" | "pdf"): MappingTable => ({
+		[docId]: {
+			docId,
+			notePath: note.path,
+			deviceDocId: "device-a",
+			uploadedAt: "2026-09-03T00:00:00Z",
+			contentHash: contentHash(prepareNoteContent(note, missing).markdown),
+			format,
+		},
+	});
 
+	it("filters unchanged notes before cloud work is queued", () => {
+		expect(notesNeedingUpload([note], tableFor("ink"), missing)).toEqual([]);
 		expect(
-			notesNeedingUpload([note], table, "pdf", () => ({ kind: "missing" })),
-		).toEqual([]);
-		expect(
-			notesNeedingUpload(
-				[{ ...note, content: `${note.content}\nChanged.` }],
-				table,
-				"pdf",
-				() => ({ kind: "missing" }),
-			),
+			notesNeedingUpload([{ ...note, content: `${note.content}\nChanged.` }], tableFor("ink"), missing),
 		).toHaveLength(1);
+	});
+
+	it("re-sends a note last sent as PDF, even when unchanged", () => {
+		expect(notesNeedingUpload([note], tableFor("pdf"), missing)).toHaveLength(1);
 	});
 });
 
 describe("sendNote", () => {
-	it("generates and persists a docId, uploads, and records the mapping", async () => {
+	it("generates and persists a docId, uploads a notebook, and records the mapping", async () => {
 		const { deps, uploads, persisted } = makeDeps();
 		const { result, table } = await sendNote(NOTE, {}, deps);
 
 		if (!result.ok) throw new Error(`unexpected failure: ${result.error}`);
 		expect(isValidDocId(result.docId)).toBe(true);
 		expect(persisted).toEqual([{ path: "map/Nota.md", docId: result.docId }]);
-		expect(uploads[0].fileName).toBe("Nota.pdf");
+		expect(uploads[0].name).toBe("Nota");
 		expect(table[result.docId]).toMatchObject({
 			notePath: "map/Nota.md",
 			deviceDocId: "device-1",
+			format: "ink",
 		});
+		expect(table[result.docId].ink?.pageIds).toEqual(["p1"]);
+	});
 
-		const doc = await PDFDocument.load(uploads[0].bytes);
-		expect(doc.getSubject()).toBe(`${DOCID_SUBJECT_PREFIX}${result.docId}`);
+	it("keeps the note body as the merge base, frontmatter left out", async () => {
+		const { deps, sent } = makeDeps();
+		const { result } = await sendNote(NOTE, {}, deps);
+		if (!result.ok) throw new Error("unexpected failure");
+		expect(sent[result.docId].body).toBe("Inhoud van de notitie.");
+		expect(sent[result.docId].markdown).toContain("Inhoud van de notitie.");
 	});
 
 	it("reuses an existing docId without persisting again", async () => {
 		const { deps, persisted } = makeDeps();
 		const existing = "0f8fad5b-d9cb-469f-a165-70867728950e";
-		const { result } = await sendNote(
-			{ ...NOTE, existingDocId: existing },
-			{},
-			deps,
-		);
+		const { result } = await sendNote({ ...NOTE, existingDocId: existing }, {}, deps);
 		if (!result.ok) throw new Error("unexpected failure");
 		expect(result.docId).toBe(existing);
 		expect(persisted).toHaveLength(0);
@@ -102,135 +121,17 @@ describe("sendNote", () => {
 
 	it("returns a failure result instead of throwing", async () => {
 		const { deps } = makeDeps({
-			client: { upload: () => Promise.reject(new Error("cloud down")) },
+			client: { uploadInk: () => Promise.reject(new Error("cloud down")) },
 		});
 		const { result, table } = await sendNote(NOTE, {}, deps);
 		expect(result).toMatchObject({ ok: false, error: "cloud down" });
 		expect(table).toEqual({});
 	});
-});
 
-describe("sendNote output format", () => {
-	it("delivers an EPUB with the right extension and format flag", async () => {
-		const { deps, uploads } = makeDeps({ format: "epub" });
-		const formats: string[] = [];
-		deps.client = {
-			upload: (fileName, bytes, uploadOptions) => {
-				formats.push(uploadOptions.format);
-				uploads.push({ fileName, bytes });
-				return Promise.resolve({ deviceDocId: "device-1" });
-			},
-		};
-		const { result } = await sendNote(NOTE, {}, deps);
-		if (!result.ok) throw new Error("unexpected failure");
-
-		expect(uploads[0].fileName).toBe("Nota.epub");
-		expect(formats).toEqual(["epub"]);
-		// EPUB is a ZIP: "PK" magic bytes.
-		expect(Array.from(uploads[0].bytes.slice(0, 2))).toEqual([0x50, 0x4b]);
-	});
-
-	it("records the typography of a PDF upload, so annotations can be anchored", async () => {
+	it("records the typography, so tablet changes can be anchored", async () => {
 		const { deps } = makeDeps({ layout: { fontSize: 13 } });
 		const { table } = await sendNote(NOTE, {}, deps);
-		// Defaults filled in: reproducing the layout later must not depend on
-		// what the settings happen to say then (GP_E3_S8).
-		// The typo version rides along (GP_E5_S4-S7): an import replays the
-		// typesetter behaviour this upload was laid out with.
-		expect(Object.values(table)[0].pdfLayout).toEqual({
-			fontSize: 13,
-			lineHeight: 1.5,
-			margin: 40,
-			typo: TYPO_VERSION,
-			breakAtHeading: 0,
-			packSections: false,
-			// The page size rides along too (GP_E6_S2): reproducing the layout
-			// later must not depend on which device model is selected then.
-			pageWidth: 447,
-			pageHeight: 596,
-		});
-	});
-
-	it("records no typography for EPUB, which has no fixed page layout", async () => {
-		const { deps } = makeDeps({ format: "epub" });
-		const { table } = await sendNote(NOTE, {}, deps);
-		expect(Object.values(table)[0].pdfLayout).toBeUndefined();
-	});
-
-	it("sends write-mode as the note body: no frontmatter, no embed inlining", async () => {
-		// GP_E7_S2: the note itself is the working copy. Frontmatter is vault
-		// metadata (the note keeps its own on import) and an inlined embed
-		// could never route an edit back to the right file — so the body
-		// travels exactly as it is on disk.
-		const texts: {
-			visibleName: string;
-			markdown: string;
-			parentId?: string;
-		}[] = [];
-		const { deps } = makeDeps({ format: "text" });
-		deps.client.uploadText = (visibleName, markdown, uploadOptions) => {
-			texts.push({ visibleName, markdown, parentId: uploadOptions.parentId });
-			return Promise.resolve({ deviceDocId: "device-text-1" });
-		};
-		deps.resolveParent = () => Promise.resolve("collection-7");
-		const note = {
-			...NOTE,
-			content: "---\ntitle: X\n---\nInhoud met ![[Oefening]] embed.",
-		};
-		const { result, table } = await sendNote(note, {}, deps);
-		if (!result.ok) throw new Error(`unexpected failure: ${result.error}`);
-
-		expect(texts).toEqual([
-			{
-				visibleName: "Nota",
-				markdown: "Inhoud met ![[Oefening]] embed.",
-				parentId: "collection-7",
-			},
-		]);
-		const entry = Object.values(table)[0];
-		expect(entry.format).toBe("text");
-		expect(entry.pdfLayout).toBeUndefined();
-		expect(entry.deviceDocId).toBe("device-text-1");
-	});
-
-	it("records the format of review uploads too", async () => {
-		const { deps } = makeDeps();
-		const { table } = await sendNote(NOTE, {}, deps);
-		expect(Object.values(table)[0].format).toBe("pdf");
-	});
-
-	it("fails a text send clearly when the sync API is not wired", async () => {
-		const { deps, uploads } = makeDeps({ format: "text" });
-		const { result } = await sendNote(NOTE, {}, deps);
-		expect(result).toMatchObject({ ok: false });
-		if (result.ok) throw new Error("unexpected success");
-		expect(result.error).toContain("sync API");
-		expect(uploads).toHaveLength(0);
-	});
-
-	it("skips an unchanged write-mode note in auto mode by its body hash", async () => {
-		const texts: string[] = [];
-		const { deps } = makeDeps({ format: "text", skipUnchanged: true });
-		deps.client.uploadText = (_name, markdown) => {
-			texts.push(markdown);
-			return Promise.resolve({ deviceDocId: "device-text-1" });
-		};
-		const note = {
-			...NOTE,
-			existingDocId: "0f8fad5b-d9cb-469f-a165-70867728950e",
-		};
-		const first = await sendNote(note, {}, deps);
-		if (!first.result.ok) throw new Error("unexpected failure");
-		const second = await sendNote(note, first.table, deps);
-		if (!second.result.ok) throw new Error("unexpected failure");
-		expect(second.result.skipped).toBe(true);
-		expect(texts).toHaveLength(1);
-	});
-
-	it("defaults to PDF when no format is given", async () => {
-		const { deps, uploads } = makeDeps();
-		await sendNote(NOTE, {}, deps);
-		expect(uploads[0].fileName).toBe("Nota.pdf");
+		expect(Object.values(table)[0].pdfLayout).toMatchObject({ fontSize: 13, typo: TYPO_VERSION });
 	});
 });
 
@@ -294,10 +195,10 @@ describe("sendNote folder mirroring hooks", () => {
 		});
 		const uploadArgs: (string | undefined)[] = [];
 		deps.client = {
-			upload: (fileName, bytes, uploadOptions) => {
+			uploadInk: (name, pages, uploadOptions) => {
 				uploadArgs.push(uploadOptions.parentId);
-				uploads.push({ fileName, bytes });
-				return Promise.resolve({ deviceDocId: `device-${uploads.length}` });
+				uploads.push({ name, pages });
+				return Promise.resolve({ deviceDocId: `device-${uploads.length}`, pageIds: ["p1"] });
 			},
 		};
 
@@ -339,11 +240,11 @@ describe("sendBatch", () => {
 		let calls = 0;
 		const { deps } = makeDeps({
 			client: {
-				upload: () => {
+				uploadInk: () => {
 					calls++;
 					return calls === 1
 						? Promise.reject(new Error("eerste faalt"))
-						: Promise.resolve({ deviceDocId: `device-${calls}` });
+						: Promise.resolve({ deviceDocId: `device-${calls}`, pageIds: ["p1"] });
 				},
 			},
 		});

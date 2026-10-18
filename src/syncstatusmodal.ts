@@ -22,7 +22,7 @@ export class SyncStatusModal extends Modal {
 		this.row("Queued work", String(summary.queuedWork));
 		this.row("Pending local changes", String(summary.pendingChanges));
 		this.row("Folder mirroring", this.view.mode);
-		this.row("Watch folder", this.view.watchFolder);
+		this.row("Sync folders", this.view.watchFolder);
 		this.row("Notes in watch folder", String(summary.watchNotes));
 		this.row("Watch notes not yet synced", String(summary.untrackedWatchNotes));
 		this.row("Tracked notes", String(summary.trackedNotes));

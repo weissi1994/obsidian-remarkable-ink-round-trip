@@ -1,16 +1,17 @@
 # reMarkable Ink Round-Trip
 
 A fork of [reMarkable Round-Trip](https://github.com/maxonamission/obsidian-remarkable-round-trip)
-that adds what [Remarkify](https://remarkify.app) does — your text arrives on the
-tablet as **real pen strokes**, in a handwriting font or your own hand — and keeps
-everything the round-trip already did: mark it up on paper, run one command, and
-the marks come back into the note they came from.
+that keeps your notes in **two-way sync** with the tablet as **real pen
+strokes**, in a handwriting font or your own hand (what
+[Remarkify](https://remarkify.app) does for the way out). Change the note in
+Obsidian and the notebook is rewritten; erase, move, mark or write on the tablet
+and it is merged back into the note itself.
 
 Because the strokes are real ink rather than a PDF, the tablet treats them like
-your own writing. That opens up two gestures a PDF can't support, and the import
+your own writing. That opens up two gestures a PDF can't support, and the sync
 understands both:
 
-| On the tablet | In the annotated copy |
+| On the tablet | In the note |
 |---|---|
 | **Erase** a word with the eraser | The word is removed (or struck through — your choice) |
 | **Move** words with the lasso | The words move to where you dropped them |
@@ -19,14 +20,21 @@ understands both:
 | Handwrite between the lines or in the margin | A remark callout with the image — and, opt-in, the text read by OCR |
 | Add a page to write on | The whole page as a remark, after the text it follows |
 
+Edited the note in Obsidian while the notebook was out? Both sides are merged —
+word by word within a paragraph. Only where both changed the same words does the
+note keep yours, with the tablet's version in an *Also changed on the
+reMarkable* callout right below it. Before any tablet change goes in, the
+previous version of the note is saved to the backup folder.
+
 Pictures come along too: images in the note are redrawn as **coloured hatching**
 in the tablet's inks (blue, red, green, yellow, pink, plus black and grey for
 shading) — see [Pictures](#pictures). And **Mermaid diagrams** are drawn by hand:
 traced into wobbly pen lines with labels in your handwriting — see
 [Mermaid diagrams](#mermaid-diagrams).
 
-Everything else is upstream's: the official cloud or your own rmfakecloud, folder
-mirroring, the watch folder, the PDF/EPUB/editable-text sends, companion notes.
+Kept from upstream: the official cloud or your own rmfakecloud, and folder
+mirroring. Gone: the PDF, EPUB and editable-text formats, companion notes and the
+separate send/import commands — there is one way in and out, and it is ink.
 
 ## Getting started
 
@@ -41,11 +49,15 @@ mirroring, the watch folder, the PDF/EPUB/editable-text sends, companion notes.
    paper size the tablet records in any notebook you made on it (the Paper Pro
    writes 1620×2160; the Move preset is 954×1696 @ 264 dpi until detection says
    otherwise).
-4. **Send a note as handwriting**: right-click → *Send to reMarkable as
-   handwriting*, or the command of the same name. Set *Send notes as* to
-   *Handwriting* to make it the default for every send, folders and the watch
-   folder included.
-5. **Review on the tablet**, then run **Import annotations from reMarkable**.
+4. **Pick what syncs** under *Settings → Sync*: turn on *Sync folders* and list
+   the vault folders to keep in sync. Any other note joins with right-click →
+   *Sync with reMarkable* (or the command *Sync current note with reMarkable*)
+   and stays in sync from then on.
+5. **Work on either side.** The plugin checks the tablet when Obsidian starts and
+   every few minutes (*Check the reMarkable every*, 0 = only on start and on
+   demand); **Sync with reMarkable now** does it at once. A note you change in
+   Obsidian is re-sent after a short quiet period — its notebook is read first,
+   so ink not yet in the note is never lost.
 
 ## Your own handwriting
 
@@ -167,15 +179,22 @@ and where it landed decides which word it now follows.
 ## Worth knowing
 
 - **Move a word onto a line**, between or after words — that's where it lands in
-  the copy. Moves into empty space, or into typed text you added with a Type
+  the note. Moves into empty space, or into typed text you added with a Type
   Folio, are reported but not applied.
 - **A partly erased word** (a nicked letter) stays; it's listed in the log.
-- **Edited the note since sending?** Same as upstream: the annotations come back
-  as a summary with a warning, not woven into a copy of a text they no longer
-  match. The sent text is kept in the plugin folder (`sent/`), so the import can
-  still tell your ink from ours.
+- **A re-send replaces the notebook.** After the tablet changes are merged, the
+  note goes out again as a fresh notebook and the old one moves to the tablet's
+  trash. Ink you write in the seconds between the check and the re-send is in
+  that trashed copy.
+- **Notebooks sent before two-way sync** (or as PDF, EPUB or editable text by an
+  earlier version) carry no merge base: their tablet changes are added to the
+  note as a summary block, and the next sync re-sends them as handwriting.
+- **What a mark becomes** follows *Settings → What a pen mark becomes*; a
+  strike-through, underline or highlight written into the note comes back to the
+  tablet as plain words — a notebook can't show markdown styling.
 - **Keep the plugin folder** when moving vaults: `hands/` holds your learned
-  handwriting and `sent/` the text of each handwritten send.
+  handwriting and `sent/` the text of each send — what the sync compares and
+  merges against.
 - **Inline styling** (a bold word inside a sentence) is written plain, as in the
   upstream PDF; whole bold or italic paragraphs keep their weight and slant.
 - **Pages are bigger than a PDF send.** A full page is a few hundred KB of
@@ -184,10 +203,10 @@ and where it landed decides which word it now follows.
 ## Status
 
 Tested here against the `.rm` reference implementation and its real device
-sample files (paper sizes, tombstones, lasso moves), with 537 tests passing — not
-yet on a physical tablet. The first real-device check worth doing: send a short
-note as handwriting, erase one word, lasso one word to another line, write a
-remark, and import. The log (`reMarkable Ink Round-Trip log.md`) lists for every
+sample files (paper sizes, tombstones, lasso moves), with 505 tests passing — not
+yet on a physical tablet. The first real-device check worth doing: sync a short
+note, erase one word, lasso one word to another line, write a remark, edit
+another line in Obsidian, and run *Sync with reMarkable now*. The log (`reMarkable Ink Round-Trip log.md`) lists for every
 page how many generated strokes it found intact, moved, erased and how many are
 yours.
 

@@ -34,10 +34,10 @@ import { parseRmScene } from "./incoming/rmscene";
 import type { InkImage } from "./ink/inkimage";
 import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
+import type { SentRecord } from "./sync/send";
 import type { HttpClient } from "./transport/http";
-import { readNotebook, sendNotebook } from "./transport/notebook";
+import { readNotebook, sendNotebook, type RawSyncApi } from "./transport/notebook";
 import { transcribe } from "./transport/ocr";
-import type { RawSyncApi } from "./transport/textnotebook";
 
 /** What the edge needs from the plugin; structural, so main.ts stays the owner. */
 export interface InkHost {
@@ -90,7 +90,6 @@ export class InkEdge {
 	profile(): DeviceProfile {
 		const s = this.host.settings;
 		if (s.inkDevice === "custom") return { ...s.inkCustomProfile };
-		if (s.inkDevice === "auto") return { ...DEVICE_PROFILES[s.deviceModel] };
 		return { ...DEVICE_PROFILES[s.inkDevice] };
 	}
 
@@ -182,16 +181,13 @@ export class InkEdge {
 	}
 
 	/** Keep what was sent, so the import can regenerate it after edits. */
-	async persistSent(
-		docId: string,
-		sent: {
-			title: string;
-			markdown: string;
-			images?: Record<string, InkImage>;
-			drawings?: Record<string, InkDrawing>;
-		},
-	): Promise<void> {
+	async persistSent(docId: string, sent: SentRecord): Promise<void> {
 		await this.writeJson(`${this.dir}/sent/${docId}.json`, sent);
+	}
+
+	/** What a send kept, or null when it is gone. */
+	readSent(docId: string): Promise<SentRecord | null> {
+		return this.readJson<SentRecord>(`${this.dir}/sent/${docId}.json`);
 	}
 
 	upload(api: RawSyncApi, name: string, pages: Uint8Array[], parentId?: string) {
@@ -212,16 +208,8 @@ export class InkEdge {
 		fallback?: () => Promise<{ title: string; markdown: string } | null>,
 	): Promise<InkRender | null> {
 		if (entry.ink === undefined || entry.pdfLayout === undefined) return null;
-		type Sent = {
-			title: string;
-			markdown: string;
-			images?: Record<string, InkImage>;
-			drawings?: Record<string, InkDrawing>;
-		};
-		const sent: Sent | null =
-			(await this.readJson<Sent>(
-				`${this.dir}/sent/${entry.docId}.json`,
-			)) ?? (fallback === undefined ? null : await fallback());
+		const sent: Omit<SentRecord, "body"> | null =
+			(await this.readSent(entry.docId)) ?? (fallback === undefined ? null : await fallback());
 		if (sent === null) return null;
 		await this.ensureHand(entry.ink.hand);
 		const found = inkOptionsFor(entry.ink, entry.docId, (version) => this.handFromCache(version));

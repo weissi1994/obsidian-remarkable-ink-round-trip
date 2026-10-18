@@ -3,7 +3,7 @@
 	"name": "reMarkable Ink Round-Trip",
 	"version": "1.2.0",
 	"minAppVersion": "1.13.0",
-	"description": "Send notes to your reMarkable as real handwriting — in a single-line font or your own hand — then erase, move and mark them up on the tablet and get every change back into the note. Fork of reMarkable Round-Trip.",
+	"description": "Keep notes in two-way sync with your reMarkable as real handwriting — in a single-line font or your own hand. Erase, move, mark up and write on the tablet, edit in Obsidian, and both sides are merged. Fork of reMarkable Round-Trip.",
 	"author": "Daniel (fork of Max Kloosterman's reMarkable Round-Trip)",
 	"isDesktopOnly": false
 }

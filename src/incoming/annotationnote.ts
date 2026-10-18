@@ -58,6 +58,8 @@ export interface AnnotationOutcome {
 	reason?: "no-layout" | "no-source" | "in-source-note" | "no-alignment";
 	/** Highlights whose text could not be located in the note. */
 	unplaced?: number;
+	/** Places both the note and the tablet changed (two-way merge). */
+	conflicts?: number;
 }
 
 export interface RenderedAnnotations {
@@ -234,13 +236,4 @@ export function upsertAnnotationBlock(existing: string, block: string): string {
 	if (existing.trim() === "") return `${block}\n`;
 	const separator = existing.endsWith("\n") ? "\n" : "\n\n";
 	return `${existing}${separator}${block}\n`;
-}
-
-/** Default vault path for a source note's companion annotation note. */
-export function companionPath(sourcePath: string, folder: string): string {
-	const name = sourcePath.split("/").pop() ?? sourcePath;
-	const base = name.replace(/\.md$/i, "");
-	const cleanFolder = folder.replace(/^\/+|\/+$/g, "");
-	const fileName = `${base} — annotations.md`;
-	return cleanFolder === "" ? fileName : `${cleanFolder}/${fileName}`;
 }

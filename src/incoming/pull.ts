@@ -10,14 +10,10 @@
 
 import { PdfLayout } from "../convert/pdf";
 import { MappingEntry, MappingTable } from "../id/mapping";
-import { deviceGridFor } from "./strokerender";
 import type { AnnotationOutcome } from "./annotationnote";
-import { Highlight, isHighlightFile, parseHighlightPage } from "./highlights";
-import { MarkKind, readMarks } from "./marks";
-import { deviceBoundsToPdf } from "./anchor";
-import { PageMap, parsePageEntries } from "./pagemap";
-import { describePageView, parsePageView } from "./pageview";
-import { Stroke, parseRmPage } from "./rmlines";
+import type { Highlight } from "./highlights";
+import type { MarkKind } from "./marks";
+import type { Stroke } from "./rmlines";
 import type { InkRender } from "../ink/inkrender";
 import { collectInkAnnotations } from "./inkpull";
 
@@ -203,7 +199,7 @@ export interface PullSuccess {
 	/** True when nothing changed on the device and the note was left alone. */
 	skipped?: boolean;
 	/** Why it was skipped, for the diagnostic report. */
-	skipReason?: "unchanged" | "not-on-device" | "superseded" | "write-mode";
+	skipReason?: "unchanged" | "not-on-device" | "superseded" | "legacy";
 	/**
 	 * The mapping was dropped because the document no longer exists on the
 	 * account (GP_E5_S17). The note keeps its id; re-sending re-links it.
@@ -245,193 +241,6 @@ export function mergePullMappings(
 	return merged;
 }
 
-/**
- * Collect the highlights of one device document, ordered by page, together
- * with a scan of what the document actually held. The scan is what makes an
- * empty result explainable: no highlight files at all means the annotations
- * are pen strokes, not selected text (GP_E3_S6).
- */
-export async function collectHighlights(
-	entry: MappingEntry,
-	hash: string,
-	deps: PullDeps,
-): Promise<{
-	highlights: Highlight[];
-	scan: DocumentScan;
-	marks: ImportedMark[];
-}> {
-	const deviceDocId = entry.deviceDocId;
-	const allFiles = await deps.listDocumentFiles(deviceDocId, hash);
-	const files = allFiles.filter((file) => isHighlightFile(file.id));
-	const strokeFiles = allFiles.filter((file) => file.id.endsWith(".rm"));
-	// Names, not just counts: the beta showed highlights on the device that
-	// never arrived, and only the actual file list can settle why (GP_E3_S9).
-	deps.log?.(`  files: ${allFiles.map((file) => file.id).join(", ")}`);
-	const scan: DocumentScan = {
-		totalFiles: allFiles.length,
-		highlightFiles: files.length,
-		strokeFiles: strokeFiles.length,
-		parsedHighlights: 0,
-		unreadableFiles: 0,
-		renderedPages: 0,
-		renderedRemarks: 0,
-		anchoredRemarks: 0,
-		interpretedMarks: 0,
-		highlightsInStrokes: 0,
-		addedPages: 0,
-	};
-	if (deps.checkSource) {
-		// Diagnosis, not a precondition: if the vault cannot answer, the
-		// annotations still come back — one unreadable note must not cost them.
-		scan.sourceState = await deps.checkSource(entry).catch((error: unknown) => {
-			deps.log?.(`  source check failed: ${String(error)}`);
-			return undefined;
-		});
-		if (scan.sourceState !== undefined && scan.sourceState !== "match") {
-			deps.log?.(`  source note: ${scan.sourceState}`);
-		}
-	}
-	const pages = await readPageMap(deviceDocId, allFiles, deps, scan);
-	const { marks, highlights: inkHighlights } = await readStrokePages(
-		entry,
-		strokeFiles,
-		pages,
-		deps,
-		scan,
-	);
-	deps.log?.(
-		`  totals: ${scan.totalFiles} files, ${scan.highlightFiles} highlight, ${scan.strokeFiles} stroke (.rm)`,
-	);
-	if (files.length === 0) {
-		scan.parsedHighlights = inkHighlights.length;
-		return { highlights: inkHighlights, scan, marks };
-	}
-
-	const perFile: { page: number; highlights: Highlight[] }[] = [];
-	for (const file of files) {
-		// Unknown pages sort last but keep a stable order among themselves.
-		const page = pages.forFile(file.id) ?? Number.MAX_SAFE_INTEGER;
-		let text: string;
-		try {
-			text = await deps.readFile(file);
-		} catch (error) {
-			scan.unreadableFiles++;
-			deps.log?.(
-				`  could not read ${file.id}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			continue; // one unreadable page must not sink the document (N3)
-		}
-		const highlights = parseHighlightPage(
-			text,
-			page === Number.MAX_SAFE_INTEGER ? undefined : page,
-		);
-		deps.log?.(
-			`  ${file.id}: ${highlights.length} highlight(s) parsed from ${text.length} bytes`,
-		);
-		if (highlights.length > 0) perFile.push({ page, highlights });
-	}
-
-	perFile.sort((a, b) => a.page - b.page);
-	// Both sources carry a page number, so merge and order by page.
-	const highlights = [
-		...inkHighlights,
-		...perFile.flatMap((item) => item.highlights),
-	].sort(
-		(a, b) =>
-			(a.page ?? Number.MAX_SAFE_INTEGER) - (b.page ?? Number.MAX_SAFE_INTEGER),
-	);
-	scan.parsedHighlights = highlights.length;
-	return { highlights, scan, marks };
-}
-
-/** Page order from the document's `.content`; empty map when unavailable. */
-export async function readPageMap(
-	deviceDocId: string,
-	allFiles: DocumentFile[],
-	deps: PullDeps,
-	scan: DocumentScan,
-): Promise<PageMap> {
-	const content = allFiles.find((file) => file.id === `${deviceDocId}.content`);
-	if (content === undefined) return new PageMap([]);
-	try {
-		const json = await deps.readFile(content);
-		const entries = parsePageEntries(json);
-		const added = entries.filter((entry) => entry.pdfPage === null).length;
-		deps.log?.(
-			`  page order: ${entries.length} page(s) listed in .content` +
-				(added > 0 ? `, ${added} added on the device` : "") +
-				` — ${entries.map((entry) => entry.pdfPage ?? "added").join(",")}`,
-		);
-		// How the device was showing the page: the prime suspect behind ink
-		// that lands on the wrong line (GP_E3_S15).
-		const view = describePageView(parsePageView(json));
-		deps.log?.(`  page view: ${view === "" ? "(nothing recorded)" : view}`);
-		return new PageMap(entries);
-	} catch (error) {
-		scan.unreadableFiles++;
-		deps.log?.(
-			`  could not read the page order: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return new PageMap([]);
-	}
-}
-
-/**
- * A page added on the device, rendered whole.
- *
- * The reMarkable can insert a blank page into a PDF to write on. It carries
- * no source text, so none of the mark reading applies — but it is often where
- * the real thinking ends up, and until now it came back as a handful of
- * disconnected drawings anchored to whatever happened to sit at those
- * coordinates in the source (owner, 2026-07-28).
- *
- * It is placed after the last line of the source page it follows, which is
- * where the reader turned the page to write it.
- */
-async function readAddedPage(
-	entry: MappingEntry,
-	file: DocumentFile,
-	strokes: Stroke[],
-	pages: PageMap,
-	layout: PdfLayout | null,
-	deps: PullDeps,
-): Promise<{ page: number | undefined; mark: ImportedMark } | null> {
-	if (deps.renderStrokes === undefined || strokes.length === 0) return null;
-	const position = pages.positionOf(file.id);
-	const after = pages.precedingPdfPage(file.id);
-	const path = await deps.renderStrokes({
-		deviceDocId: entry.deviceDocId,
-		strokes,
-		page: position ?? 0,
-		remark: 1,
-	});
-	if (path === null) return null;
-	return {
-		// Ordered as the page that precedes it, so it lands in reading order.
-		page: after,
-		mark: {
-			kind: "note",
-			page: after,
-			addedPage: position,
-			quote: after === undefined ? undefined : lastLineOf(layout, after),
-			path,
-		},
-	};
-}
-
-/** The last line of a page, for anchoring what was written after it. */
-function lastLineOf(
-	layout: PdfLayout | null,
-	page: number,
-): string | undefined {
-	if (layout === null) return undefined;
-	const onPage = layout.lines.filter((line) => line.page === page);
-	if (onPage.length === 0) return undefined;
-	const lowest = onPage.reduce((best, line) => (line.y < best.y ? line : best));
-	const text = lowest.text.trim();
-	return text === "" ? undefined : text;
-}
-
 /** Kinds the text says everything about; a picture of the ink adds nothing. */
 export const TEXT_ONLY_KINDS = new Set<MarkKind>([
 	"strikethrough",
@@ -446,212 +255,6 @@ export const TEXT_ONLY_KINDS = new Set<MarkKind>([
 	"erased",
 	"moved",
 ]);
-
-/**
- * Read every annotated page: marks come back as typed text, handwriting as an
- * image with the line it sits against. Failures cost that page only (N3).
- */
-async function readStrokePages(
-	entry: MappingEntry,
-	strokeFiles: DocumentFile[],
-	pages: PageMap,
-	deps: PullDeps,
-	scan: DocumentScan,
-): Promise<{ marks: ImportedMark[]; highlights: Highlight[] }> {
-	const empty = { marks: [], highlights: [] };
-	// Only the byte reader is essential: the pen layer also carries the text
-	// highlights, so it must be read even when handwriting import is off.
-	if (!deps.readBytes || strokeFiles.length === 0) return empty;
-
-	let layout: PdfLayout | null = null;
-	try {
-		layout = deps.loadLayout ? await deps.loadLayout(entry) : null;
-	} catch (error) {
-		deps.log?.(
-			`  no anchoring: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	if (layout === null) scan.anchorSkipped = "no-layout";
-
-	const collected: {
-		page: number | undefined;
-		order: number;
-		mark: ImportedMark;
-	}[] = [];
-	const highlights: Highlight[] = [];
-	for (const [index, file] of strokeFiles.entries()) {
-		// Falling back to the file's ordinal keeps a number on the image when
-		// `.content` was unreadable — flagged as such, never presented as the
-		// document page.
-		const page = pages.forFile(file.id);
-		try {
-			const bytes = await deps.readBytes(file);
-			const rm = parseRmPage(bytes);
-			// The "smart" highlighter writes its text into the same page file
-			// as the strokes on this firmware (GP_E3_S11).
-			for (const found of rm.highlights) {
-				highlights.push({
-					text: found.text,
-					color: found.color,
-					rgb: found.rgb,
-					page,
-				});
-				scan.highlightsInStrokes++;
-			}
-			if (rm.highlights.length > 0) {
-				// Raw colour values: the mapping to names is a guess until a
-				// real device confirms it (GP_E3_S12).
-				for (const found of rm.highlights) {
-					deps.log?.(
-						`    highlight fields ${Object.entries(found.fields ?? {})
-							.map(([tag, value]) => `${tag}=${value}`)
-							.join(",")} coords ${(found.coords ?? []).join(" ")} ` +
-							`head ${found.head ?? ""} tail ${found.tail ?? ""}`,
-					);
-				}
-			}
-			// A page the reader added on the device shows none of the source, so
-			// there is nothing to anchor its ink to and nothing to interpret:
-			// it is a sheet of notes, and it comes back whole (GP_E3_S20).
-			if (pages.isAdded(file.id)) {
-				const added = await readAddedPage(
-					entry,
-					file,
-					rm.strokes,
-					pages,
-					layout,
-					deps,
-				);
-				if (added !== null) {
-					collected.push({ page: added.page, order: 0, mark: added.mark });
-					scan.addedPages++;
-					scan.renderedPages++;
-					scan.renderedRemarks++;
-					if (added.mark.quote !== undefined) scan.anchoredRemarks++;
-				}
-				deps.log?.(
-					`  ${file.id}: page ${pages.positionOf(file.id) ?? "?"} was added on the device, ` +
-						`${rm.strokes.length} stroke(s)${added === null ? " — not rendered" : ""}`,
-				);
-				continue;
-			}
-			const marks = readMarks(
-				rm.strokes,
-				page ?? 0,
-				page === undefined ? null : layout,
-			);
-			// Raw ink geometry, so a mark that lands on the wrong line can be
-			// measured instead of guessed at (GP_E3_S15). Device units in,
-			// distance from the top of the page out — the two numbers that say
-			// whether the origin or the scale is wrong.
-			//
-			// The page's task boxes ride along in the same device units
-			// (devicecheck 2026-08-19: ticks drawn ON the boxes read as 20+
-			// points beside them — ink and box lines side by side make any
-			// systematic offset directly measurable from one field log).
-			if (marks.length > 0 && layout !== null && page !== undefined) {
-				const grid = deviceGridFor(layout);
-				const toDeviceX = (v: number) =>
-					(v / layout.pageWidth) * grid.width - grid.width / 2;
-				const toDeviceY = (v: number) =>
-					((layout.pageHeight - v) / layout.pageHeight) * grid.height;
-				for (const line of layout.lines) {
-					const box = line.checkbox;
-					if (line.page !== page || box === undefined) continue;
-					deps.log?.(
-						`    task box x ${toDeviceX(box.x).toFixed(0)}–${toDeviceX(box.x + box.size).toFixed(0)}, ` +
-							`y ${toDeviceY(box.y + box.size).toFixed(0)}–${toDeviceY(box.y).toFixed(0)} ` +
-							`“${line.text.slice(0, 40)}”`,
-					);
-				}
-			}
-			for (const mark of marks) {
-				const band =
-					layout === null
-						? ""
-						: (() => {
-								const pdf = deviceBoundsToPdf(mark.bounds, layout);
-								return ` → page top ${(layout.pageHeight - pdf.maxY).toFixed(1)}–${(
-									layout.pageHeight - pdf.minY
-								).toFixed(1)}`;
-							})();
-				deps.log?.(
-					`    ${mark.kind} ink x ${mark.bounds.minX.toFixed(0)}–${mark.bounds.maxX.toFixed(0)}, ` +
-						`y ${mark.bounds.minY.toFixed(0)}–${mark.bounds.maxY.toFixed(0)}${band}` +
-						`${mark.target === undefined ? "" : ` on “${mark.target}”`}`,
-				);
-			}
-			let onThisPage = 0;
-			for (const [position, mark] of marks.entries()) {
-				const needsImage = !TEXT_ONLY_KINDS.has(mark.kind);
-				let path: string | undefined;
-				if (needsImage && deps.renderStrokes === undefined) {
-					continue; // handwriting import is off; nothing to show
-				}
-				if (needsImage && deps.renderStrokes !== undefined) {
-					const rendered = await deps.renderStrokes({
-						deviceDocId: entry.deviceDocId,
-						strokes: mark.strokes,
-						page: page ?? index + 1,
-						remark: position + 1,
-					});
-					// Ink that renders to nothing is not worth a line in the note.
-					if (rendered === null) continue;
-					path = rendered;
-				} else {
-					scan.interpretedMarks++;
-				}
-				if (mark.target !== undefined || mark.quote !== undefined)
-					scan.anchoredRemarks++;
-				collected.push({
-					page,
-					order: position,
-					mark: {
-						kind: mark.kind,
-						page,
-						target: mark.target,
-						words: mark.words,
-						blocks: mark.blocks,
-						quote: mark.quote,
-						path,
-					},
-				});
-				onThisPage++;
-			}
-			if (onThisPage > 0) {
-				scan.renderedPages++;
-				scan.renderedRemarks += onThisPage;
-			}
-			deps.log?.(
-				`  ${file.id}: page ${page ?? "?"}, ${marks.length} mark(s) — ` +
-					`${marks.map((mark) => mark.kind).join(", ")}; ` +
-					`${rm.highlights.length} highlight(s); ` +
-					`blocks ${Object.entries(rm.blockTypes)
-						.map(([type, count]) => `0x0${type}×${count}`)
-						.join(" ")}`,
-			);
-		} catch (error) {
-			scan.unreadableFiles++;
-			deps.log?.(
-				`  could not read ${file.id}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-	}
-
-	// Document order, not the order the cloud happened to list the files in —
-	// the beta returned pages 2, 4, 3, 1 (GP_E3_S9). Highlights need the same
-	// treatment: they came out in stroke-file order (GP_E3_S12).
-	collected.sort(
-		(a, b) => (a.page ?? Infinity) - (b.page ?? Infinity) || a.order - b.order,
-	);
-	highlights.sort((a, b) => (a.page ?? Infinity) - (b.page ?? Infinity));
-	deps.log?.(
-		`  ${scan.renderedRemarks} mark(s) on ${scan.renderedPages} page(s), ` +
-			`${scan.interpretedMarks} read as text, ${scan.anchoredRemarks} tied to the source, ` +
-			`${scan.highlightsInStrokes} highlight(s) from the pen layer`,
-	);
-	return { marks: collected.map((item) => item.mark), highlights };
-}
 
 /**
  * Import annotations for every known mapping. Never throws: each document
@@ -732,20 +335,17 @@ export async function pullAnnotations(
 					skipReason: "not-on-device",
 					removed: prune ? true : undefined,
 				};
-			} else if (entry.format === "text") {
-				// A write-mode notebook (GP_E7_S2) carries typed text, not
-				// annotations on a review copy; its import is the write-mode
-				// route (GP_E7_S3), and reading it as ink would find nothing.
-				deps.log?.(
-					"  editable-text document — the annotation import does not apply",
-				);
+			} else if (entry.format !== "ink") {
+				// Sent as PDF, EPUB or editable text by an earlier version: not
+				// read any more. The next sync re-sends the note as handwriting.
+				deps.log?.(`  ${entry.format ?? "pdf"} document from an earlier version — not read`);
 				result = {
 					ok: true,
 					docId: entry.docId,
 					notePath: entry.notePath,
 					highlightCount: 0,
 					skipped: true,
-					skipReason: "write-mode",
+					skipReason: "legacy",
 				};
 			} else if (!deps.force && entry.importedHash === hash) {
 				deps.log?.(
@@ -760,12 +360,7 @@ export async function pullAnnotations(
 					skipReason: "unchanged",
 				};
 			} else {
-				// Ink fork: a handwritten notebook is diffed against the strokes
-				// the plugin wrote; everything else is a review copy.
-				const { highlights, scan, marks } =
-					entry.format === "ink"
-						? await collectInkAnnotations(entry, hash, deps)
-						: await collectHighlights(entry, hash, deps);
+				const { highlights, scan, marks } = await collectInkAnnotations(entry, hash, deps);
 				const written = await deps.writeAnnotations(
 					entry,
 					highlights,

@@ -1,18 +1,15 @@
 /**
- * Markdown blocks → e-ink friendly PDF (PRD F3, K1, N7).
+ * Markdown blocks → page layout (PRD F3, K1).
  *
- * Pure JS/TS typesetting on top of pdf-lib: no Electron `printToPDF`, no
- * shell-outs, so the same path runs on Obsidian mobile. Layout targets the
- * reMarkable 2 screen (1404×1872 px @ 226 DPI ≈ 447×596 pt) so pages map
- * 1:1 onto the device — a stable page grid is the anchor the round-trip
- * (F10–F12) will rely on.
+ * The typesetter behind every handwritten notebook: it lays out the note on
+ * a fixed page grid and records where each word landed — the anchor every
+ * imported mark is read against. What it draws on is a seam (TypesetBackend);
+ * the ink renderer records the calls and turns them into pen strokes.
  *
- * Standard fonts only (WinAnsi): full Latin-1 coverage (fine for NL/EN docs);
- * characters outside WinAnsi are replaced by a close ASCII fallback. Embedding
- * a Unicode font is a known follow-up.
+ * Standard-font metrics and WinAnsi text: characters outside WinAnsi are
+ * replaced by a close ASCII fallback, so layouts replay exactly.
  */
 
-import { PDFDocument, PDFFont, PDFImage, PDFPage, StandardFonts, rgb } from "pdf-lib";
 import {
 	dropLeadingTitleHeading,
 	imagePlaceholderText,
@@ -63,15 +60,6 @@ export interface PdfLayoutOptions {
 	 */
 	packSections?: boolean;
 }
-
-export interface PdfMetadata {
-	title: string;
-	/** Stable document ID (F5); stored in the PDF's Subject field. */
-	docId: string;
-}
-
-/** Marker prefix used to carry the document ID inside PDF metadata. */
-export const DOCID_SUBJECT_PREFIX = "remarkable-round-trip:docid:";
 
 /** A single word and where it starts, for word-level anchoring (GP_E3_S9). */
 export interface PlacedWord {
@@ -245,8 +233,14 @@ export interface MeasureFont {
 	widthOfTextAtSize(text: string, size: number): number;
 }
 
-/** Colour as the drawing calls pass it; opaque to the typesetter. */
-export type DrawColor = ReturnType<typeof rgb>;
+/** Colour as the drawing calls pass it, components 0–1. */
+export interface DrawColor {
+	red: number;
+	green: number;
+	blue: number;
+}
+
+const rgb = (red: number, green: number, blue: number): DrawColor => ({ red, green, blue });
 
 /**
  * The drawing surface of one page: exactly the three PDFPage calls the
@@ -1074,74 +1068,6 @@ function measureBlocks(ts: Typesetter, blocks: Block[]): number {
 	ts.y = saved.y;
 	ts.code = saved.code;
 	return used;
-}
-
-export interface PdfRender {
-	bytes: Uint8Array;
-	/** Where the text landed, for anchoring imported ink (GP_E3_S8). */
-	layout: PdfLayout;
-}
-
-/**
- * Render blocks to PDF bytes. The note title becomes an H1-style document
- * header; the document ID lands in the PDF Subject for round-trip detection.
- *
- * Returns the layout map alongside the bytes: rendering and measuring are the
- * same pass, so the two can never disagree about where a sentence sits.
- */
-export async function renderPdf(
-	blocks: Block[],
-	meta: PdfMetadata,
-	options: PdfLayoutOptions = {},
-): Promise<PdfRender> {
-	const doc = await PDFDocument.create();
-	doc.setTitle(meta.title);
-	doc.setSubject(`${DOCID_SUBJECT_PREFIX}${meta.docId}`);
-	doc.setCreator("reMarkable Round-Trip (Obsidian plugin)");
-
-	const fonts = {
-		body: await doc.embedFont(StandardFonts.Helvetica),
-		bold: await doc.embedFont(StandardFonts.HelveticaBold),
-		italic: await doc.embedFont(StandardFonts.HelveticaOblique),
-		mono: await doc.embedFont(StandardFonts.Courier),
-	};
-	// Image PNGs embed once, up front: embedPng is async, the draw loop is
-	// not (fork: image blocks). A block without a handle (import-time layout
-	// replay carries geometry only) reserves its space and draws nothing.
-	const embedded = new Map<Block, PDFImage>();
-	for (const block of blocks) {
-		if (block.type === "image" && block.png !== undefined) {
-			embedded.set(block, await doc.embedPng(block.png));
-		}
-	}
-	const layout = typesetBlocks(blocks, meta.title, options, pdfBackend(doc, fonts, embedded));
-	return { bytes: await doc.save(), layout };
-}
-
-/** pdf-lib behind the typesetter's drawing seam. */
-function pdfBackend(
-	doc: PDFDocument,
-	fonts: { body: PDFFont; bold: PDFFont; italic: PDFFont; mono: PDFFont },
-	embedded: Map<Block, PDFImage>,
-): TypesetBackend {
-	// The typesetter only ever hands back the fonts it was given, so the
-	// MeasureFont it passes to drawText is one of these PDFFonts.
-	const asPdfFont = (font: MeasureFont) => font as PDFFont;
-	return {
-		...fonts,
-		addPage(width, height) {
-			const page: PDFPage = doc.addPage([width, height]);
-			return {
-				drawText: (text, o) => page.drawText(text, { ...o, font: asPdfFont(o.font) }),
-				drawLine: (o) => page.drawLine(o),
-				drawRectangle: (o) => page.drawRectangle(o),
-				drawPng: (block, o) => {
-					const handle = embedded.get(block);
-					if (handle !== undefined) page.drawImage(handle, o);
-				},
-			};
-		},
-	};
 }
 
 /**
