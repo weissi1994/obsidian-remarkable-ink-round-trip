@@ -15,42 +15,44 @@
  */
 
 import { GlyphSource, resolveGlyph } from "../ink/glyphs";
-import type { Lexicon, Point } from "./recognize";
+import type { Lexicon, Point, WholeWordReader } from "./recognize";
 
 const N = 48;
 const PROFILE_BINS = 8;
 
 interface Trace {
 	points: Point[];
-	/** Width in x-heights. */
+	/** Width in units of the word's height. */
 	width: number;
 	profile: Float32Array;
 }
 
-function quantile(sorted: number[], q: number): number {
-	return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * q)))];
-}
-
-/** Main strokes left to right as one polyline: dots and small marks left out. */
+/** Main strokes as one polyline, in pen order: only dots left out. */
 function mainLine(strokes: Point[][]): Point[] {
-	const boxes = strokes.map((stroke) => {
-		let minX = Infinity;
-		let maxX = -Infinity;
-		let minY = Infinity;
-		let maxY = -Infinity;
-		for (const p of stroke) {
-			minX = Math.min(minX, p.x);
-			maxX = Math.max(maxX, p.x);
-			minY = Math.min(minY, p.y);
-			maxY = Math.max(maxY, p.y);
-		}
-		return { stroke, minX, size: Math.max(maxX - minX, maxY - minY) };
-	});
-	const largest = Math.max(...boxes.map((b) => b.size), 0);
-	return boxes
-		.filter((b) => b.size >= largest * 0.25)
-		.sort((a, b) => a.minX - b.minX)
-		.flatMap((b) => b.stroke);
+	let top = Infinity;
+	let bottom = -Infinity;
+	for (const p of strokes.flat()) {
+		top = Math.min(top, p.y);
+		bottom = Math.max(bottom, p.y);
+	}
+	const height = bottom - top || 1;
+	// Joined-up strokes overlap, so where they start says little: the order
+	// they were drawn in is the word's own order.
+	return strokes
+		.filter((stroke) => {
+			let minX = Infinity;
+			let maxX = -Infinity;
+			let minY = Infinity;
+			let maxY = -Infinity;
+			for (const p of stroke) {
+				minX = Math.min(minX, p.x);
+				maxX = Math.max(maxX, p.x);
+				minY = Math.min(minY, p.y);
+				maxY = Math.max(maxY, p.y);
+			}
+			return Math.max(maxX - minX, maxY - minY) >= height * 0.12;
+		})
+		.flat();
 }
 
 function resample(points: Point[], n: number): Point[] {
@@ -76,31 +78,27 @@ function resample(points: Point[], n: number): Point[] {
 }
 
 /**
- * A word's trace in its own x-height units (y down, baseline at 0): where
- * most of the ink sits gives the baseline and the middle line, whatever the
- * size of the writing.
+ * A word's trace in units of its own height (y down, top at 0): the same
+ * word comes out the same whatever the size of the writing.
  */
 export function traceOf(strokes: Point[][]): Trace | null {
 	const line = mainLine(strokes.filter((s) => s.length > 0));
 	if (line.length < 2) return null;
 	const sampled = resample(line, N);
-	const ys = sampled.map((p) => p.y).sort((a, b) => a - b);
-	const baseline = quantile(ys, 0.85);
-	const middle = quantile(ys, 0.2);
-	const xh = baseline - middle || 1;
 	const minX = Math.min(...sampled.map((p) => p.x));
-	const points = sampled.map((p) => ({ x: (p.x - minX) / xh, y: (p.y - baseline) / xh }));
+	const minY = Math.min(...sampled.map((p) => p.y));
+	const height = Math.max(...sampled.map((p) => p.y)) - minY || 1;
+	const points = sampled.map((p) => ({ x: (p.x - minX) / height, y: (p.y - minY) / height }));
 	const width = Math.max(...points.map((p) => p.x)) || 1;
 	const profile = new Float32Array(PROFILE_BINS * 2);
-	for (let bin = 0; bin < PROFILE_BINS; bin++) {
-		profile[bin * 2] = 0;
-		profile[bin * 2 + 1] = -1;
-	}
+	profile.fill(Number.NaN);
 	for (const p of points) {
 		const bin = Math.min(PROFILE_BINS - 1, Math.floor((p.x / width) * PROFILE_BINS));
-		profile[bin * 2] = Math.max(profile[bin * 2], p.y);
-		profile[bin * 2 + 1] = Math.min(profile[bin * 2 + 1], p.y);
+		profile[bin * 2] = Number.isNaN(profile[bin * 2]) ? p.y : Math.max(profile[bin * 2], p.y);
+		profile[bin * 2 + 1] = Number.isNaN(profile[bin * 2 + 1]) ? p.y : Math.min(profile[bin * 2 + 1], p.y);
 	}
+	// A bin the pen skipped over sits in the middle.
+	for (let i = 0; i < profile.length; i++) if (Number.isNaN(profile[i])) profile[i] = 0.5;
 	return { points, width, profile };
 }
 
@@ -165,26 +163,38 @@ function written(word: string, source: GlyphSource, fallback: GlyphSource): Poin
 }
 
 export interface WordMatch {
-	/** The word as the vault usually spells it. */
+	/** The word as the vault usually spells it, or as the owner wrote it. */
 	word: string;
-	/** Mean trace distance in x-heights; lower is closer. */
+	/** Mean trace distance in word heights; lower is closer. */
 	cost: number;
+	/** Close enough to put in the note. */
+	trusted: boolean;
 }
 
-/** Joined-up word reader over a set of letter sources (script fonts, the owner's hand). */
-export class WordReader {
+/**
+ * How close a match must be to be trusted. A word the owner wrote before
+ * varies only as handwriting does; a font is a different hand altogether,
+ * so only a near-exact match to one counts.
+ */
+export const SAMPLE_TRUST = 0.2;
+export const FONT_TRUST = 0.08;
+
+/** Joined-up word reader: the owner's own word samples, then script fonts over the vault's words. */
+export class WordReader implements WholeWordReader {
 	private readonly traces = new Map<string, Trace | null>();
-	private readonly xHeights: number[];
+	private readonly samples: { word: string; trace: Trace }[] = [];
 
 	constructor(
 		private readonly sources: GlyphSource[],
 		private readonly fallback: GlyphSource,
+		samples: Record<string, Point[][][]> = {},
 	) {
-		this.xHeights = sources.map((source) => {
-			const x = resolveGlyph("x", source, fallback);
-			const ys = x.strokes.flatMap((flat) => flat.filter((_, i) => i % 2 === 1));
-			return ys.length === 0 ? 0.7 : Math.max(...ys) - Math.min(...ys) || 0.7;
-		});
+		for (const [word, written] of Object.entries(samples)) {
+			for (const strokes of written) {
+				const trace = traceOf(strokes);
+				if (trace !== null) this.samples.push({ word, trace });
+			}
+		}
 	}
 
 	private traceFor(word: string, source: number): Trace | null {
@@ -197,24 +207,39 @@ export class WordReader {
 		return trace;
 	}
 
-	/** Width of a word in a source, in x-heights, from advances alone. */
+	/** Width of a word in a source, in cap heights, from advances alone. */
 	private estimatedWidth(word: string, source: number): number {
 		let width = 0;
 		for (const ch of word) width += resolveGlyph(ch, this.sources[source], this.fallback).advance;
-		return width / this.xHeights[source];
+		return width;
 	}
 
-	/** The vault word whose written trace is closest to `strokes`, if any. */
-	read(strokes: Point[][], lexicon: Lexicon): WordMatch | null {
+	/** The closest word: among the owner's samples first, then the vault's words in the fonts. */
+	read(strokes: Point[][], lexicon: Lexicon | undefined): WordMatch | null {
 		const trace = traceOf(strokes);
 		if (trace === null) return null;
+		let own: WordMatch | null = null;
+		for (const sample of this.samples) {
+			const ratio = sample.trace.width / trace.width;
+			if (ratio < 0.6 || ratio > 1.7) continue;
+			const cost = dtw(trace, sample.trace) + 0.2 * Math.abs(Math.log(ratio));
+			if (own === null || cost < own.cost) own = { word: sample.word, cost, trusted: cost < SAMPLE_TRUST };
+		}
+		if (own?.trusted === true || lexicon === undefined || this.sources.length === 0) return own;
+		const font = this.readFonts(trace, lexicon);
+		if (own === null) return font;
+		if (font === null) return own;
+		return font.trusted && font.cost < own.cost ? font : own;
+	}
+
+	private readFonts(trace: Trace, lexicon: Lexicon): WordMatch | null {
 		const shortlist: { word: string; source: number; score: number }[] = [];
 		for (const [, form] of lexicon.words()) {
 			if (!/^\p{L}+$/u.test(form)) continue;
 			for (let source = 0; source < this.sources.length; source++) {
 				// Advances only roughly predict a trace's width: a loose cut first.
 				const estimate = this.estimatedWidth(form, source) / trace.width;
-				if (estimate < 0.4 || estimate > 2.5) continue;
+				if (estimate < 0.3 || estimate > 3.5) continue;
 				const candidate = this.traceFor(form, source);
 				if (candidate === null) continue;
 				const ratio = candidate.width / trace.width;
@@ -231,7 +256,7 @@ export class WordReader {
 		for (const { word, source } of shortlist.slice(0, 150)) {
 			const candidate = this.traceFor(word, source)!;
 			const cost = dtw(trace, candidate) + 0.2 * Math.abs(Math.log(candidate.width / trace.width));
-			if (best === null || cost < best.cost) best = { word, cost };
+			if (best === null || cost < best.cost) best = { word, cost, trusted: cost < FONT_TRUST };
 		}
 		return best;
 	}

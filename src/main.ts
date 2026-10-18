@@ -56,6 +56,8 @@ import { DOCID_FRONTMATTER_KEY } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
+import { WordReader } from "./ocr/words";
+import { learnFromNotes, rememberRemark } from "./ocr/samples";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -115,6 +117,8 @@ export default class RoundTripPlugin extends Plugin {
 	/** Built-in OCR: templates per handwriting version, the vault's words per run. */
 	private templates: { key: string; templates: Template[] } | null = null;
 	private lexicon: Promise<Lexicon> | null = null;
+	private words: WordReader | null = null;
+	private samplesDirty = false;
 	private syncTimer: number | null = null;
 	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
 	readonly ink = ((plugin: RoundTripPlugin) =>
@@ -248,6 +252,16 @@ export default class RoundTripPlugin extends Plugin {
 			id: "learn-handwriting-variants",
 			name: "Add handwriting variations from the sheet",
 			callback: () => void this.learnHandwriting(true),
+		});
+		this.addCommand({
+			id: "send-word-sheet",
+			name: "Send joined-up word sheet to reMarkable",
+			callback: () => void this.sendWordSheet(),
+		});
+		this.addCommand({
+			id: "learn-word-sheet",
+			name: "Learn my joined-up words from the sheet",
+			callback: () => void this.learnWordSheet(),
 		});
 		this.addCommand({
 			id: "detect-page-size",
@@ -978,7 +992,11 @@ export default class RoundTripPlugin extends Plugin {
 		const log: string[] = [];
 		this.inkCache.clear();
 		this.lexicon = null;
+		this.words = null;
 		await this.reconcileNotePaths((line) => log.push(line));
+		await this.learnFromCorrections((line) => log.push(line)).catch((error: unknown) =>
+			log.push(`learning from corrections failed: ${String(error)}`),
+		);
 		const startedAt = new Date().toISOString().slice(0, 16).replace("T", " ");
 		const notice = quiet ? null : this.progress(`Checking ${mappings} notebook(s) on the reMarkable…`);
 		try {
@@ -1028,6 +1046,10 @@ export default class RoundTripPlugin extends Plugin {
 			// drops what the run found gone from the account (GP_E5_S17).
 			this.settings.mappings = mergePullMappings(this.settings.mappings, scope, table);
 			await this.persistSettings();
+			if (this.samplesDirty) {
+				await this.ink.saveSamples();
+				this.samplesDirty = false;
+			}
 
 			const eventful = results.some(
 				(r) => !r.ok || r.removed === true || r.scan?.written !== undefined,
@@ -1345,8 +1367,55 @@ export default class RoundTripPlugin extends Plugin {
 	 */
 	private async recognizeLocally(request: StrokeRenderRequest): Promise<string | null> {
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
-		const result = recognize(strokes, await this.ocrTemplates(), await this.vaultLexicon());
-		return result !== null && result.confidence >= OCR_TRUST ? result.text : null;
+		const result = recognize(strokes, await this.ocrTemplates(), await this.vaultLexicon(), await this.wordReader());
+		const text = result !== null && result.confidence >= OCR_TRUST ? result.text : null;
+		// Kept so a correction in the note — or text typed under an image-only
+		// remark — can teach the reader this hand.
+		if (this.settings.importHandwriting) {
+			rememberRemark(await this.ink.loadSamples(), this.remarkImagePath(request), strokes, text ?? "", new Date());
+			this.samplesDirty = true;
+		}
+		return text;
+	}
+
+	/** Joined-up words: the owner's own samples, then the bundled script fonts. */
+	private async wordReader(): Promise<WordReader> {
+		if (this.words === null) {
+			const store = await this.ink.loadSamples();
+			this.words = new WordReader(
+				[builtinFont("allure"), builtinFont("hershey-script")],
+				builtinFont("readability"),
+				store.words,
+			);
+		}
+		return this.words;
+	}
+
+	/**
+	 * Learn from remark texts the owner corrected or typed in since the last
+	 * sync (ocr/samples.ts). Runs before new remarks are read, so they
+	 * benefit at once.
+	 */
+	private async learnFromCorrections(log: (line: string) => void): Promise<void> {
+		if (this.settings.ocrMode !== "builtin") return;
+		const store = await this.ink.loadSamples();
+		const paths = new Set(Object.keys(store.remarks));
+		if (paths.size === 0) return;
+		const notes = new Map<string, string>();
+		for (const [source, links] of Object.entries(this.app.metadataCache.resolvedLinks)) {
+			const embedded = Object.keys(links).filter((path) => paths.has(path));
+			if (embedded.length === 0) continue;
+			const file = this.app.vault.getFileByPath(source);
+			if (file === null) continue;
+			const text = await this.app.vault.cachedRead(file);
+			for (const path of embedded) notes.set(path, text);
+		}
+		const learned = learnFromNotes(store, (path) => notes.get(path) ?? null);
+		if (learned.remarks > 0) {
+			log(`learned ${learned.words} word(s) of your handwriting from ${learned.remarks} corrected remark(s)`);
+		}
+		await this.ink.saveSamples();
+		this.words = null;
 	}
 
 	/** Letter templates: the owner's hand first, print letters for the rest. */
@@ -1417,6 +1486,41 @@ export default class RoundTripPlugin extends Plugin {
 		}
 	}
 
+	async sendWordSheet(): Promise<void> {
+		if (!this.requirePaired()) return;
+		const notice = this.progress("Sending the word sheet…");
+		try {
+			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+			let parentId: string | undefined;
+			if (this.settings.mirrorFolders && this.settings.deviceBaseFolder !== "") {
+				parentId = await new MirrorTransport(api, this.settings.deviceBaseFolder).ensureFolderPath("");
+			}
+			await this.ink.sendWordSheet(api.raw, parentId);
+			notify(
+				"Word sheet sent. Write each word in its box the way you usually write, let it sync, then run “Learn my joined-up words from the sheet”.",
+				10000,
+			);
+		} catch (error) {
+			notify(toTransportError(error).message, 10000);
+		} finally {
+			notice.hide();
+		}
+	}
+
+	async learnWordSheet(): Promise<void> {
+		if (!this.requirePaired()) return;
+		const notice = this.progress("Reading your word sheet…");
+		try {
+			const words = await this.ink.learnFromWordSheet(await this.rawApi());
+			this.words = null;
+			notify(`Learned ${words.length} word(s) of your joined-up writing.`, 8000);
+		} catch (error) {
+			notify(error instanceof Error ? error.message : String(error), 10000);
+		} finally {
+			notice.hide();
+		}
+	}
+
 	async learnHandwriting(addVariants: boolean): Promise<void> {
 		if (!this.requirePaired()) return;
 		const notice = this.progress("Reading your handwriting sheet…");
@@ -1474,6 +1578,18 @@ export default class RoundTripPlugin extends Plugin {
 	 * pure renderer. Returns the vault path to embed, or null for ink that
 	 * turned out to be empty.
 	 */
+	/**
+	 * Where a remark's image goes. Deterministic, so a re-import overwrites
+	 * the remark instead of piling up copies — and the built-in OCR finds the
+	 * remark's ink again by it when its text is corrected.
+	 */
+	private remarkImagePath(request: StrokeRenderRequest): string {
+		const folder = this.settings.handwritingFolder.replace(/^\/+|\/+$/g, "");
+		const page = String(request.page).padStart(2, "0");
+		const name = `${request.deviceDocId}-p${page}-${request.remark}.png`;
+		return folder === "" ? name : `${folder}/${name}`;
+	}
+
 	private async renderHandwriting(
 		request: StrokeRenderRequest,
 	): Promise<string | null> {
@@ -1500,11 +1616,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (folder !== "" && !this.app.vault.getFolderByPath(folder)) {
 			await this.app.vault.createFolder(folder);
 		}
-		// Deterministic name: a re-import overwrites the remark instead of
-		// piling up copies next to it.
-		const page = String(request.page).padStart(2, "0");
-		const name = `${request.deviceDocId}-p${page}-${request.remark}.png`;
-		const path = folder === "" ? name : `${folder}/${name}`;
+		const path = this.remarkImagePath(request);
 		const existing = this.app.vault.getFileByPath(path);
 		if (existing) {
 			await this.app.vault.modifyBinary(existing, buffer);

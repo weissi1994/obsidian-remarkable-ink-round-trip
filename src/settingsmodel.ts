@@ -72,6 +72,8 @@ export interface RoundTripSettings {
 	handVersion: string;
 	/** A handwriting sheet on the tablet waiting to be read back. */
 	pendingSheet: PendingSheet | null;
+	/** A word sheet (joined-up writing) on the tablet waiting to be read back. */
+	pendingWordSheet: PendingSheet | null;
 	/** How embedded pictures are drawn in a handwritten notebook. */
 	inkImages: "colour-hatch" | "mono-hatch" | "placeholder";
 	/** Mermaid diagrams in a handwritten notebook: drawn by hand, or as code. */
@@ -128,6 +130,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	inkCustomProfile: { width: 954, height: 1696, dpi: 264 },
 	handVersion: "",
 	pendingSheet: null,
+	pendingWordSheet: null,
 	inkImages: "colour-hatch",
 	inkDiagrams: "handwritten",
 	inkAccents: true,

@@ -161,6 +161,20 @@ text next to it. *Settings → Reading handwriting → Read handwriting with*:
 The image stays next to the text unless you turn that off, so a misread word is
 easy to check.
 
+**Joined-up writing** is read word by word, by comparing the whole word's trace
+with words you have written before — so Built-in learns your hand two ways:
+
+- **From corrections:** fix the text under a remark's image in the note — or type
+  what it says under a remark that came back as an image only — and the next
+  sync learns those words from that ink. Nothing to do beyond correcting.
+- **From the word sheet:** *Send joined-up word sheet to reMarkable* sends a
+  notebook of everyday German and English words; write each once the way you
+  usually write, sync, and run *Learn my joined-up words from the sheet*.
+
+Up to three samples per word are kept in the plugin folder (`ocr/`). Only a
+close match to one of them is used; a joined-up word it has never seen stays in
+the image.
+
 ## How it works
 
 The PDF typesetter is reused unchanged behind a small drawing seam, so a

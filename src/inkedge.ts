@@ -13,6 +13,7 @@ import type { InkSnapshot, MappingEntry } from "./id/mapping";
 import { builtinFont, GlyphSource } from "./ink/glyphs";
 import {
 	buildSheet,
+	learnWords,
 	handSource,
 	HandLibrary,
 	learnHand,
@@ -35,6 +36,7 @@ import type { InkImage } from "./ink/inkimage";
 import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
+import { addSample, emptyStore, type SampleStore } from "./ocr/samples";
 import type { HttpClient } from "./transport/http";
 import { readNotebook, sendNotebook, type RawSyncApi } from "./transport/notebook";
 import { transcribe } from "./transport/ocr";
@@ -254,6 +256,51 @@ export class InkEdge {
 		await this.host.persist();
 	}
 
+	/* --------------------------- word samples ------------------------ */
+
+	private samples: SampleStore | null = null;
+
+	/** The owner's written words and remembered remarks (ocr/samples.ts). */
+	async loadSamples(): Promise<SampleStore> {
+		this.samples ??= (await this.readJson<SampleStore>(`${this.dir}/ocr/samples.json`)) ?? emptyStore();
+		return this.samples;
+	}
+
+	async saveSamples(): Promise<void> {
+		if (this.samples !== null) await this.writeJson(`${this.dir}/ocr/samples.json`, this.samples);
+	}
+
+	/** Send a fresh word sheet and remember it as pending. */
+	async sendWordSheet(api: RawSyncApi, parentId?: string): Promise<void> {
+		const profile = this.profile();
+		const sheet = buildSheet(profile, "words");
+		const result = await sendNotebook(api, "Word sheet", sheetPagesToRm(sheet, profile), { parentId });
+		this.host.settings.pendingWordSheet = {
+			deviceDocId: result.docId,
+			pageIds: result.pageIds,
+			profile,
+			version: SHEET_VERSION,
+			kind: "words",
+		};
+		await this.host.persist();
+	}
+
+	/** Read the pending word sheet into the word samples; returns the words learned. */
+	async learnFromWordSheet(api: RawSyncApi): Promise<string[]> {
+		const pending = this.host.settings.pendingWordSheet;
+		if (pending === null) throw new Error("No word sheet has been sent yet.");
+		const { pages } = await readNotebook(api, pending.deviceDocId);
+		const found = learnWords(pending, new Map(pages.map((page) => [page.pageId, page.bytes])));
+		const words = Object.keys(found);
+		if (words.length === 0) {
+			throw new Error("Nothing written on the word sheet yet — write some words on the reMarkable and let it sync.");
+		}
+		const store = await this.loadSamples();
+		for (const word of words) addSample(store, word, found[word]);
+		await this.saveSamples();
+		return words;
+	}
+
 	/** Read the pending sheet back into a (new or extended) library. */
 	async learnFromSheet(api: RawSyncApi, addVariants: boolean): Promise<LearnResult> {
 		const pending = this.host.settings.pendingSheet;
@@ -285,6 +332,7 @@ export class InkEdge {
 	): Promise<{ profile: DeviceProfile; from: string } | null> {
 		const ours = new Set(Object.values(this.host.settings.mappings).map((entry) => entry.deviceDocId));
 		if (this.host.settings.pendingSheet !== null) ours.add(this.host.settings.pendingSheet.deviceDocId);
+		if (this.host.settings.pendingWordSheet !== null) ours.add(this.host.settings.pendingWordSheet.deviceDocId);
 		for (const candidate of candidates) {
 			if (ours.has(candidate.id)) continue;
 			try {

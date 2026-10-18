@@ -160,6 +160,20 @@ export class RoundTripSettingTab extends PluginSettingTab {
 				action: button("Add", () => this.plugin.learnHandwriting(true)),
 			},
 			{
+				name: "Joined-up words",
+				desc:
+					"For reading joined-up handwriting: write common words once on a word sheet " +
+					"(it also learns from every remark text you correct)." +
+					(s.pendingWordSheet === null ? "" : " A word sheet is waiting on the tablet."),
+				action: button("Send word sheet", () => this.plugin.sendWordSheet()),
+			},
+			{
+				name: "Learn from the word sheet",
+				desc: "Read the filled-in word sheet and add its words to the ones learned.",
+				visible: () => this.plugin.settings.pendingWordSheet !== null,
+				action: button("Learn", () => this.plugin.learnWordSheet(), true),
+			},
+			{
 				name: "Detect page size",
 				desc: "Read the canvas size from a notebook made on your reMarkable.",
 				action: button("Detect", () => this.plugin.detectPageSize()),

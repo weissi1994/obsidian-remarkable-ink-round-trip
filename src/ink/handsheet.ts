@@ -29,7 +29,23 @@ export const SHEET_CHARS =
 	"äöüßÄÖÜ" +
 	".,;:!?'\"-()/&@#%+=*€";
 
+/**
+ * The word sheet (joined-up writing): everyday German and English words,
+ * short and long, chosen so most letter joins occur somewhere.
+ */
+export const WORD_SHEET_WORDS = [
+	"und", "nicht", "die", "der", "das", "ist", "auch", "noch", "wenn", "aber",
+	"schon", "heute", "morgen", "Termin", "prüfen", "wichtig", "Frage", "danke",
+	"bitte", "können", "müssen", "Woche", "später", "Idee",
+	"the", "and", "that", "with", "this", "have", "from", "will", "what", "about",
+	"which", "when", "could", "think", "check", "again", "meeting", "question",
+	"today", "tomorrow", "because", "maybe", "should", "next",
+];
+
+export type SheetKind = "letters" | "words";
+
 export interface SheetBox {
+	/** What to write in the box: a character, or a whole word on the word sheet. */
 	char: string;
 	/** 1-based sheet page. */
 	page: number;
@@ -52,18 +68,21 @@ export interface PendingSheet {
 	pageIds: string[];
 	profile: DeviceProfile;
 	version: number;
+	/** Absent for the letter sheet, which came first. */
+	kind?: "words";
 }
 
 const GUIDE_PEN: InkPen = { tool: 17, color: PEN_COLOR.grey, thicknessScale: 1, width: 8 };
 
-/** Lay out the sheet for a canvas. Deterministic for a given profile. */
-export function buildSheet(profile: DeviceProfile): Sheet {
+/** Lay out the sheet for a canvas. Deterministic for a given profile and kind. */
+export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters"): Sheet {
 	const unit = profile.dpi / 226; // keep physical sizes across devices
 	const margin = Math.round(60 * unit);
-	const boxWidth = Math.round(132 * unit);
+	const words = kind === "words";
+	const boxWidth = words ? Math.round(Math.max(420 * unit, (profile.width - 2 * margin) / 2 - 1)) : Math.round(132 * unit);
 	const boxHeight = Math.round(176 * unit);
 	const headerHeight = Math.round(210 * unit);
-	const cols = Math.max(3, Math.floor((profile.width - 2 * margin) / boxWidth));
+	const cols = Math.max(words ? 1 : 3, Math.floor((profile.width - 2 * margin) / boxWidth));
 	const rowsPerPage = Math.max(2, Math.floor((profile.height - headerHeight - margin) / boxHeight));
 	const perPage = cols * rowsPerPage;
 	const left0 = -profile.width / 2 + (profile.width - cols * boxWidth) / 2;
@@ -71,7 +90,7 @@ export function buildSheet(profile: DeviceProfile): Sheet {
 
 	const boxes: SheetBox[] = [];
 	const pages: GeneratedStroke[][] = [];
-	const chars = [...SHEET_CHARS];
+	const chars = words ? WORD_SHEET_WORDS : [...SHEET_CHARS];
 	const pageCount = Math.ceil(chars.length / perPage);
 
 	for (let p = 0; p < pageCount; p++) {
@@ -122,10 +141,19 @@ export function buildSheet(profile: DeviceProfile): Sheet {
 		};
 		const titleCap = 28 * unit;
 		const instructionCap = 18 * unit;
-		write(`Handwriting sheet ${p + 1}/${pageCount}`, left0, margin + titleCap, titleCap, PEN_COLOR.black);
+		write(
+			`${words ? "Word sheet" : "Handwriting sheet"} ${p + 1}/${pageCount}`,
+			left0,
+			margin + titleCap,
+			titleCap,
+			PEN_COLOR.black,
+		);
 		const instructions = wrap(
-			"Write each character once in its box, sitting on the solid line. " +
-				"Capitals reach the dashed line. Skip any you like.",
+			words
+				? "Write each word once in its box the way you usually write, joined-up " +
+						"if that is how you write, sitting on the solid line. Skip any you like."
+				: "Write each character once in its box, sitting on the solid line. " +
+						"Capitals reach the dashed line. Skip any you like.",
 			instructionCap,
 		);
 		instructions.forEach((line, index) => {
@@ -361,6 +389,39 @@ export function learnHand(
 		learned: learned.sort(),
 		skipped: [...SHEET_CHARS].filter((ch) => !found.has(ch) && !(ch in glyphs)),
 	};
+}
+
+/**
+ * Read a filled-in word sheet: each box's ink, in device units, by the word
+ * it was written for. Empty boxes are left out.
+ */
+export function learnWords(
+	pending: PendingSheet,
+	pages: Map<string, Uint8Array>,
+): Record<string, { x: number; y: number }[][]> {
+	const sheet = buildSheet(pending.profile, "words");
+	const found: Record<string, { x: number; y: number }[][]> = {};
+	pending.pageIds.forEach((pageId, index) => {
+		const bytes = pages.get(pageId);
+		if (bytes === undefined) return;
+		const diff = diffInkPage(sheet.pages[index] ?? [], parseRmScene(bytes));
+		const boxes = sheet.boxes.filter((box) => box.page === index + 1);
+		for (const stroke of diff.userStrokes) {
+			if (stroke.points.length === 0) continue;
+			const cx = stroke.points.reduce((sum, point) => sum + point.x, 0) / stroke.points.length;
+			const cy = stroke.points.reduce((sum, point) => sum + point.y, 0) / stroke.points.length;
+			const box = boxes.find(
+				(candidate) =>
+					cx >= candidate.left &&
+					cx <= candidate.left + candidate.width &&
+					cy >= candidate.top &&
+					cy <= candidate.top + candidate.height,
+			);
+			if (box === undefined) continue;
+			(found[box.char] ??= []).push(stroke.points.map((point) => ({ x: point.x, y: point.y })));
+		}
+	});
+	return found;
 }
 
 /** A library as a glyph source the fonts can draw from. */

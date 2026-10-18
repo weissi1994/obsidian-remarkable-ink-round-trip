@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Joined-up handwriting, learned from you:** the built-in reader compares a
+  whole word's trace with words you wrote before. It learns from every remark
+  text you correct or type in under an image, and from a new **word sheet** of
+  everyday German and English words (*Send joined-up word sheet to
+  reMarkable*, then *Learn my joined-up words from the sheet*). Only close
+  matches are used; unseen joined-up words stay in the image.
 - **Built-in handwriting recognition, on by default:** remarks are read from
   their pen strokes inside the plugin — letters matched against your
   handwriting sheet (print letters without one), words corrected against your

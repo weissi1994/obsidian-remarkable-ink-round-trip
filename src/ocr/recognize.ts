@@ -468,6 +468,31 @@ export function splitWords(strokes: Point[][]): Point[][][][] {
 	return layoutOf(strokes).map((line) => line.words.map((word) => word.flatMap((group) => group.strokes)));
 }
 
+/**
+ * One line's strokes cut into exactly `count` words at its widest gaps — for
+ * when the number of words is known (a corrected remark), which beats any
+ * guess at how wide a space is.
+ */
+export function splitLineInto(strokes: Point[][], count: number): Point[][][] | null {
+	const box = boxOf(strokes);
+	const groups = clusterStrokes(strokes, (box.maxY - box.minY) * 0.6 || 1);
+	if (count < 1 || groups.length < count) return null;
+	const cuts = groups
+		.slice(1)
+		.map((group, i) => ({ at: i + 1, gap: group.box.minX - groups[i].box.maxX }))
+		.sort((a, b) => b.gap - a.gap)
+		.slice(0, count - 1)
+		.map((cut) => cut.at)
+		.sort((a, b) => a - b);
+	const words: Point[][][] = [];
+	let start = 0;
+	for (const cut of [...cuts, groups.length]) {
+		words.push(groups.slice(start, cut).flatMap((group) => group.strokes));
+		start = cut;
+	}
+	return words;
+}
+
 /** Reads a whole word at once, for joined-up writing (see words.ts). */
 export interface WholeWordReader {
 	/** The best match and how close it is; `trusted` when close enough to use. */
