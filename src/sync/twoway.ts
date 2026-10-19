@@ -7,12 +7,13 @@
  * base (a send from before two-way sync, a lost record) or a layout to read
  * against, the changes are appended as a summary block instead.
  *
- * A handwritten remark the note already shows is the owner's from then on:
- * its text may have been corrected, the callout moved or reworded. Every
- * import reads the whole notebook again, so without care each sync would
- * offer the old reading once more — as a conflict next to the correction,
- * or, in the summary block, in place of it. The note's version is kept
- * instead; only a remark that had no text yet gets the new reading.
+ * A handwritten remark the note already shows is not placed again: every
+ * import reads the whole notebook, so without care each sync would offer it
+ * once more — as a conflict next to the note's callout, or, in the summary
+ * block, in place of it. What the callout says depends on who wrote it:
+ * text the owner changed stands for good; a reading the plugin wrote and
+ * nobody touched (the mark's `replaces`) gives way to a newer, different
+ * reading, so remarks read badly before improve as the reader learns.
  */
 
 import type { PdfLayout } from "../convert/pdf";
@@ -24,7 +25,7 @@ import {
 import type { Highlight } from "../incoming/highlights";
 import type { MarkStyles } from "../incoming/markstyles";
 import type { ImportedMark } from "../incoming/pull";
-import { findRemark, remarkIdLine } from "../incoming/remarkid";
+import { findRemark, isRemarkTextLine as isTextLine, remarkIdLine } from "../incoming/remarkid";
 import { projectOntoSource } from "../incoming/sourceprojection";
 import { merge3 } from "./merge3";
 
@@ -47,15 +48,25 @@ export interface TabletChanges {
 const refOf = (mark: ImportedMark) => ({ id: mark.id, image: mark.path });
 const isRemark = (mark: ImportedMark) => mark.kind === "note" && (mark.id !== undefined || mark.path !== undefined);
 
+/** Whether the note's text for a remark is the plugin's own, untouched, and a new reading differs. */
+function takesNewReading(mark: ImportedMark, text: string): boolean {
+	return mark.replaces !== undefined && text === mark.replaces && mark.transcript !== undefined && mark.transcript !== text;
+}
+
 /**
  * The note with what it already shows of the tablet's remarks settled, and
- * the remarks still to place. A remark the note has is not placed again; if
- * its callout has no text yet and the reader now has some, the text goes
- * into that callout, and a callout from before ids gets its id line.
+ * the remarks still to place. A remark the note has is not placed again; its
+ * callout takes the new reading only while it shows the plugin's untouched
+ * earlier one (`replaces`), and a callout from before ids gets its id line.
+ * `refreshed` lists the ids whose text was replaced.
  */
-export function settleRemarks(ours: string, marks: ImportedMark[]): { ours: string; marks: ImportedMark[] } {
-	const lines = ours.split("\n");
+export function settleRemarks(
+	ours: string,
+	marks: ImportedMark[],
+): { ours: string; marks: ImportedMark[]; refreshed: string[] } {
+	let lines = ours.split("\n");
 	const rest: ImportedMark[] = [];
+	const refreshed: string[] = [];
 	for (const mark of marks) {
 		const found = isRemark(mark) ? findRemark(lines.join("\n"), refOf(mark)) : null;
 		if (found === null) {
@@ -64,22 +75,40 @@ export function settleRemarks(ours: string, marks: ImportedMark[]): { ours: stri
 		}
 		const quoted = lines[found.end].startsWith(">");
 		if (mark.id !== undefined && !found.hasId) lines.splice(found.end + 1, 0, remarkIdLine(mark.id, quoted));
-		if (found.text === "" && mark.transcript !== undefined && found.titled) {
-			lines.splice(found.start + 1, 0, ...mark.transcript.split("\n").map((line) => `> ${line}`));
+		if (found.titled && takesNewReading(mark, found.text)) {
+			// The text lines go; the new reading takes their place under the title.
+			const block = lines.slice(found.start + 1, found.end + 1).filter((line) => !isTextLine(line));
+			lines = [
+				...lines.slice(0, found.start + 1),
+				...mark.transcript!.split("\n").map((line) => `> ${line}`),
+				...block,
+				...lines.slice(found.end + 1),
+			];
+			if (mark.id !== undefined) refreshed.push(mark.id);
 		}
 	}
-	return { ours: lines.join("\n"), marks: rest };
+	return { ours: lines.join("\n"), marks: rest, refreshed };
 }
 
-/** In the summary block, a remark keeps the text the note gave it. */
-function withNoteTexts(ours: string, marks: ImportedMark[]): ImportedMark[] {
+/** In the summary block, a remark keeps the note's text unless it is the plugin's untouched reading. */
+function withNoteTexts(ours: string, marks: ImportedMark[], refreshed: string[]): ImportedMark[] {
 	return marks.map((mark) => {
 		const text = isRemark(mark) ? findRemark(ours, refOf(mark))?.text : undefined;
-		return text === undefined || text === "" ? mark : { ...mark, transcript: text };
+		if (text === undefined) return mark;
+		if (takesNewReading(mark, text)) {
+			if (mark.id !== undefined) refreshed.push(mark.id);
+			return mark;
+		}
+		return text === "" ? mark : { ...mark, transcript: text };
 	});
 }
 
-export function mergeTabletChanges(input: TabletChanges): { body: string; outcome: AnnotationOutcome } {
+export function mergeTabletChanges(input: TabletChanges): {
+	body: string;
+	outcome: AnnotationOutcome;
+	/** Remarks whose untouched earlier reading was replaced by a new one. */
+	refreshed: string[];
+} {
 	const settled = settleRemarks(input.ours, input.marks);
 	const projected =
 		input.base === null || input.layout === null
@@ -93,21 +122,23 @@ export function mergeTabletChanges(input: TabletChanges): { body: string; outcom
 					erasedAs: input.erasedAs,
 				});
 	if (projected === null || input.base === null) {
+		const refreshed: string[] = [];
 		const summary = renderAnnotationBlock({
 			sourcePath: input.sourcePath,
 			sourceName: input.sourceName,
 			highlights: input.highlights,
-			marks: withNoteTexts(input.ours, input.marks),
+			marks: withNoteTexts(input.ours, input.marks, refreshed),
 			inSourceNote: true,
 			styles: input.styles,
 			erasedAs: input.erasedAs,
 			importedAt: input.importedAt,
 		});
-		return { body: upsertAnnotationBlock(input.ours, summary.text), outcome: summary.outcome };
+		return { body: upsertAnnotationBlock(input.ours, summary.text), outcome: summary.outcome, refreshed };
 	}
 	const merged = merge3(input.base, settled.ours, projected.markdown);
 	return {
 		body: merged.text,
 		outcome: { form: "copy", unplaced: projected.unplaced.length, conflicts: merged.conflicts },
+		refreshed: settled.refreshed,
 	};
 }

@@ -14,9 +14,11 @@
  *
  * The text the note has for a remark is the owner's from the moment they
  * change it: a later reading of the same ink never replaces it, here or in
- * the note (sync/twoway.ts).
+ * the note (sync/twoway.ts). A reading nobody touched is the plugin's: the
+ * remark is read again, and a better reading replaces it in the note.
  */
 
+import type { ImportedMark } from "../incoming/pull";
 import { remarkText, type RemarkRef } from "../incoming/remarkid";
 import { splitLineInto, splitWords, type Point } from "./recognize";
 
@@ -78,9 +80,8 @@ export type RemarkContext = Pick<RemarkRecord, "image" | "note" | "quote" | "who
 
 /**
  * Remember a remark's ink and what the reader made of it, for learning from
- * a later correction. A remark already known keeps its text — the note's,
- * possibly corrected — unless it had none, in which case the new reading
- * fills it in, as it does in the note.
+ * a later correction. A remark already known keeps its text — what the note
+ * shows — until the note is written (notedReadings).
  */
 export function rememberRemark(
 	store: SampleStore,
@@ -94,7 +95,6 @@ export function rememberRemark(
 	if (known !== undefined) {
 		known.read = read;
 		known.at = at.toISOString();
-		if (known.transcript === "" && known.corrected !== true) known.transcript = read;
 		Object.assign(known, context);
 	} else {
 		store.remarks[key] = { strokes: round(strokes), transcript: read, read, at: at.toISOString(), ...context };
@@ -116,12 +116,39 @@ function prune(store: SampleStore): void {
 }
 
 /**
- * The text a remark already has, when it has any: a remark read before is
- * not read again — the note's text, the owner's once corrected, stands.
+ * The text the owner gave a remark, if they corrected it: such a remark is
+ * not read again — their text stands. Every other remark is read anew.
  */
 export function knownText(store: SampleStore, key: string): string | null {
 	const known = store.remarks[key];
-	return known === undefined || known.transcript === "" ? null : known.transcript;
+	return known?.corrected === true && known.transcript !== "" ? known.transcript : null;
+}
+
+/**
+ * The tablet's remarks with the plugin's own earlier reading attached
+ * (`replaces`), for remarks the owner never corrected: the note may swap
+ * exactly that text for a new reading (sync/twoway.ts).
+ */
+export function withEarlierReadings(store: SampleStore, marks: ImportedMark[]): ImportedMark[] {
+	return marks.map((mark) => {
+		const known = mark.id === undefined ? undefined : store.remarks[mark.id];
+		return known === undefined || known.corrected === true ? mark : { ...mark, replaces: known.transcript };
+	});
+}
+
+/**
+ * After the note is written: remember, as each uncorrected remark's text,
+ * the reading the note now shows. Only where the note shows the plugin's
+ * reading — text the owner typed meanwhile is left to be found as a
+ * correction on the next sync.
+ */
+export function notedReadings(store: SampleStore, marks: ImportedMark[], note: string): void {
+	for (const mark of marks) {
+		const known = mark.id === undefined ? undefined : store.remarks[mark.id];
+		if (known === undefined || known.corrected === true) continue;
+		const text = remarkText(note, { id: mark.id, image: mark.path });
+		if (text !== null && text === (mark.transcript ?? "")) known.transcript = text;
+	}
 }
 
 /** A word as a sample's name: letters and digits, punctuation at the ends dropped. */

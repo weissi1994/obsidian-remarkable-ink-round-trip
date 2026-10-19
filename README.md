@@ -184,7 +184,13 @@ the id line. From then on the text is yours:
 
 - **Later syncs keep it.** The notebook is read again on every import, but a
   remark the note already has is never placed again — your text, and where you
-  moved the callout, stand. Only a callout without text yet gets a new reading.
+  moved the callout, stand.
+- **Readings you never touched keep improving.** A remark whose text is still
+  exactly what the plugin wrote is read again whenever its notebook changes;
+  a different reading replaces the old one in the callout (the import report
+  counts them, and the note's previous version is kept as usual). If the
+  reader is unsure this time, the old reading stays. Once you edit a remark,
+  it is never read again.
 - **The reader learns from it.** The built-in reader stores the words with your
   ink; the vision endpoint gets your latest corrections as worked examples. A
   correction whose words can't be matched to the ink one by one (a different

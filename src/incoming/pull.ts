@@ -113,6 +113,12 @@ export interface ImportedMark {
 	 * image and marks its callout, so it is found again in the note.
 	 */
 	id?: string;
+	/**
+	 * Ink fork: the text the plugin last wrote for this remark, when the owner
+	 * never corrected it. A callout still showing exactly this takes the new
+	 * reading; any other text in the note is the owner's and stays.
+	 */
+	replaces?: string;
 	/** Ink fork, kind "moved": insert the moved words after this word id… */
 	moveAfter?: number;
 	/** …or before this one, when they landed at the start of a line. */

@@ -61,6 +61,8 @@ export interface AnnotationOutcome {
 	unplaced?: number;
 	/** Places both the note and the tablet changed (two-way merge). */
 	conflicts?: number;
+	/** Ink fork: remarks whose untouched earlier reading gave way to a new one. */
+	rereadRemarks?: number;
 }
 
 export interface RenderedAnnotations {

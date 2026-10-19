@@ -73,6 +73,11 @@ export interface FoundRemark {
 
 const isTitle = (line: string) => /^>\s*\[!/.test(line);
 
+/** A line of a remark's text: quoted, and not its title, image or id. */
+export function isRemarkTextLine(line: string): boolean {
+	return line.startsWith(">") && !isTitle(line) && !line.includes("![[") && !isRemarkIdLine(line);
+}
+
 /**
  * Find a remark in a note: the line with its id (or else its image), widened
  * to the block around it — up to a blank line or the next callout title.
@@ -101,7 +106,7 @@ export function findRemark(note: string, ref: RemarkRef): FoundRemark | null {
 		titled: isTitle(lines[start]),
 		hasId: block.some(isRemarkIdLine),
 		text: block
-			.filter((line) => line.startsWith(">") && !isTitle(line) && !line.includes("![[") && !isRemarkIdLine(line))
+			.filter(isRemarkTextLine)
 			.map((line) => line.replace(/^>\s?/, "").trim())
 			.filter((line) => line !== "")
 			.join("\n"),

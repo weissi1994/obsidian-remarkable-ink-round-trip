@@ -77,7 +77,8 @@ describe("a remark the note already has (annotated copy)", () => {
 		const unread = { ...misread, transcript: undefined };
 		const first = copy(SOURCE, [unread]).body;
 		expect(first).not.toContain("helo");
-		const { body } = copy(first, [{ ...misread, transcript: "hello world" }]);
+		const { body, refreshed } = copy(first, [{ ...misread, transcript: "hello world", replaces: "" }]);
+		expect(refreshed).toEqual(["aaaaaaaaaaaa"]);
 		const lines = body.split("\n");
 		const title = lines.indexOf("> [!note] Remark");
 		expect(lines.slice(title, title + 4)).toEqual([
@@ -104,6 +105,54 @@ describe("a remark the note already has (annotated copy)", () => {
 	});
 });
 
+describe("a reading nobody touched", () => {
+	const first = () => copy(SOURCE, [misread]).body;
+
+	it("gives way to a new, different reading", () => {
+		const { body, outcome, refreshed } = copy(first(), [{ ...misread, transcript: "hello world", replaces: "helo wrld" }]);
+		expect(outcome.conflicts).toBe(0);
+		expect(refreshed).toEqual(["aaaaaaaaaaaa"]);
+		expect(body).toBe(first().replace("> helo wrld", "> hello world"));
+	});
+
+	it("replaces every line of a reading, and only the reading", () => {
+		const twoLines = copy(SOURCE, [{ ...misread, transcript: "helo\nwrld" }]).body;
+		const { body } = copy(twoLines, [{ ...misread, transcript: "hello world", replaces: "helo\nwrld" }]);
+		const lines = body.split("\n");
+		const title = lines.indexOf("> [!note] Remark");
+		expect(lines.slice(title, title + 5)).toEqual([
+			"> [!note] Remark",
+			"> hello world",
+			"> ![[img/dev-p01-aaaaaaaaaaaa.png]]",
+			"> ^ink-aaaaaaaaaaaa",
+			"",
+		]);
+	});
+
+	it("stays when the reader is unsure this time", () => {
+		const { body, refreshed } = copy(first(), [{ ...misread, transcript: undefined, replaces: "helo wrld" }]);
+		expect(body).toBe(first());
+		expect(refreshed).toEqual([]);
+	});
+
+	it("is not replaced once the owner changed it — not even mid-sync", () => {
+		// The store still thinks the note shows "helo wrld", but the owner has
+		// just typed over it: their text wins and is found as a correction next time.
+		const edited = first().replace("helo wrld", "hello wörld");
+		const { body, refreshed } = copy(edited, [{ ...misread, transcript: "hello world", replaces: "helo wrld" }]);
+		expect(body).toBe(edited);
+		expect(refreshed).toEqual([]);
+	});
+
+	it("gives way in the summary block too", () => {
+		const block = summary(SOURCE, [misread]).body;
+		const { body, refreshed } = summary(block, [{ ...misread, transcript: "hello world", replaces: "helo wrld" }]);
+		expect(body).toContain("> hello world");
+		expect(body).not.toContain("helo wrld");
+		expect(refreshed).toEqual(["aaaaaaaaaaaa"]);
+	});
+});
+
 describe("a remark the note already has (summary block)", () => {
 	it("keeps the owner's correction when the block is written again", () => {
 		const first = summary(SOURCE, [misread]).body;
@@ -119,7 +168,8 @@ describe("a remark the note already has (summary block)", () => {
 describe("settleRemarks", () => {
 	it("passes on remarks the note does not have, and other marks", () => {
 		const erased: ImportedMark = { kind: "erased", page: 1, target: "some" };
-		const { ours, marks } = settleRemarks(SOURCE, [misread, erased]);
+		const { ours, marks, refreshed } = settleRemarks(SOURCE, [misread, erased]);
+		expect(refreshed).toEqual([]);
 		expect(ours).toBe(SOURCE);
 		expect(marks).toEqual([misread, erased]);
 	});

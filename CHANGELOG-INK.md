@@ -11,8 +11,10 @@
   - A remark the note already shows is no longer imported again: a corrected
     text used to come back on every sync as an "Also changed on the
     reMarkable" conflict holding the old reading — or, in the summary block,
-    replaced it. Your text and placement now stand; an image-only remark
-    still gets its text filled in once it can be read.
+    replaced it. Your text and placement now stand. Readings you never
+    edited are read again and replaced by a better one as the reader learns
+    (counted in the import report); an image-only remark gets its text once
+    it can be read.
   - A correction that cannot be matched to the ink word for word is reported
     in a notice instead of being dropped silently.
   - The vision endpoint learns too: your latest corrections go along with

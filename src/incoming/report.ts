@@ -119,6 +119,10 @@ export function renderImportReport(input: ImportReportInput): string {
  * *reading* side, so a failed projection looked like a successful import that
  * did nothing (beta, 2026-07-27).
  */
+/** Remarks read better this time; their earlier text is in the note's previous version. */
+const reread = (count: number | undefined) =>
+	count === undefined || count === 0 ? "" : `, ${count} remark(s) read anew (earlier readings you never edited)`;
+
 function describeWrite(
 	scan: NonNullable<Extract<PullResult, { ok: true }>["scan"]>,
 ): string {
@@ -133,7 +137,7 @@ function describeWrite(
 			written.conflicts === undefined || written.conflicts === 0
 				? ""
 				: `, ${written.conflicts} place(s) changed on both sides (see “Also changed on the reMarkable”)`;
-		return `written as: merged into the note${missed}${conflicts}`;
+		return `written as: merged into the note${missed}${conflicts}${reread(written.rereadRemarks)}`;
 	}
 	switch (written.reason) {
 		case "in-source-note":

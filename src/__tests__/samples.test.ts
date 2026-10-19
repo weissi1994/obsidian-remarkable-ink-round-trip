@@ -13,8 +13,10 @@ import {
 	knownText,
 	learnCorrection,
 	learnFromNotes,
+	notedReadings,
 	rememberRemark,
 	remarkText,
+	withEarlierReadings,
 } from "../ocr/samples";
 import { WordReader } from "../ocr/words";
 
@@ -182,13 +184,39 @@ describe("remembered remarks", () => {
 		expect(learnFromNotes(store, () => note("Termin morgen prüfen"))).toMatchObject({ remarks: 0, words: 0, unlearned: [] });
 	});
 
-	it("take a first reading for a remark that had none", () => {
+	it("are read again until the owner corrects them", () => {
 		const store = emptyStore();
-		rememberRemark(store, ID, strokes(), "", new Date("2026-10-19"));
+		rememberRemark(store, ID, strokes(), "Termin morgan", new Date("2026-10-19"));
 		expect(knownText(store, ID)).toBeNull();
-		rememberRemark(store, ID, strokes(), "Termin morgen prüfen", new Date("2026-10-20"));
-		expect(knownText(store, ID)).toBe("Termin morgen prüfen");
-		expect(store.remarks[ID].corrected).toBeUndefined();
+		learnFromNotes(store, () => note("Termin morgen"));
+		expect(knownText(store, ID)).toBe("Termin morgen");
+	});
+
+	it("carry the plugin's own earlier reading to the merge, never the owner's", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, strokes(), "Termin morgan", new Date("2026-10-19"));
+		rememberRemark(store, "c0ffee000000", strokes(), "x", new Date("2026-10-19"));
+		store.remarks.c0ffee000000.corrected = true;
+		const marks = withEarlierReadings(store, [
+			{ kind: "note", page: 1, id: ID, transcript: "Termin morgen" },
+			{ kind: "note", page: 1, id: "c0ffee000000", transcript: "y" },
+			{ kind: "note", page: 1, id: "unknown00000", transcript: "z" },
+		]);
+		expect(marks.map((m) => m.replaces)).toEqual(["Termin morgan", undefined, undefined]);
+	});
+
+	it("take the new reading once the note shows it — and not the owner's text typed meanwhile", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, strokes(), "Termin morgan", new Date("2026-10-19"));
+		rememberRemark(store, ID, strokes(), "Termin morgen", new Date("2026-10-20"));
+		expect(store.remarks[ID].transcript).toBe("Termin morgan");
+		const mark = { kind: "note" as const, page: 1, id: ID, transcript: "Termin morgen" };
+		notedReadings(store, [mark], note("Termin morgen typed by me"));
+		expect(store.remarks[ID].transcript).toBe("Termin morgan");
+		notedReadings(store, [mark], note("Termin morgen"));
+		expect(store.remarks[ID].transcript).toBe("Termin morgen");
+		// Nothing changed by hand, so nothing is learned as a correction.
+		expect(learnFromNotes(store, () => note("Termin morgen")).remarks).toBe(0);
 	});
 
 	it("lose the never-corrected ones first when there are too many", () => {

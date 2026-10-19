@@ -71,10 +71,12 @@ import {
 	describeUnlearned,
 	knownText,
 	learnFromNotes,
+	notedReadings,
 	refOf,
 	rememberRemark,
 	remarkText,
 	type RemarkRecord,
+	withEarlierReadings,
 } from "./ocr/samples";
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
 import type { OcrExample } from "./transport/ocr";
@@ -2057,12 +2059,15 @@ export default class RoundTripPlugin extends Plugin {
 		const sent = await this.ink.readSent(entry.docId).catch(() => null);
 		const base = sent?.body ?? (sourceState === "match" ? ours : null);
 		const layout = (await this.loadInkRender(entry).catch(() => null))?.layout ?? null;
-		const { body, outcome } = mergeTabletChanges({
+		// Readings the owner never touched may be replaced by better ones.
+		const store = await this.ink.loadSamples();
+		const remarks = withEarlierReadings(store, marks);
+		const { body, outcome, refreshed } = mergeTabletChanges({
 			base,
 			ours,
 			layout,
 			highlights,
-			marks,
+			marks: remarks,
 			styles: this.settings.markStyles,
 			erasedAs: this.settings.erasedAs,
 			sourcePath: file.path,
@@ -2073,7 +2078,9 @@ export default class RoundTripPlugin extends Plugin {
 		await this.writePreviousVersion(file, entry, raw);
 		await this.app.vault.modify(file, head + body);
 		changed.add(file.path);
-		return outcome;
+		notedReadings(store, remarks, body);
+		this.samplesDirty = true;
+		return refreshed.length === 0 ? outcome : { ...outcome, rereadRemarks: refreshed.length };
 	}
 }
 

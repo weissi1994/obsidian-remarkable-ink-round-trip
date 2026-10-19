@@ -25,14 +25,25 @@ the note would be inserted again on both sides of the merge and conflict.
 
 `settleRemarks(ours, marks)` runs before projecting:
 
-- a remark found in the note is dropped from the marks to place — the note's
-  text and position win;
-- if its callout has no text yet and the reader produced some, that text is
-  inserted into the existing callout;
+- a remark found in the note is dropped from the marks to place — its
+  position and the owner's text win;
+- **untouched readings improve:** the edge attaches to each uncorrected
+  remark the text the plugin last wrote for it (`mark.replaces`, from
+  `withEarlierReadings`). If the callout still shows exactly that and the new
+  reading differs (and isn't empty), the callout's text lines are replaced.
+  An image-only remark is the case `replaces === ""`. Any other text — the
+  owner's, even typed mid-sync — stays;
 - a pre-id callout gets its `^ink-` line.
 
 The summary-block form (no merge base) rewrites the whole block, so there the
-marks take the note's text instead (`withNoteTexts`).
+marks take the note's text unless it is the untouched earlier reading
+(`withNoteTexts`). Both forms return `refreshed` ids; the count goes into the
+import report (`rereadRemarks`).
+
+After the note is written, `notedReadings` sets each uncorrected record's
+`transcript` to what the note now shows — only where that equals the reading
+the plugin placed, so an edit made during the sync is still detected as a
+correction on the next one.
 
 Tests: `src/__tests__/remarkkeep.test.ts`.
 
@@ -51,10 +62,14 @@ stores from before ids):
 | `image`, `note` | where to find it again |
 | `quote`, `wholePage` | the reading context, reused by the training export |
 
-- `rememberRemark` never overwrites a known remark's `transcript`, except to
-  fill an empty one.
-- `knownText`: a remark with text is not read again (saves endpoint calls,
-  keeps note and store consistent).
+- `rememberRemark` never overwrites a known remark's `transcript` (that
+  follows the note, via `notedReadings`); it updates `read`.
+- `knownText`: a *corrected* remark is not read again. Uncorrected remarks
+  are re-read whenever their notebook changes (with a vision endpoint: one
+  request each, per changed notebook).
+- Records from before ids (keyed by image path) are never matched to marks,
+  so they never get `replaces`: corrections made before the `corrected` flag
+  existed are not overwritten.
 - `learnFromNotes` (start of each sync): compares each remark's text in its
   note with `transcript`; a difference is a correction → word samples via
   `learnCorrection`, `corrected = true`. Corrections whose words can't be
