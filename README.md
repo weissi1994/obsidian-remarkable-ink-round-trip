@@ -180,6 +180,7 @@ their state across. The others sync when you run **Sync with reMarkable now**.
 | Sync with reMarkable now | Read the tablet back, bring in new notebooks, send what changed |
 | Sync current note with reMarkable | The same for one note (also right-click on notes, folders and selections) |
 | Re-read current note from reMarkable | Read its notebook again even when the tablet reports no change |
+| Re-send every synced note to reMarkable | Rewrite all notebooks, e.g. after an update that changes how they look |
 | Show sync status | Queue, running batch (*Uploading 12/80*), tracked notes |
 | Check reMarkable cloud status (read-only) | Diagnose the connection |
 | Send handwriting sheet / Learn my handwriting / Add handwriting variations | Your letters |

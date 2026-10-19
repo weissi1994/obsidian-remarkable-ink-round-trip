@@ -58,6 +58,8 @@ export const PEN_COLOR = {
 	pink: 5,
 	blue: 6,
 	red: 7,
+	/** The colour tablets' highlighter: the exact colour rides along (InkLine.argb). */
+	highlight: 9,
 } as const;
 
 export interface InkPoint {

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Light highlighter colours, for real:** on the Paper Pro and Move the bands
+  are now written the way the tablet writes its own highlighter — its
+  "highlight" colour with the exact tint — which the tablet honours; the tint
+  alone, on a palette colour, still showed the dark pen blue. New command
+  **Re-send every synced note to reMarkable** rewrites existing notebooks after
+  a change like this one.
 - **Several copies of one vault, one tablet:** the sync state — which notebook
   belongs to which note, what it was written from, the learned hand and word
   samples — moves from the plugin's own data into the vault

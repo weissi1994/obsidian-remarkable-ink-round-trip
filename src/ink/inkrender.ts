@@ -593,8 +593,13 @@ function directionOf(dx: number, dy: number): number {
 	return Math.round((((angle + 2 * Math.PI) % (2 * Math.PI)) / (2 * Math.PI)) * 255) & 0xff;
 }
 
-/** Strokes → v2 points with the pressure and width a real pen would leave. */
-export function toInkLines(strokes: GeneratedStroke[], pen: InkPen): InkLine[] {
+/**
+ * Strokes → v2 points with the pressure and width a real pen would leave.
+ * `exactColours`: a colour tablet's highlighter writes the "highlight" entry
+ * plus the exact colour; given a palette entry instead, the Paper Pro shows
+ * that entry's pen colour — dark — and ignores the exact one.
+ */
+export function toInkLines(strokes: GeneratedStroke[], pen: InkPen, exactColours = false): InkLine[] {
 	return strokes.map((stroke) => {
 		const widthScale = stroke.thicknessScale / pen.thicknessScale;
 		const points: InkPoint[] = stroke.points.map((point, index) => {
@@ -613,7 +618,7 @@ export function toInkLines(strokes: GeneratedStroke[], pen: InkPen): InkLine[] {
 		return {
 			counter: stroke.counter,
 			tool: stroke.tool,
-			color: stroke.color,
+			color: exactColours && argb !== undefined ? PEN_COLOR.highlight : stroke.color,
 			thicknessScale: stroke.thicknessScale,
 			points,
 			...(argb === undefined ? {} : { argb }),
@@ -621,10 +626,15 @@ export function toInkLines(strokes: GeneratedStroke[], pen: InkPen): InkLine[] {
 	});
 }
 
+/** Colour tablets (Paper Pro, Move); the reMarkable 1 and 2 share the 1404×1872 canvas. */
+export function hasColour(profile: DeviceProfile): boolean {
+	return !(profile.width === 1404 && profile.height === 1872);
+}
+
 /** The `.rm` bytes of every page of a render. */
 export function inkPagesToRm(render: InkRender, options: InkRenderOptions): Uint8Array[] {
 	return render.pages.map((strokes) =>
-		buildInkPageRm(toInkLines(strokes, options.pen), {
+		buildInkPageRm(toInkLines(strokes, options.pen, hasColour(options.profile)), {
 			paperSize: { width: options.profile.width, height: options.profile.height },
 		}),
 	);

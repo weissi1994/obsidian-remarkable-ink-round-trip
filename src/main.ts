@@ -221,6 +221,13 @@ export default class RoundTripPlugin extends Plugin {
 			name: "Sync with reMarkable now",
 			callback: () => void this.syncNow(),
 		});
+		// After a change that alters how notebooks look but not what notes say
+		// (fonts, colours, an update): unchanged notes are otherwise left as sent.
+		this.addCommand({
+			id: "resend-all",
+			name: "Re-send every synced note to reMarkable",
+			callback: () => void this.resendAll(),
+		});
 		this.addCommand({
 			id: "show-sync-status",
 			name: "Show sync status",
@@ -741,6 +748,22 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		await this.ink.saveDeviceItems(cache);
 		if (created.length > 0) notify(`Brought ${created.length} notebook(s) from the reMarkable into the vault.`);
+	}
+
+	/** Write every note that has a notebook into a fresh one, read back first as always. */
+	private async resendAll(): Promise<void> {
+		await this.refreshState();
+		const files = new Map<string, TFile>();
+		for (const entry of Object.values(this.settings.mappings)) {
+			const file = this.resolveNote(entry);
+			if (file !== null) files.set(file.path, file);
+		}
+		if (files.size === 0) {
+			notify("No synced notes yet.");
+			return;
+		}
+		notify(`Re-sending ${files.size} note(s) — the reMarkable cloud paces this, so it takes a while.`, 8000);
+		await this.sendFiles([...files.values()]);
 	}
 
 	/** Every note in the sync folders, when they are on. */

@@ -92,8 +92,20 @@ describe("colour accents", () => {
 		const bands = scene.lines.filter((line) => line.stroke.tool === PEN.highlighter);
 		const tints = new Set(bands.map((line) => line.rgb));
 		expect(tints).toEqual(new Set(["#beeafe", "#f29eff", "#ffed75"]));
+		// The Paper Pro shows an exact colour only on its "highlight" entry.
+		expect(bands.every((line) => line.stroke.color === PEN_COLOR.highlight)).toBe(true);
 		// Pen strokes carry no colour of their own: they stay in the palette.
 		expect(scene.lines.filter((line) => line.stroke.tool !== PEN.highlighter).every((line) => line.rgb === undefined)).toBe(true);
+	});
+
+	it("keeps palette colours on a reMarkable 1 or 2", () => {
+		const options = inkOptionsFor({ ...SNAPSHOT, profile: DEVICE_PROFILES.rm2, accents: true }, "doc-1", () => null)!;
+		const r = renderInk(parseBlocks(NOTE), "Accents", LAYOUT, options);
+		const [page] = inkPagesToRm(r, options);
+		const bands = parseRmScene(page).lines.filter((line) => line.stroke.tool === PEN.highlighter);
+		expect(new Set(bands.map((line) => line.stroke.color))).toEqual(
+			new Set([ACCENT_COLORS.code, ACCENT_COLORS["inline-code"], ACCENT_COLORS.quote]),
+		);
 	});
 
 	it("recognises its own bands when the page comes back", () => {
