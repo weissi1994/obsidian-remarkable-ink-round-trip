@@ -144,9 +144,9 @@ Remarks come back as an image of your ink and — when they can be read — as t
   the words in your vault, so German, English and your own names and jargon are
   covered without a dictionary. **Joined-up writing** is read word by word
   against words you wrote before. It learns them two ways:
-  - **From corrections:** fix the text under a remark's image in the note — or
-    type what it says under one that came back as an image only — and the next
-    sync learns those words from that ink.
+  - **From corrections:** fix the text of a remark in the note — or type what it
+    says under one that came back as an image only — and the next sync learns
+    those words from that ink (see [Correcting what was read](#correcting-what-was-read)).
   - **From the word sheet:** **Send joined-up word sheet to reMarkable**, write
     each everyday German and English word once the way you usually write, then
     **Learn my joined-up words from the sheet**.
@@ -162,8 +162,39 @@ Remarks come back as an image of your ink and — when they can be read — as t
   guess.
 - **Vision model endpoint**: any OpenAI-compatible vision model — local (Ollama,
   LM Studio) or hosted. Only the cropped remark images are sent there, never the
-  note.
+  note — plus, as worked examples, your latest corrected remarks (*Worked
+  examples from your corrections*, 3 by default, 0 for none).
 - **Off**: images only.
+
+### Correcting what was read
+
+Every remark callout ends in a hidden block id, `^ink-<id>` — a hash of the
+remark's ink, which also names its image. Link to it like any block
+(`[[Note#^ink-3f9a2c1b0d4e]]`).
+
+```
+> [!note] Remark
+> what was read — edit this
+> ![[reMarkable-in/handwriting/<notebook>-p01-3f9a2c1b0d4e.png]]
+> ^ink-3f9a2c1b0d4e
+```
+
+Edit the text in the callout (or type it under an image-only remark) and keep
+the id line. From then on the text is yours:
+
+- **Later syncs keep it.** The notebook is read again on every import, but a
+  remark the note already has is never placed again — your text, and where you
+  moved the callout, stand. Only a callout without text yet gets a new reading.
+- **The reader learns from it.** The built-in reader stores the words with your
+  ink; the vision endpoint gets your latest corrections as worked examples. A
+  correction whose words can't be matched to the ink one by one (a different
+  number of lines or words) teaches the built-in reader nothing — a notice
+  says which, and it still counts as a correction.
+- **Train a model on it:** **Export handwriting corrections as training data**
+  writes `<handwriting folder>/training/` — `images/`, `dataset.jsonl` and
+  `dataset_info.json` in the format [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)
+  reads — to fine-tune a vision model on your hand outside the plugin. See
+  [docs/ocr-corrections.md](docs/ocr-corrections.md).
 
 ## Several copies of the vault
 

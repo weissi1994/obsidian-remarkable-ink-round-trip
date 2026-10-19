@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Corrections to read handwriting stick, and teach every reader:**
+  - Each remark gets a stable id — a hash of its ink — that names its image
+    and ends its callout as a block id (`^ink-…`). A remark written above an
+    old one no longer renumbers it (which overwrote its image and pinned
+    corrections to the wrong ink). Images under the old numbered names keep
+    them while their ink is unchanged.
+  - A remark the note already shows is no longer imported again: a corrected
+    text used to come back on every sync as an "Also changed on the
+    reMarkable" conflict holding the old reading — or, in the summary block,
+    replaced it. Your text and placement now stand; an image-only remark
+    still gets its text filled in once it can be read.
+  - A correction that cannot be matched to the ink word for word is reported
+    in a notice instead of being dropped silently.
+  - The vision endpoint learns too: your latest corrections go along with
+    each request as worked examples (*Worked examples from your
+    corrections*, default 3).
+  - **Export handwriting corrections as training data** writes them as a
+    LLaMA-Factory dataset for fine-tuning a vision model outside the plugin.
+
 - **Joined-up writing read by WritePad:** remarks the built-in letter reader is
   unsure of are read again by the WritePad handwriting engine (PhatWare,
   GPL-3.0), built to WebAssembly and bundled with its English and German
