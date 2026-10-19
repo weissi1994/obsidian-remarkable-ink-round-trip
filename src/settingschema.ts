@@ -425,6 +425,15 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				visibleWhen: { key: "ocrMode", equals: "endpoint" },
 			},
 			{
+				key: "ocrExamples",
+				name: "Worked examples from your corrections",
+				desc:
+					"Your most recent corrected remarks are sent along with each image, so the model sees your " +
+					"handwriting and words before reading it. More examples read better but make each request bigger; 0 turns it off.",
+				control: { type: "slider", min: 0, max: 8, step: 1 },
+				visibleWhen: { key: "ocrMode", equals: "endpoint" },
+			},
+			{
 				key: "ocrKeepImage",
 				name: "Keep the image next to the text",
 				desc: "Recommended: a misread word is easy to check against the ink.",

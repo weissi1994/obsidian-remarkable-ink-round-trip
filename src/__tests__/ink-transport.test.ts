@@ -120,6 +120,26 @@ describe("OCR", () => {
 		expect(body.messages[0].content[1].image_url?.url).toBe("data:image/png;base64,AQI=");
 	});
 
+	it("sends the owner's corrections ahead as worked examples", () => {
+		const examples = [
+			{ png: new Uint8Array([9]).buffer, text: "Termin morgen" },
+			{ png: new Uint8Array([8]).buffer, text: "prüfen" },
+		];
+		expect(ocrPrompt({ png: new ArrayBuffer(0), examples })).toContain("same handwriting");
+		expect(ocrPrompt({ png: new ArrayBuffer(0) })).not.toContain("same handwriting");
+		const body = JSON.parse(ocrBody({ endpoint: "x", model: "m" }, { png: new Uint8Array([1, 2]).buffer, examples })) as {
+			messages: { role: string; content: string | { type: string; image_url?: { url: string } }[] }[];
+		};
+		expect(body.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+		const image = (i: number) =>
+			(body.messages[i].content as { image_url?: { url: string } }[]).find((part) => part.image_url)?.image_url?.url;
+		expect(image(0)).toBe("data:image/png;base64,CQ==");
+		expect(body.messages[1].content).toBe("Termin morgen");
+		expect(body.messages[3].content).toBe("prüfen");
+		// The image to read comes last.
+		expect(image(4)).toBe("data:image/png;base64,AQI=");
+	});
+
 	it("reads string and part-list answers, and NO_TEXT as nothing", () => {
 		expect(parseOcrResponse(JSON.stringify({ choices: [{ message: { content: "prüfen!" } }] }))).toBe("prüfen!");
 		expect(

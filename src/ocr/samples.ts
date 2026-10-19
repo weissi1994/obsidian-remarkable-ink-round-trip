@@ -232,3 +232,13 @@ export function learnFromNotes(
 	}
 	return { remarks, words, unlearned };
 }
+
+/**
+ * The owner's corrections, newest first: remarks whose text they changed or
+ * typed in. Worked examples for a vision model, and the training export.
+ */
+export function corrections(store: SampleStore): [string, RemarkRecord][] {
+	return Object.entries(store.remarks)
+		.filter(([, record]) => record.corrected === true && record.transcript !== "")
+		.sort(([, a], [, b]) => b.at.localeCompare(a.at));
+}

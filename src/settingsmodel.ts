@@ -101,6 +101,8 @@ export interface RoundTripSettings {
 	ocrApiKey: string;
 	/** Keep the ink image next to its transcript. */
 	ocrKeepImage: boolean;
+	/** Vision endpoint: how many of the owner's corrections go along as worked examples. */
+	ocrExamples: number;
 	/** docId ↔ device document mapping (round-trip foundation, F5). */
 	mappings: MappingTable;
 }
@@ -153,6 +155,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	ocrModel: "qwen2.5vl:7b",
 	ocrApiKey: "",
 	ocrKeepImage: true,
+	ocrExamples: 3,
 	mappings: {},
 };
 

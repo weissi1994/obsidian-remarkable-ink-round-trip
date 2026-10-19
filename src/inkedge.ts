@@ -41,7 +41,7 @@ import type { DeviceItem } from "./sync/deviceimport";
 import type { SyncState } from "./sync/syncstate";
 import type { HttpClient } from "./transport/http";
 import { readNotebook, sendNotebook, type RawSyncApi } from "./transport/notebook";
-import { transcribe } from "./transport/ocr";
+import { transcribe, type OcrExample } from "./transport/ocr";
 
 /** What the edge needs from the plugin; structural, so main.ts stays the owner. */
 export interface InkHost {
@@ -238,12 +238,12 @@ export class InkEdge {
 	}
 
 	/** OCR one image, or null when OCR is off. */
-	ocr(http: HttpClient, png: ArrayBuffer, quote: string | undefined, wholePage: boolean) {
+	ocr(http: HttpClient, png: ArrayBuffer, quote: string | undefined, wholePage: boolean, examples: OcrExample[] = []) {
 		const s = this.host.settings;
 		return transcribe(
 			http,
 			{ endpoint: s.ocrEndpoint, model: s.ocrModel, apiKey: s.ocrApiKey },
-			{ png, quote, wholePage },
+			{ png, quote, wholePage, examples },
 		);
 	}
 

@@ -7,6 +7,7 @@ import { buildScenePageRm, INK_AUTHOR, SceneItemSpec } from "../ink/rmwrite";
 import { Lexicon, OCR_TRUST, Point, recognize, templatesFrom } from "../ocr/recognize";
 import {
 	addSample,
+	corrections,
 	describeUnlearned,
 	emptyStore,
 	knownText,
@@ -224,5 +225,20 @@ describe("a correction that teaches nothing", () => {
 		expect(describeUnlearned({ key: "k", image: "a.png", inkLines: [2], textLines: [1, 1] })).toBe(
 			"a.png: the ink reads as 1 line(s), the text has 2",
 		);
+	});
+});
+
+describe("corrections", () => {
+	it("are the remarks the owner changed, newest first", () => {
+		const store = emptyStore();
+		const ink = [[{ x: 0, y: 0 }]];
+		rememberRemark(store, "read", ink, "as read", new Date("2026-10-01"));
+		rememberRemark(store, "old", ink, "x", new Date("2026-10-02"));
+		rememberRemark(store, "new", ink, "x", new Date("2026-10-03"));
+		rememberRemark(store, "emptied", ink, "x", new Date("2026-10-04"));
+		Object.assign(store.remarks.old, { corrected: true, transcript: "old fix" });
+		Object.assign(store.remarks.new, { corrected: true, transcript: "new fix" });
+		Object.assign(store.remarks.emptied, { corrected: true, transcript: "" });
+		expect(corrections(store).map(([key]) => key)).toEqual(["new", "old"]);
 	});
 });

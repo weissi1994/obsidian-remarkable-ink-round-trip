@@ -66,7 +66,17 @@ import { remarkId } from "./incoming/remarkid";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
-import { describeUnlearned, knownText, learnFromNotes, refOf, rememberRemark, remarkText } from "./ocr/samples";
+import {
+	corrections,
+	describeUnlearned,
+	knownText,
+	learnFromNotes,
+	refOf,
+	rememberRemark,
+	remarkText,
+	type RemarkRecord,
+} from "./ocr/samples";
+import type { OcrExample } from "./transport/ocr";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -664,6 +674,7 @@ export default class RoundTripPlugin extends Plugin {
 	}
 
 	private async runImportNewNotebooks(created: string[]): Promise<void> {
+		this.examples = null;
 		const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
 		const cache = await this.ink.loadDeviceItems();
 		const live = await api.listIds(true);
@@ -1197,6 +1208,7 @@ export default class RoundTripPlugin extends Plugin {
 		const log: string[] = [];
 		this.inkCache.clear();
 		this.remarkImages.clear();
+		this.examples = null;
 		this.lexicon = null;
 		this.words = null;
 		this.dropWritePad();
@@ -1672,7 +1684,7 @@ export default class RoundTripPlugin extends Plugin {
 	 * benefit at once.
 	 */
 	private async learnFromCorrections(log: (line: string) => void): Promise<void> {
-		if (this.settings.ocrMode !== "builtin") return;
+		if (this.settings.ocrMode === "off") return;
 		const store = await this.ink.loadSamples();
 		const records = Object.entries(store.remarks);
 		if (records.length === 0) return;
@@ -1748,13 +1760,52 @@ export default class RoundTripPlugin extends Plugin {
 		return this.lexicon;
 	}
 
-	/** OCR one remark through the configured endpoint (opt-in). */
+	/**
+	 * OCR one remark through the configured endpoint (opt-in), with the
+	 * owner's latest corrections as worked examples. A remark read before
+	 * keeps the note's text, the owner's once corrected.
+	 */
 	private async transcribeStrokes(
 		request: StrokeRenderRequest & { quote?: string },
 	): Promise<string | null> {
+		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
+		if (known !== null) return known;
 		const png = await this.strokesToPng(request.strokes);
 		if (png === null) return null;
-		return this.ink.ocr(obsidianHttp, png, request.quote, request.wholePage === true);
+		const text = await this.ink.ocr(obsidianHttp, png, request.quote, request.wholePage === true, await this.ocrExamples());
+		await this.rememberReading(request, text);
+		return text;
+	}
+
+	/** Worked examples, rendered once per run: the latest corrections, oldest first. */
+	private examples: Promise<OcrExample[]> | null = null;
+
+	private ocrExamples(): Promise<OcrExample[]> {
+		this.examples ??= (async () => {
+			const picked = corrections(await this.ink.loadSamples()).slice(0, Math.max(0, this.settings.ocrExamples));
+			const out: OcrExample[] = [];
+			for (const [, record] of picked.reverse()) {
+				const png = await this.remarkPng(record);
+				if (png !== null) out.push({ png, text: record.transcript });
+			}
+			return out;
+		})();
+		return this.examples;
+	}
+
+	/** A remembered remark as PNG: its image in the vault, or drawn again from its strokes. */
+	private async remarkPng(record: RemarkRecord): Promise<ArrayBuffer | null> {
+		const file = record.image === undefined ? null : this.app.vault.getFileByPath(record.image);
+		if (file !== null) return this.app.vault.readBinary(file);
+		// Stored strokes keep only their path; a fineliner's width draws them plainly.
+		return this.strokesToPng(
+			record.strokes.map((points) => ({
+				tool: 0,
+				color: 0,
+				thicknessScale: 1,
+				points: points.map((p) => ({ ...p, width: 20, pressure: 100 })),
+			})),
+		);
 	}
 
 	/** Open the rmapi-js session the raw sync API lives on. */

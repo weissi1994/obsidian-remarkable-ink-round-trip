@@ -22,8 +22,21 @@ export interface OcrConfig {
 	apiKey?: string;
 }
 
+/**
+ * A remark in the owner's hand with the text they corrected it to. Sent
+ * ahead of the image to read, as earlier turns of the conversation, so the
+ * model sees this hand — its letter shapes, its words — before reading it:
+ * learning from corrections without training anything.
+ */
+export interface OcrExample {
+	png: ArrayBuffer;
+	text: string;
+}
+
 export interface OcrRequest {
 	png: ArrayBuffer;
+	/** Corrected remarks in the same hand, oldest first (worked examples). */
+	examples?: OcrExample[];
 	/** The line the ink was written against, as a hint for the reader. */
 	quote?: string;
 	/** A whole page added on the tablet rather than a margin remark. */
@@ -39,6 +52,9 @@ export function ocrPrompt(request: OcrRequest): string {
 			: "This image is a handwritten remark from the margin of a document on an e-ink tablet.",
 		"Transcribe the handwriting exactly as written, keeping its language and line breaks.",
 		"Do not translate, correct, summarise or add anything.",
+		(request.examples?.length ?? 0) > 0
+			? "The earlier images are in the same handwriting, each answered with its correct transcription; use them to read this hand."
+			: "",
 		request.quote === undefined
 			? ""
 			: `For context only (do not transcribe it), the remark sits next to this printed line: "${request.quote}"`,
@@ -66,6 +82,16 @@ export function ocrBody(config: OcrConfig, request: OcrRequest): string {
 		temperature: 0,
 		max_tokens: request.wholePage ? 1500 : 300,
 		messages: [
+			...(request.examples ?? []).flatMap((example) => [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "Transcribe this handwriting." },
+						{ type: "image_url", image_url: { url: `data:image/png;base64,${base64(example.png)}` } },
+					],
+				},
+				{ role: "assistant", content: example.text },
+			]),
 			{
 				role: "user",
 				content: [
