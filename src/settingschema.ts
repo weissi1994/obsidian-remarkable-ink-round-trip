@@ -192,6 +192,25 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				control: { type: "slider", min: 0, max: 60, step: 5 },
 			},
 			{
+				key: "autoSync",
+				name: "Sync automatically from this device",
+				desc:
+					"At startup, on the interval above and when a note changes. Several copies " +
+					"of the vault on one tablet (laptop and desktop, synced by git)? Leave this on " +
+					"for one of them only; the others sync when you run “Sync with reMarkable now”.",
+				control: { type: "toggle" },
+			},
+			{
+				key: "syncStateFolder",
+				name: "Shared sync state folder",
+				desc:
+					"Vault folder holding what ties notes to their notebooks, synced along with your " +
+					"notes — so every copy of the vault knows what was sent and none sends a " +
+					"duplicate. A folder starting with a dot stays out of Obsidian's file list. " +
+					"Move its contents along if you change it.",
+				control: { type: "text", placeholder: "reMarkable/.sync", sanitise: "path" },
+			},
+			{
 				key: "backupFolder",
 				name: "Folder for backups",
 				desc:

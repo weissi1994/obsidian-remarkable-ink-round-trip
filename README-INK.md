@@ -214,6 +214,21 @@ text it kept at send time — and compares:
 Missing ink is summed per word: mostly gone → erased; mostly elsewhere → moved,
 and where it landed decides which word it now follows.
 
+## Several copies of the vault
+
+What ties a note to its notebook — which notebook it is, the text it was written
+from, your learned handwriting and word samples — lives in the vault itself, in
+`reMarkable/.sync/` (*Settings → Sync → Shared sync state folder*), one small file
+per note. Sync your vault with git, Obsidian Sync or Syncthing and every copy knows
+what the others sent: none sends a duplicate, and each can bring back what you did
+on the tablet. Pictures are stored once by their content, so re-sends don't grow
+the folder. Your pairing token and device settings stay out of it.
+
+Turn **Sync automatically from this device** off on all but one copy: two copies
+syncing at once could both send a note changed in the minutes before the vault
+sync carried their state across. The others sync whenever you run *Sync with
+reMarkable now*.
+
 ## Worth knowing
 
 - **Move a word onto a line**, between or after words — that's where it lands in

@@ -38,6 +38,7 @@ import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
 import { addSample, emptyStore, type SampleStore } from "./ocr/samples";
 import type { DeviceItem } from "./sync/deviceimport";
+import type { SyncState } from "./sync/syncstate";
 import type { HttpClient } from "./transport/http";
 import { readNotebook, sendNotebook, type RawSyncApi } from "./transport/notebook";
 import { transcribe } from "./transport/ocr";
@@ -48,6 +49,8 @@ export interface InkHost {
 	manifest: { dir?: string };
 	settings: RoundTripSettings;
 	persist(): Promise<void>;
+	/** The state every copy of the vault shares: sends, hands, word samples. */
+	state: SyncState;
 }
 
 /** Known canvas sizes → their pixel density, for a detected paper size. */
@@ -102,7 +105,9 @@ export class InkEdge {
 	async ensureHand(version: string | undefined): Promise<HandLibrary | null> {
 		if (version === undefined || version === "") return null;
 		if (this.hands.has(version)) return this.hands.get(version) ?? null;
-		const library = await this.readJson<HandLibrary>(`${this.dir}/hands/${version}.json`);
+		const library =
+			(await this.host.state.readHand(version)) ??
+			(await this.readJson<HandLibrary>(`${this.dir}/hands/${version}.json`));
 		this.hands.set(version, library);
 		return library;
 	}
@@ -186,12 +191,14 @@ export class InkEdge {
 
 	/** Keep what was sent, so the import can regenerate it after edits. */
 	async persistSent(docId: string, sent: SentRecord): Promise<void> {
-		await this.writeJson(`${this.dir}/sent/${docId}.json`, sent);
+		await this.host.state.writeSent(docId, sent);
 	}
 
 	/** What a send kept, or null when it is gone. */
 	readSent(docId: string): Promise<SentRecord | null> {
-		return this.readJson<SentRecord>(`${this.dir}/sent/${docId}.json`);
+		return this.host.state
+			.readSent(docId)
+			.then((sent) => sent ?? this.readJson<SentRecord>(`${this.dir}/sent/${docId}.json`));
 	}
 
 	upload(api: RawSyncApi, name: string, pages: Uint8Array[], parentId?: string, replaces?: string) {
@@ -258,6 +265,36 @@ export class InkEdge {
 		await this.host.persist();
 	}
 
+	/**
+	 * Copy what older versions kept in the plugin folder — sends, hands, word
+	 * samples — into the shared state, once. Returns how many sends moved.
+	 */
+	async migrateToState(): Promise<number> {
+		const adapter = this.host.app.vault.adapter;
+		const state = this.host.state;
+		let moved = 0;
+		const sentDir = `${this.dir}/sent`;
+		if (await adapter.exists(sentDir)) {
+			for (const file of (await adapter.list(sentDir)).files) {
+				const docId = (file.split("/").pop() ?? "").replace(/\.json$/, "");
+				const sent = await this.readJson<SentRecord>(file);
+				if (sent === null || (await state.readSent(docId)) !== null) continue;
+				await state.writeSent(docId, sent);
+				moved++;
+			}
+		}
+		const handsDir = `${this.dir}/hands`;
+		if (await adapter.exists(handsDir)) {
+			for (const file of (await adapter.list(handsDir)).files) {
+				const library = await this.readJson<HandLibrary>(file);
+				if (library !== null && (await state.readHand(library.version)) === null) await state.writeHand(library);
+			}
+		}
+		const samples = await this.readJson<SampleStore>(`${this.dir}/ocr/samples.json`);
+		if (samples !== null && (await state.readSamples()) === null) await state.writeSamples(samples);
+		return moved;
+	}
+
 	/* ------------------------ device item cache ----------------------- */
 
 	/** What the account's documents and folders were at their last seen hash. */
@@ -275,12 +312,15 @@ export class InkEdge {
 
 	/** The owner's written words and remembered remarks (ocr/samples.ts). */
 	async loadSamples(): Promise<SampleStore> {
-		this.samples ??= (await this.readJson<SampleStore>(`${this.dir}/ocr/samples.json`)) ?? emptyStore();
+		this.samples ??=
+			(await this.host.state.readSamples()) ??
+			(await this.readJson<SampleStore>(`${this.dir}/ocr/samples.json`)) ??
+			emptyStore();
 		return this.samples;
 	}
 
 	async saveSamples(): Promise<void> {
-		if (this.samples !== null) await this.writeJson(`${this.dir}/ocr/samples.json`, this.samples);
+		if (this.samples !== null) await this.host.state.writeSamples(this.samples);
 	}
 
 	/** Send a fresh word sheet and remember it as pending. */
@@ -327,7 +367,7 @@ export class InkEdge {
 				"Nothing written on the sheet yet — fill in some boxes on the reMarkable and let it sync.",
 			);
 		}
-		await this.writeJson(`${this.dir}/hands/${result.library.version}.json`, result.library);
+		await this.host.state.writeHand(result.library);
 		this.hands.set(result.library.version, result.library);
 		this.host.settings.handVersion = result.library.version;
 		await this.host.persist();

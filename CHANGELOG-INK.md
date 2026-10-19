@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Several copies of one vault, one tablet:** the sync state — which notebook
+  belongs to which note, what it was written from, the learned hand and word
+  samples — moves from the plugin's own data into the vault
+  (`reMarkable/.sync/`, one small file per note, pictures stored once), so a vault
+  synced by git or Obsidian Sync carries it to every copy and none sends
+  duplicates. Moved there automatically on first start. *Sync automatically from
+  this device* lets one copy do the background syncing. Notebooks written by any
+  copy are recognised by their pages and never brought in as new.
 - **Notebooks started on the tablet come into the vault:** a notebook in the
   device folder of a synced vault folder becomes a note there — each page's ink
   as an image, with its text as read — and is sent back as a handwritten

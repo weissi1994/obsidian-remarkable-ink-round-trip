@@ -7,6 +7,7 @@
  */
 
 import {
+	App,
 	Menu,
 	Notice,
 	Platform,
@@ -55,6 +56,7 @@ import { EmbedContent } from "./preprocess/preprocess";
 import { DOCID_FRONTMATTER_KEY, generateDocId } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
+import { SyncState, type StateFs } from "./sync/syncstate";
 import { findNewNotebooks, importedNote, noteFileName, writtenByPlugin } from "./sync/deviceimport";
 import { parseRmScene } from "./incoming/rmscene";
 import { readNotebook } from "./transport/notebook";
@@ -75,7 +77,7 @@ import {
 } from "./incoming/pull";
 import { renderImportReport } from "./incoming/report";
 import { paintPlan, planRender } from "./incoming/strokerender";
-import { MappingEntry, contentHash } from "./id/mapping";
+import { MappingEntry, MappingTable, contentHash } from "./id/mapping";
 import { displayTextForLink, parseFrontmatter, preprocess, splitNote } from "./preprocess/preprocess";
 import type { AnnotationOutcome } from "./incoming/annotationnote";
 import { WatchQueue, parseFolderList } from "./sync/watcher";
@@ -127,6 +129,8 @@ export default class RoundTripPlugin extends Plugin {
 	private words: WordReader | null = null;
 	private samplesDirty = false;
 	private syncTimer: number | null = null;
+	/** What every copy of the vault shares (sync/syncstate.ts); set up on load. */
+	state: SyncState = new SyncState(vaultFs(this.app), DEFAULT_SETTINGS.syncStateFolder);
 	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
 	readonly ink = ((plugin: RoundTripPlugin) =>
 		new InkEdge({
@@ -138,6 +142,9 @@ export default class RoundTripPlugin extends Plugin {
 			},
 			get settings() {
 				return plugin.settings;
+			},
+			get state() {
+				return plugin.state;
 			},
 			persist: () => plugin.persistSettings(),
 		}))(this);
@@ -327,7 +334,7 @@ export default class RoundTripPlugin extends Plugin {
 		);
 
 		this.app.workspace.onLayoutReady(() => {
-			void this.syncNow({ background: true });
+			if (this.settings.autoSync) void this.syncNow({ background: true });
 		});
 		this.setupSyncTimer();
 	}
@@ -378,6 +385,41 @@ export default class RoundTripPlugin extends Plugin {
 		// (bevinding eigenaar 2026-08-13; the spike flag that surfaced it is
 		// gone since GP_E7_S2, the preservation stays).
 		this.extraData = extrasFrom(stored);
+		await this.openState(stored.mappings ?? {});
+	}
+
+	/**
+	 * Read the mappings from the shared state folder. Mappings an older
+	 * version kept in data.json — the first time, or a device that synced on
+	 * its own until now — join them; where both know a note, the shared state
+	 * wins. Sends, hands and word samples follow once.
+	 */
+	private async openState(legacy: MappingTable): Promise<void> {
+		this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
+		const shared = await this.state.loadMappings();
+		this.settings.mappings = { ...legacy, ...shared };
+		if (Object.keys(legacy).some((docId) => shared[docId] === undefined)) {
+			const moved = await this.ink.migrateToState();
+			await this.state.saveMappings(this.settings.mappings);
+			await this.saveData(storedFrom({ ...this.settings, mappings: {} }, this.extraData));
+			notify(
+				`reMarkable sync state now lives in “${this.settings.syncStateFolder}” (${moved} send record(s) moved), ` +
+					"so every copy of the vault shares it.",
+				10000,
+			);
+		}
+		if (this.state.unreadable.length > 0) {
+			notify(
+				`reMarkable sync state: ${this.state.unreadable.length} file(s) could not be read (a merge conflict?): ` +
+					this.state.unreadable.slice(0, 3).join(", "),
+				15000,
+			);
+		}
+	}
+
+	/** Take in what other copies of the vault synced since (a git pull). */
+	private async refreshState(): Promise<void> {
+		this.settings.mappings = await this.state.refresh(this.settings.mappings);
 	}
 
 	/**
@@ -406,7 +448,12 @@ export default class RoundTripPlugin extends Plugin {
 
 	/** Persist runtime state without disrupting active or queued sync work. */
 	async persistSettings(): Promise<void> {
-		await this.saveData(storedFrom(this.settings, this.extraData));
+		// The mappings live in the shared state folder, not with this device's settings.
+		await this.saveData(storedFrom({ ...this.settings, mappings: {} }, this.extraData));
+		if (this.state.root !== this.settings.syncStateFolder) {
+			this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
+		}
+		await this.state.saveMappings(this.settings.mappings);
 	}
 
 	onunload(): void {
@@ -482,7 +529,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.watchQueue?.dispose();
 		this.watchQueue = null;
 		const folders = parseFolderList(this.settings.watchFolderPath);
-		if (!this.settings.watchFolderEnabled || folders.length === 0) return;
+		if (!this.settings.autoSync || !this.settings.watchFolderEnabled || folders.length === 0) return;
 		this.watchQueue = new WatchQueue({
 			folders,
 			debounceMs: WATCH_DEBOUNCE_MS,
@@ -712,7 +759,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (this.syncTimer !== null) window.clearInterval(this.syncTimer);
 		this.syncTimer = null;
 		const minutes = this.settings.syncIntervalMinutes;
-		if (!(minutes > 0)) return;
+		if (!this.settings.autoSync || !(minutes > 0)) return;
 		this.syncTimer = window.setInterval(
 			() => void this.syncNow({ background: true }),
 			minutes * 60_000,
@@ -753,6 +800,7 @@ export default class RoundTripPlugin extends Plugin {
 				await this.pullAnnotations({ only: synced, background: true });
 			}
 		}
+		await this.refreshState();
 		const notes: NoteInput[] = [];
 		const embedMaps = new Map<string, Map<string, EmbedContent>>();
 		try {
@@ -1116,6 +1164,7 @@ export default class RoundTripPlugin extends Plugin {
 			return;
 		}
 
+		await this.refreshState();
 		const log: string[] = [];
 		this.inkCache.clear();
 		this.lexicon = null;
@@ -1902,6 +1951,19 @@ function reportResults(
 		if (options.quiet) console.warn(`reMarkable Ink Round-Trip: ${message}`);
 		else notify(message, 10000);
 	}
+}
+
+/** The vault adapter as the sync state's file seam: dot-folders included, unlike the vault API. */
+function vaultFs(app: App): StateFs {
+	const adapter = app.vault.adapter;
+	return {
+		exists: (path) => adapter.exists(path),
+		read: (path) => adapter.read(path),
+		write: (path, data) => adapter.write(path, data),
+		mkdir: (path) => adapter.mkdir(path),
+		list: async (dir) => (await adapter.list(dir)).files,
+		remove: (path) => adapter.remove(path),
+	};
 }
 
 /** Obsidian requestUrl adapter — CORS-free and mobile-safe (N7). */

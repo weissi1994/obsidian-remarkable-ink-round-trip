@@ -36,6 +36,17 @@ export interface RoundTripSettings {
 	syncIntervalMinutes: number;
 	/** Vault folder for the copy of a note taken before tablet changes go in. */
 	backupFolder: string;
+	/**
+	 * Vault folder for the sync state every copy of the vault shares — what
+	 * ties notes to notebooks. Synced with the notes (git, Obsidian Sync…).
+	 */
+	syncStateFolder: string;
+	/**
+	 * This device syncs on its own: at startup, on the interval and when a
+	 * note changes. Off on all but one device when several copies of the
+	 * vault share a tablet, so two never send the same note at once.
+	 */
+	autoSync: boolean;
 	/** Import handwritten annotations as PNG images (F12). */
 	importHandwriting: boolean;
 	/** Vault folder for the rendered handwriting images. */
@@ -112,6 +123,8 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	watchFolderPath: "reMarkable-out",
 	syncIntervalMinutes: 5,
 	backupFolder: "reMarkable-in/previous",
+	syncStateFolder: "reMarkable/.sync",
+	autoSync: true,
 	importHandwriting: true,
 	markStyles: { ...DEFAULT_MARK_STYLES },
 	handwritingFolder: "reMarkable-in/handwriting",
