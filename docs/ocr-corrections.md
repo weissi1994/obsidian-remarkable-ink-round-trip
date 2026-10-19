@@ -17,6 +17,15 @@ improves reading. User-facing summary: README → *Correcting what was read*.
   image, for notes from before ids) and returns its text: quoted lines other
   than the callout title, image and id line.
 
+## Where a remark is placed — `src/incoming/sourceprojection.ts`
+
+A remark is anchored to the source line of the printed row it was written
+against (`anchorLine`), then moved to the end of that line's block
+(`blockEnd`): the closing fence of a code block, else the end of the run of
+non-blank lines (table, callout, paragraph), carried across blank lines while
+a list continues. It is inserted with a blank line before and after, so it
+never splits a block or absorbs the lines after it.
+
 ## Keeping the note's text — `src/sync/twoway.ts`
 
 Every import re-reads the whole notebook, and the three-way merge base is the

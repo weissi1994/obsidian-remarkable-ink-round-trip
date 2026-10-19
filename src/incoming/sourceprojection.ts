@@ -692,13 +692,66 @@ function applyBlockMarks(
 		}
 	}
 
+	// A remark goes after the whole block its line belongs to — a callout
+	// in the middle of a table, list, callout or code fence would split it,
+	// and the lines after it would run on into the remark.
+	const placed = new Map<number, string[]>();
+	for (const [line, remark] of remarks) {
+		const end = blockEnd(lines, line);
+		placed.set(end, [...(placed.get(end) ?? []), ...remark]);
+	}
 	const out: string[] = [];
 	lines.forEach((line, index) => {
 		out.push(quoted.has(index) && !line.startsWith(">") ? `> ${line}` : line);
-		const remark = remarks.get(index);
-		if (remark !== undefined) out.push("", ...remark);
+		const remark = placed.get(index);
+		if (remark === undefined) return;
+		out.push("", ...remark);
+		if (index + 1 < lines.length && lines[index + 1].trim() !== "") out.push("");
 	});
 	return out.join("\n");
+}
+
+const FENCE = /^\s*(`{3,}|~{3,})/;
+const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s/;
+
+/**
+ * The last line of the markdown block holding line `at`: the closing fence
+ * of a code block; else the end of its run of non-blank lines — a table, a
+ * callout, a paragraph — carried across blank lines while a list goes on
+ * (a further item, or an indented continuation).
+ */
+export function blockEnd(lines: string[], at: number): number {
+	let open: { line: number; fence: string } | null = null;
+	for (let i = 0; i <= at && i < lines.length; i++) {
+		const fence = FENCE.exec(lines[i])?.[1];
+		if (fence === undefined) continue;
+		if (open === null) open = { line: i, fence };
+		else if (fence[0] === open.fence[0] && fence.length >= open.fence.length) open = null;
+	}
+	if (open !== null) {
+		for (let i = at + 1; i < lines.length; i++) {
+			const fence = FENCE.exec(lines[i])?.[1];
+			if (fence !== undefined && fence[0] === open.fence[0] && fence.length >= open.fence.length) return i;
+		}
+		return lines.length - 1;
+	}
+	let end = at;
+	const list = () => lines.slice(start(lines, at), end + 1).some((line) => LIST_ITEM.test(line));
+	for (;;) {
+		while (end + 1 < lines.length && lines[end + 1].trim() !== "" && !FENCE.test(lines[end + 1])) end++;
+		if (!list()) return end;
+		let next = end + 1;
+		while (next < lines.length && lines[next].trim() === "") next++;
+		if (next >= lines.length || !(LIST_ITEM.test(lines[next]) || /^\s+\S/.test(lines[next]))) return end;
+		end = next;
+	}
+}
+
+/** First line of the run of non-blank lines holding `at`. */
+function start(lines: string[], at: number): number {
+	let first = at;
+	while (first > 0 && lines[first - 1].trim() !== "") first--;
+	return first;
 }
 
 /** Offset → line index, via the line starts of the untouched source. */

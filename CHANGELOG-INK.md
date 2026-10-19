@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Remarks no longer split tables, lists, callouts or code blocks:** a
+  remark written next to a table row, a callout line, a list item or a line
+  of code was inserted right after that line — splitting the block, and the
+  lines after it ran on into the remark (where they would later have been
+  learned as a "correction"). It now goes after the whole block.
+
 - **Corrections to read handwriting stick, and teach every reader:**
   - Each remark gets a stable id — a hash of its ink — that names its image
     and ends its callout as a block id (`^ink-…`). A remark written above an
