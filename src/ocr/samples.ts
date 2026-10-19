@@ -1,37 +1,59 @@
 /**
  * The owner's own written words, learned two ways (ink fork):
  *
- * - from corrections: every remark that is read keeps its ink, by the name
- *   of its image in the note. When the owner fixes the text under the image —
- *   or types it under a remark that came back as an image only — the next
- *   sync pairs those words with the remark's ink words;
+ * - from corrections: every remark that is read keeps its ink, by its id
+ *   (incoming/remarkid.ts — a hash of the ink, written into its callout).
+ *   When the owner fixes the text in the callout — or types it under a
+ *   remark that came back as an image only — the next sync pairs those
+ *   words with the remark's ink words;
  * - from the word sheet, where each box is one word written joined-up.
  *
  * Each word keeps up to three samples, newest last. The whole-word reader
  * (words.ts) checks them before anything else, so a word the owner wrote
  * once is recognised in their own hand from then on.
+ *
+ * The text the note has for a remark is the owner's from the moment they
+ * change it: a later reading of the same ink never replaces it, here or in
+ * the note (sync/twoway.ts).
  */
 
+import { remarkText, type RemarkRef } from "../incoming/remarkid";
 import { splitLineInto, splitWords, type Point } from "./recognize";
+
+export { remarkText };
 
 /** Samples kept per word; the oldest goes first. */
 const PER_WORD = 3;
-/** Remarks remembered for learning, newest kept. */
+/** Remarks remembered for learning that were never corrected, newest kept. */
 const REMARKS_KEPT = 500;
+/** Corrected remarks kept (worked examples, training export), newest kept. */
+const CORRECTIONS_KEPT = 2000;
 
 export interface RemarkRecord {
 	/** The remark's strokes, device units. */
 	strokes: Point[][];
-	/** The text the note got for it ("" when it stayed image only). */
+	/** The text the note has for it ("" when it stayed image only); the owner's once corrected. */
 	transcript: string;
+	/** What the reader last made of it ("" for nothing); absent in stores from before. */
+	read?: string;
+	/** The owner changed or typed in the text in the note. */
+	corrected?: boolean;
 	at: string;
+	/** Vault path of its image, when it has one. */
+	image?: string;
+	/** Vault path of the note it was imported into, when known. */
+	note?: string;
+	/** The printed line it was written against (the reader's hint). */
+	quote?: string;
+	/** A whole page added on the tablet rather than a margin remark. */
+	wholePage?: boolean;
 }
 
 export interface SampleStore {
 	format: 1;
 	/** Word as written → its samples, each a list of strokes (device units). */
 	words: Record<string, Point[][][]>;
-	/** Remarks by the vault path of their image. */
+	/** Remarks by id — or by the vault path of their image, in stores from before ids. */
 	remarks: Record<string, RemarkRecord>;
 }
 
@@ -47,33 +69,59 @@ export function addSample(store: SampleStore, word: string, strokes: Point[][]):
 	store.words[word] = [...(store.words[word] ?? []), round(strokes)].slice(-PER_WORD);
 }
 
-/** Remember a remark's ink and the text it got, for learning from a later correction. */
-export function rememberRemark(store: SampleStore, imagePath: string, strokes: Point[][], transcript: string, at: Date): void {
-	store.remarks[imagePath] = { strokes: round(strokes), transcript, at: at.toISOString() };
-	const paths = Object.keys(store.remarks);
-	if (paths.length <= REMARKS_KEPT) return;
-	paths.sort((a, b) => store.remarks[a].at.localeCompare(store.remarks[b].at));
-	for (const path of paths.slice(0, paths.length - REMARKS_KEPT)) delete store.remarks[path];
+/** Where a remark is found in its note: keys from before ids are image paths. */
+export function refOf(key: string, record: RemarkRecord): RemarkRef {
+	return /\.png$/i.test(key) ? { image: key } : { id: key, image: record.image };
+}
+
+export type RemarkContext = Pick<RemarkRecord, "image" | "note" | "quote" | "wholePage">;
+
+/**
+ * Remember a remark's ink and what the reader made of it, for learning from
+ * a later correction. A remark already known keeps its text — the note's,
+ * possibly corrected — unless it had none, in which case the new reading
+ * fills it in, as it does in the note.
+ */
+export function rememberRemark(
+	store: SampleStore,
+	key: string,
+	strokes: Point[][],
+	read: string,
+	at: Date,
+	context: RemarkContext = {},
+): void {
+	const known = store.remarks[key];
+	if (known !== undefined) {
+		known.read = read;
+		known.at = at.toISOString();
+		if (known.transcript === "" && known.corrected !== true) known.transcript = read;
+		Object.assign(known, context);
+	} else {
+		store.remarks[key] = { strokes: round(strokes), transcript: read, read, at: at.toISOString(), ...context };
+	}
+	prune(store);
+}
+
+/** Drop the oldest remarks past the limits, the never-corrected ones under their own. */
+function prune(store: SampleStore): void {
+	for (const [corrected, limit] of [
+		[false, REMARKS_KEPT],
+		[true, CORRECTIONS_KEPT],
+	] as const) {
+		const keys = Object.keys(store.remarks).filter((key) => (store.remarks[key].corrected === true) === corrected);
+		if (keys.length <= limit) continue;
+		keys.sort((a, b) => store.remarks[a].at.localeCompare(store.remarks[b].at));
+		for (const key of keys.slice(0, keys.length - limit)) delete store.remarks[key];
+	}
 }
 
 /**
- * The text of the remark callout that embeds `imagePath`: its quoted lines
- * other than the title and the image. Null when the note no longer has it.
+ * The text a remark already has, when it has any: a remark read before is
+ * not read again — the note's text, the owner's once corrected, stands.
  */
-export function remarkText(note: string, imagePath: string): string | null {
-	const lines = note.split("\n");
-	const at = lines.findIndex((line) => line.includes(`![[${imagePath}]]`));
-	if (at === -1) return null;
-	let start = at;
-	while (start > 0 && lines[start - 1].startsWith(">") && !/^>\s*\[!/.test(lines[start])) start--;
-	let end = at;
-	while (end + 1 < lines.length && lines[end + 1].startsWith(">") && !/^>\s*\[!/.test(lines[end + 1])) end++;
-	return lines
-		.slice(start, end + 1)
-		.filter((line) => !/^>\s*\[!/.test(line) && !line.includes("![["))
-		.map((line) => line.replace(/^>\s?/, "").trim())
-		.filter((line) => line !== "")
-		.join("\n");
+export function knownText(store: SampleStore, key: string): string | null {
+	const known = store.remarks[key];
+	return known === undefined || known.transcript === "" ? null : known.transcript;
 }
 
 /** A word as a sample's name: letters and digits, punctuation at the ends dropped. */
@@ -120,20 +168,25 @@ export function learnCorrection(store: SampleStore, record: RemarkRecord, correc
 
 /**
  * Remarks whose text in the note differs from what they were given: the
- * owner corrected or filled them in. `noteOf` returns the note embedding an
- * image, or null. Learns from each and remembers the new text, so the same
- * correction is learned once.
+ * owner corrected or filled them in. `noteOf` returns the note a remark was
+ * imported into (or embeds its image), or null. Learns from each and
+ * remembers the new text as the owner's, so the same correction is learned
+ * once and never overwritten by a later reading.
  */
-export function learnFromNotes(store: SampleStore, noteOf: (imagePath: string) => string | null): { remarks: number; words: number } {
+export function learnFromNotes(
+	store: SampleStore,
+	noteOf: (key: string, record: RemarkRecord) => string | null,
+): { remarks: number; words: number } {
 	let remarks = 0;
 	let words = 0;
-	for (const [path, record] of Object.entries(store.remarks)) {
-		const note = noteOf(path);
+	for (const [key, record] of Object.entries(store.remarks)) {
+		const note = noteOf(key, record);
 		if (note === null) continue;
-		const text = remarkText(note, path);
+		const text = remarkText(note, refOf(key, record));
 		if (text === null || text === "" || text === record.transcript) continue;
 		const learned = learnCorrection(store, record, text);
 		record.transcript = text;
+		record.corrected = true;
 		if (learned > 0) {
 			remarks++;
 			words += learned;

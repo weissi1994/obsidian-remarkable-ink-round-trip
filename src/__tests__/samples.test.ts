@@ -8,6 +8,7 @@ import { Lexicon, OCR_TRUST, Point, recognize, templatesFrom } from "../ocr/reco
 import {
 	addSample,
 	emptyStore,
+	knownText,
 	learnCorrection,
 	learnFromNotes,
 	rememberRemark,
@@ -150,5 +151,52 @@ describe("word sheet", () => {
 
 	it("leaves the letter sheet as it was", () => {
 		expect(buildSheet(DEVICE_PROFILES.rm2)).toEqual(buildSheet(DEVICE_PROFILES.rm2, "letters"));
+	});
+});
+
+describe("remembered remarks", () => {
+	const ID = "3f9a2c1b0d4e";
+	const note = (text: string) => `Text.\n\n> [!note] Remark\n> ${text}\n> ^ink-${ID}`;
+	const strokes = () => joinedUp("Termin morgen prüfen", "r");
+
+	it("are found in their note by id, with no image to go by", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, strokes(), "Termin morgen prufen", new Date("2026-10-19"), { note: "N.md" });
+		expect(learnFromNotes(store, (key, record) => (record.note === "N.md" ? note("Termin morgen prüfen") : null))).toEqual({
+			remarks: 1,
+			words: 3,
+		});
+		expect(store.remarks[ID]).toMatchObject({ transcript: "Termin morgen prüfen", read: "Termin morgen prufen", corrected: true });
+	});
+
+	it("keep the owner's correction when the same ink is read again", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, strokes(), "Termin morgen prufen", new Date("2026-10-19"));
+		learnFromNotes(store, () => note("Termin morgen prüfen"));
+		rememberRemark(store, ID, strokes(), "Termin morgan prufen", new Date("2026-10-20"));
+		expect(knownText(store, ID)).toBe("Termin morgen prüfen");
+		expect(store.remarks[ID].read).toBe("Termin morgan prufen");
+		// Nothing new in the note, so nothing is learned twice.
+		expect(learnFromNotes(store, () => note("Termin morgen prüfen"))).toEqual({ remarks: 0, words: 0 });
+	});
+
+	it("take a first reading for a remark that had none", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, strokes(), "", new Date("2026-10-19"));
+		expect(knownText(store, ID)).toBeNull();
+		rememberRemark(store, ID, strokes(), "Termin morgen prüfen", new Date("2026-10-20"));
+		expect(knownText(store, ID)).toBe("Termin morgen prüfen");
+		expect(store.remarks[ID].corrected).toBeUndefined();
+	});
+
+	it("lose the never-corrected ones first when there are too many", () => {
+		const store = emptyStore();
+		const ink = [[{ x: 0, y: 0 }]];
+		rememberRemark(store, "kept", ink, "x", new Date("2020-01-01"));
+		store.remarks.kept.corrected = true;
+		for (let i = 0; i < 501; i++) rememberRemark(store, `r${i}`, ink, "x", new Date(Date.UTC(2026, 0, 1, 0, 0, i)));
+		expect(store.remarks.kept).toBeDefined();
+		expect(store.remarks.r0).toBeUndefined();
+		expect(store.remarks.r500).toBeDefined();
 	});
 });

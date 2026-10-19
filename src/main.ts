@@ -66,7 +66,7 @@ import { remarkId } from "./incoming/remarkid";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
-import { learnFromNotes, rememberRemark } from "./ocr/samples";
+import { knownText, learnFromNotes, refOf, rememberRemark, remarkText } from "./ocr/samples";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -1595,8 +1595,11 @@ export default class RoundTripPlugin extends Plugin {
 	 * Read one remark on this device, from its strokes (ocr/recognize.ts).
 	 * Unsure readings come back null: the image is the better answer then.
 	 */
-	private async recognizeLocally(request: StrokeRenderRequest): Promise<string | null> {
+	private async recognizeLocally(request: StrokeRenderRequest & { quote?: string }): Promise<string | null> {
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
+		// Read before: the note's text for it — the owner's, once corrected — stands.
+		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
+		if (known !== null) return known;
 		const lexicon = await this.vaultLexicon();
 		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
 		let text = result !== null && result.confidence >= OCR_TRUST ? result.text : null;
@@ -1605,14 +1608,27 @@ export default class RoundTripPlugin extends Plugin {
 			const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
 			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) text = cursive.text;
 		}
-		// Kept so a correction in the note — or text typed under an image-only
-		// remark — can teach the reader this hand.
-		const image = this.remarkImages.get(remarkId(request.strokes));
-		if (image !== undefined) {
-			rememberRemark(await this.ink.loadSamples(), image, strokes, text ?? "", new Date());
-			this.samplesDirty = true;
-		}
+		await this.rememberReading(request, text);
 		return text;
+	}
+
+	/**
+	 * Keep a remark's ink and its reading by the remark's id, so a correction
+	 * in the note — or text typed under an image-only remark — can teach the
+	 * reader this hand (ocr/samples.ts).
+	 */
+	private async rememberReading(request: StrokeRenderRequest & { quote?: string }, text: string | null): Promise<void> {
+		const id = remarkId(request.strokes);
+		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
+		const entry = Object.values(this.settings.mappings).find((m) => m.deviceDocId === request.deviceDocId);
+		const note = entry === undefined ? undefined : (this.resolveNote(entry)?.path ?? entry.notePath);
+		rememberRemark(await this.ink.loadSamples(), id, strokes, text ?? "", new Date(), {
+			image: this.remarkImages.get(id),
+			note,
+			quote: request.quote,
+			wholePage: request.wholePage === true ? true : undefined,
+		});
+		this.samplesDirty = true;
 	}
 
 	private writePad(): Promise<WritePad | null> {
@@ -1658,18 +1674,33 @@ export default class RoundTripPlugin extends Plugin {
 	private async learnFromCorrections(log: (line: string) => void): Promise<void> {
 		if (this.settings.ocrMode !== "builtin") return;
 		const store = await this.ink.loadSamples();
-		const paths = new Set(Object.keys(store.remarks));
-		if (paths.size === 0) return;
-		const notes = new Map<string, string>();
-		for (const [source, links] of Object.entries(this.app.metadataCache.resolvedLinks)) {
-			const embedded = Object.keys(links).filter((path) => paths.has(path));
-			if (embedded.length === 0) continue;
-			const file = this.app.vault.getFileByPath(source);
-			if (file === null) continue;
-			const text = await this.app.vault.cachedRead(file);
-			for (const path of embedded) notes.set(path, text);
+		const records = Object.entries(store.remarks);
+		if (records.length === 0) return;
+		const read = async (path: string) => {
+			const file = this.app.vault.getFileByPath(path);
+			return file === null ? null : this.app.vault.cachedRead(file);
+		};
+		// A remark is looked for in the note it was imported into; one from
+		// before that was recorded, or whose note moved, in the notes
+		// embedding its image.
+		const texts = new Map<string, string | null>();
+		for (const [, record] of records) {
+			if (record.note !== undefined && !texts.has(record.note)) texts.set(record.note, await read(record.note));
 		}
-		const learned = learnFromNotes(store, (path) => notes.get(path) ?? null);
+		const images = new Set(records.map(([key, record]) => record.image ?? (key.endsWith(".png") ? key : "")));
+		const embedders = new Map<string, string>();
+		for (const [source, links] of Object.entries(this.app.metadataCache.resolvedLinks)) {
+			const embedded = Object.keys(links).filter((path) => images.has(path));
+			if (embedded.length === 0) continue;
+			if (!texts.has(source)) texts.set(source, await read(source));
+			for (const path of embedded) embedders.set(path, source);
+		}
+		const learned = learnFromNotes(store, (key, record) => {
+			const own = record.note === undefined ? null : (texts.get(record.note) ?? null);
+			if (own !== null && remarkText(own, refOf(key, record)) !== null) return own;
+			const source = embedders.get(record.image ?? key);
+			return source === undefined ? null : (texts.get(source) ?? null);
+		});
 		if (learned.remarks > 0) {
 			log(`learned ${learned.words} word(s) of your handwriting from ${learned.remarks} corrected remark(s)`);
 		}
