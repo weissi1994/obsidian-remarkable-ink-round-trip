@@ -76,6 +76,7 @@ import {
 	remarkText,
 	type RemarkRecord,
 } from "./ocr/samples";
+import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
 import type { OcrExample } from "./transport/ocr";
 import { builtinFont } from "./ink/glyphs";
 import {
@@ -298,6 +299,11 @@ export default class RoundTripPlugin extends Plugin {
 			id: "learn-word-sheet",
 			name: "Learn my joined-up words from the sheet",
 			callback: () => void this.learnWordSheet(),
+		});
+		this.addCommand({
+			id: "export-handwriting-training-set",
+			name: "Export handwriting corrections as training data",
+			callback: () => void this.exportTrainingSet(),
 		});
 		this.addCommand({
 			id: "detect-page-size",
@@ -1061,8 +1067,21 @@ export default class RoundTripPlugin extends Plugin {
 
 	/** Create or overwrite a vault file, creating missing folders on the way. */
 	private async writeVaultFile(path: string, content: string): Promise<void> {
-		const dir = path.split("/").slice(0, -1).join("/");
-		const segments = dir.split("/").filter((segment) => segment !== "");
+		await this.ensureParentFolders(path);
+		const existing = this.app.vault.getFileByPath(path);
+		if (existing !== null) await this.app.vault.modify(existing, content);
+		else await this.app.vault.create(path, content);
+	}
+
+	private async writeVaultBinary(path: string, content: ArrayBuffer): Promise<void> {
+		await this.ensureParentFolders(path);
+		const existing = this.app.vault.getFileByPath(path);
+		if (existing !== null) await this.app.vault.modifyBinary(existing, content);
+		else await this.app.vault.createBinary(path, content);
+	}
+
+	private async ensureParentFolders(path: string): Promise<void> {
+		const segments = path.split("/").slice(0, -1).filter((segment) => segment !== "");
 		let prefix = "";
 		for (const segment of segments) {
 			prefix = prefix === "" ? segment : `${prefix}/${segment}`;
@@ -1070,9 +1089,6 @@ export default class RoundTripPlugin extends Plugin {
 				await this.app.vault.createFolder(prefix);
 			}
 		}
-		const existing = this.app.vault.getFileByPath(path);
-		if (existing !== null) await this.app.vault.modify(existing, content);
-		else await this.app.vault.create(path, content);
 	}
 
 	/**
@@ -1732,6 +1748,31 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		await this.ink.saveSamples();
 		this.words = null;
+	}
+
+	/**
+	 * Write the owner's corrections out as a training set (ocr/trainingset.ts)
+	 * into `<handwriting folder>/training`, for fine-tuning a vision model
+	 * with an outside tool. Rewritten whole on every export.
+	 */
+	async exportTrainingSet(): Promise<void> {
+		const samples = trainingSamples(await this.ink.loadSamples());
+		if (samples.length === 0) {
+			notify("No handwriting corrections yet — fix the text of a remark in a note, sync, then export.");
+			return;
+		}
+		const base = this.settings.handwritingFolder.replace(/^\/+|\/+$/g, "");
+		const folder = base === "" ? "training" : `${base}/training`;
+		let written = 0;
+		for (const sample of samples) {
+			const png = await this.remarkPng(sample.record);
+			if (png === null) continue;
+			await this.writeVaultBinary(`${folder}/${sample.image}`, png);
+			written++;
+		}
+		await this.writeVaultFile(`${folder}/dataset.jsonl`, datasetJsonl(samples));
+		await this.writeVaultFile(`${folder}/dataset_info.json`, datasetInfo());
+		notify(`Exported ${written} handwriting correction(s) to ${folder} (dataset.jsonl, LLaMA-Factory format).`);
 	}
 
 	/** Letter templates: the owner's hand first, print letters for the rest. */
