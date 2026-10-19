@@ -151,6 +151,13 @@ Remarks come back as an image of your ink and — when they can be read — as t
     each everyday German and English word once the way you usually write, then
     **Learn my joined-up words from the sheet**.
 
+  What the letter reader is unsure of goes to
+  [WritePad](https://github.com/phatware/WritePad-Handwriting-Recognition-Engine),
+  a handwriting engine made for joined-up writing that is built into the plugin
+  (WebAssembly, with its English and German dictionaries). It reads the remark in
+  both languages, prefers your vault's spelling among its close alternatives, and
+  keeps the language that reads best.
+
   A reading it is unsure of stays image only rather than come back as a wrong
   guess.
 - **Vision model endpoint**: any OpenAI-compatible vision model — local (Ollama,
@@ -243,4 +250,6 @@ attach `reMarkable Ink Round-Trip log.md`, it answers most questions.
 
 GPL-3.0-or-later, as upstream — Copyright (C) 2026 Max Kloosterman, and the fork's
 contributors. Bundled fonts: see [FONTS-LICENSE.md](FONTS-LICENSE.md) (SIL OFL 1.1
-and the Hershey licence).
+and the Hershey licence). The WritePad engine (`vendor/writepad`, built into
+`src/ocr/writepad/engine.js` by `scripts/build-writepad.sh`) is GPL-3.0,
+Copyright PhatWare Corp.

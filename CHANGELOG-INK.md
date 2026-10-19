@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Joined-up writing read by WritePad:** remarks the built-in letter reader is
+  unsure of are read again by the WritePad handwriting engine (PhatWare,
+  GPL-3.0), built to WebAssembly and bundled with its English and German
+  dictionaries — no download, nothing sent anywhere. Each remark is read in both
+  languages, line by line; the vault's spelling wins among close alternatives,
+  and an unsure reading still stays image only. Rebuild the engine with
+  `scripts/build-writepad.sh` (needs the `vendor/writepad` submodule and
+  Emscripten, taken from nix-shell when missing).
+
 - **Your ink comes back as your ink:** a remark or page brought in from the
   tablet keeps its original strokes (`reMarkable/.sync/ink/`), and sending the
   note writes those strokes again — same pens, colours and size — instead of a

@@ -64,6 +64,7 @@ import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
+import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
 import { learnFromNotes, rememberRemark } from "./ocr/samples";
 import { builtinFont } from "./ink/glyphs";
 import {
@@ -128,6 +129,8 @@ export default class RoundTripPlugin extends Plugin {
 	private templates: { key: string; templates: Template[] } | null = null;
 	private lexicon: Promise<Lexicon> | null = null;
 	private words: WordReader | null = null;
+	/** The WritePad engine for joined-up writing, knowing the vault's words; per run. */
+	private writepad: Promise<WritePad | null> | null = null;
 	private samplesDirty = false;
 	private syncTimer: number | null = null;
 	/** What every copy of the vault shares (sync/syncstate.ts); set up on load. */
@@ -470,6 +473,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.syncCoordinator.dispose();
 		this.fetchShim?.restore();
 		this.fetchShim = null;
+		this.dropWritePad();
 	}
 
 	/**
@@ -1193,6 +1197,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.inkCache.clear();
 		this.lexicon = null;
 		this.words = null;
+		this.dropWritePad();
 		await this.reconcileNotePaths((line) => log.push(line));
 		await this.learnFromCorrections((line) => log.push(line)).catch((error: unknown) =>
 			log.push(`learning from corrections failed: ${String(error)}`),
@@ -1590,8 +1595,14 @@ export default class RoundTripPlugin extends Plugin {
 	 */
 	private async recognizeLocally(request: StrokeRenderRequest): Promise<string | null> {
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
-		const result = recognize(strokes, await this.ocrTemplates(), await this.vaultLexicon(), await this.wordReader());
-		const text = result !== null && result.confidence >= OCR_TRUST ? result.text : null;
+		const lexicon = await this.vaultLexicon();
+		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
+		let text = result !== null && result.confidence >= OCR_TRUST ? result.text : null;
+		if (text === null) {
+			// Joined-up writing, most likely: WritePad was made for it.
+			const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
+			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) text = cursive.text;
+		}
 		// Kept so a correction in the note — or text typed under an image-only
 		// remark — can teach the reader this hand.
 		if (this.settings.importHandwriting) {
@@ -1599,6 +1610,28 @@ export default class RoundTripPlugin extends Plugin {
 			this.samplesDirty = true;
 		}
 		return text;
+	}
+
+	private writePad(): Promise<WritePad | null> {
+		this.writepad ??= (async () => {
+			try {
+				const engine = await WritePad.load();
+				const lexicon = await this.vaultLexicon();
+				engine.addWords((function* () {
+					for (const [, word] of lexicon.words()) yield word;
+				})());
+				return engine;
+			} catch (error) {
+				console.warn(`reMarkable Ink Round-Trip: WritePad could not start — ${String(error)}`);
+				return null;
+			}
+		})();
+		return this.writepad;
+	}
+
+	private dropWritePad(): void {
+		void this.writepad?.then((engine) => engine?.free());
+		this.writepad = null;
 	}
 
 	/** Joined-up words: the owner's own samples, then the bundled script fonts. */

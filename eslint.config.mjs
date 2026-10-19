@@ -38,6 +38,6 @@ export default tseslint.config(
 		},
 	},
 	{
-		ignores: ["main.js", "node_modules/"],
+		ignores: ["main.js", "node_modules/", "src/ocr/writepad/engine.js"],
 	},
 );

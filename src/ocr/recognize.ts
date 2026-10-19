@@ -310,6 +310,11 @@ export class Lexicon {
 		return lexicon;
 	}
 
+	has(word: string): boolean {
+		const key = word.toLowerCase();
+		return this.byLength.get(key.length)?.has(key) === true;
+	}
+
 	/** Every word, lower case with its most common spelling. */
 	*words(): Iterable<[string, string]> {
 		for (const length of this.byLength.keys()) yield* this.ofLength(length);

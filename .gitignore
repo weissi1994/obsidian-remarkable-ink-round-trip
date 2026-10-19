@@ -3,3 +3,6 @@ main.js
 scratch/
 release/
 scripts/mermaid-trace/extract.js
+
+# WritePad build output and test material (scripts/build-writepad.sh)
+build/writepad/
