@@ -7,6 +7,6 @@ id=$(node -p "require('./manifest.json').id")
 version=$(node -p "require('./manifest.json').version")
 out="release/${id}"
 rm -rf release && mkdir -p "$out"
-cp main.js manifest.json styles.css README-INK.md CHANGELOG-INK.md FONTS-LICENSE.md LICENSE "$out/"
+cp main.js manifest.json styles.css README.md CHANGELOG-INK.md FONTS-LICENSE.md LICENSE "$out/"
 (cd release && zip -qr "${id}-${version}.zip" "${id}")
 echo "release/${id}-${version}.zip"

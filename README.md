@@ -1,287 +1,245 @@
-# reMarkable Round-Trip
+# reMarkable Ink Round-Trip
 
-You review documents on your reMarkable because it's more comfortable and
-intuitive than a screen. It simply feels more natural to physically strike
-out a sentence, circle a phrase or mark a paragraph with a line in the
-margin.
+Keep your Obsidian notes in **two-way sync** with your reMarkable — as **real
+handwriting**. Notes arrive on the tablet as pen strokes, in a single-line font or
+your own hand. Erase a word, lasso it elsewhere, strike it through, circle it,
+highlight it, write between the lines: the next sync merges it into the note
+itself. Change the note in Obsidian and the notebook is rewritten. Start a
+notebook on the tablet and it becomes a note.
 
-While reading, thoughts take shape — that's when I would add a remark or
-keyword as a hint for later edits. I wanted the best of both worlds. Writing
-and editing in Markdown with a keyboard or using dictation. Then switch to
-my reMarkable to slow down, review and think.
+A fork of [reMarkable Round-Trip](https://github.com/maxonamission/obsidian-remarkable-round-trip)
+by Max Kloosterman, which sends notes as PDF for review and imports the
+annotations into a companion note. This fork has one way in and out — ink — and
+writes what you did on paper back into the note you wrote.
 
-That is why I built reMarkable Round-Trip. Send your notes to your
-reMarkable with a simple command, review them and import your remarks back
-into the note they came from. The sentence you struck out is struck out. The
-phrase you circled is bold. The objection you scrawled sits under the
-paragraph it belongs to.
+## Getting started
 
-I hope you'll enjoy using it. If you know what it should do next — do let me
-know.
+1. **Install.** Copy `main.js`, `manifest.json` and `styles.css` into
+   `<vault>/.obsidian/plugins/remarkable-ink-round-trip/` and enable
+   *reMarkable Ink Round-Trip* under *Settings → Community plugins*. It has its own
+   id, so it can sit next to the original plugin.
+2. **Pair** under *Settings → Connection* with a one-time code from
+   [my.remarkable.com](https://my.remarkable.com/device/browser/connect) — or
+   toggle *Self-hosted endpoint* for [rmfakecloud](https://ddvk.github.io/rmfakecloud/).
+3. **Pick your canvas** under *Settings → Handwriting → Notebook page size*
+   (reMarkable 1/2/Paper Pure, Paper Pro, Paper Pro Move). Not sure? Run
+   **Detect reMarkable page size from my notebooks**.
+4. **Choose what syncs** under *Settings → Sync*: turn on *Sync folders* and list
+   the vault folders, e.g. `Projects, Tasks`. Any other note joins with
+   right-click → **Sync with reMarkable** and stays in sync from then on.
+5. **Work on either side.** The plugin syncs when Obsidian starts, every few
+   minutes (*Check the reMarkable every*) and when a note in a sync folder you
+   changed has been quiet for a moment. **Sync with reMarkable now** does it at
+   once.
 
-> **Where it stands.** In the community plugin directory since the end of
-> July 2026, and used daily on a real device. The loop is complete: send,
-> review with the pen, import; write with the keyboard on the device and get
-> that text back too. Development continues in the open — what gets reported
-> gets fixed, and what gets asked for shapes what comes next. See
-> [CONTRIBUTING.md](CONTRIBUTING.md) for reporting a bug, suggesting
-> something, or sending a patch.
+Optional, and worth it: fill in the [handwriting sheet](#your-own-handwriting)
+so notes come in your own hand and the built-in reader knows your letters.
 
-## Start here
+## How the two-way sync works
 
-**1. Install.** *Settings → Community plugins → Browse*, search for
-**reMarkable Round-Trip** — or use
-[this direct link](https://obsidian.md/plugins?id=remarkable-round-trip) —
-install and enable.
+On every sync the plugin first reads the notebooks back, then sends what changed:
 
-**2. Pair.** Get a one-time code at
-[my.remarkable.com/device/browser/connect](https://my.remarkable.com/device/browser/connect),
-then open *Settings → reMarkable Round-Trip*, enter it and select **Pair**.
-Self-hosting [rmfakecloud](https://ddvk.github.io/rmfakecloud/) instead? Toggle
-*Self-hosted endpoint* and give your base URL.
+1. **Tablet → note.** Each notebook is compared with the strokes the plugin
+   wrote (it regenerates them exactly, from the text it kept at send time), so
+   your ink and its own letters are never confused. What you did is projected
+   onto the note as it was sent and **merged three ways** with the note as it
+   reads now — so edits you made in Obsidian meanwhile survive. Within a
+   paragraph the merge goes word by word; only where both sides changed the same
+   words does the note keep yours, with the tablet's version in an
+   *Also changed on the reMarkable* callout right below. Before anything goes
+   in, the previous version of the note is saved to the backup folder.
+2. **Note → tablet.** Every note in the sync folders, or with a notebook
+   already, that is new or changed is written into a fresh notebook. Its old
+   notebook is read first — so no ink is lost — and moved to the tablet's trash
+   in the same cloud update.
+3. **New notebooks from the tablet.** A notebook you started in the device
+   folder of a synced vault folder (on the tablet: the folder under *Obsidian*
+   named like the vault folder) becomes a note there — each page's ink as an
+   image with its text as read — and is sent back as a handwritten notebook in
+   place of the original. From then on it syncs like any other note. A notebook
+   changed in the last ten minutes is left alone, so it is never swapped out
+   while you are still writing in it.
 
-**3. Send a note.** Right-click any note → *Send to reMarkable*. Read it, mark
-it up, then run **Import annotations from reMarkable** from the command
-palette.
+| On the tablet | In the note |
+|---|---|
+| **Erase** a word | The word is removed (or struck through — *A word you erase … becomes*) |
+| **Move** words with the lasso | The words move to where you dropped them |
+| A line **through** words | `~~struck~~` |
+| A line **under** words | `<u>underlined</u>` |
+| A **loop around** words | `**circled**` |
+| A **bar in the margin** | The lines it ran along, as a `>` quote |
+| The **highlighter** over words | `<mark>` in the colour you used |
+| A **tick** in a drawn checkbox / a **stripe** through it | `- [x]` / `- [-]` |
+| **Handwriting** between the lines or in the margin | A remark callout with the image — and its text (see [OCR](#reading-handwriting)) |
+| A **page you added** | The whole page as a remark, after the text it follows |
 
-That is the whole loop. Everything below is detail for when you want it.
+What the three inline marks become is yours to choose (*Settings → What a pen
+mark becomes*): strikethrough, bold, italic, underline, highlight or nothing. A
+mark written into the note comes back to the tablet styled the same way, so the
+round trip stays stable.
 
-## Sending notes
+Every run that did something writes a report to `reMarkable Ink Round-Trip log.md`:
+what was read, what went into which note, and what was sent.
 
-The **tablet ribbon icon** opens sync status and the annotation import actions.
-**Show sync status** is also available from the command palette: it shows queued
-work, pending watch-folder changes, tracked-note coverage, and the last upload.
-Long operations show progress in the desktop status bar; mobile uses notices.
+## What a note looks like on the tablet
 
-- **Command palette**: *Send current note to reMarkable*.
-- **Right-click a note or folder**: *Send to reMarkable* — a folder sends
-  everything inside it, with progress and per-file errors, and keeps its own
-  subfolder structure on the device even when folder mirroring is off.
-- **Right-click a multi-selection**: several notes and folders at once;
-  duplicates are filtered out.
-- **Choose a layout for one send**: every send entry has a *…(choose
-  layout…)* twin that opens a small dialog — preset, sliders, page breaks,
-  prefilled from your settings — applied to that send only. Your saved
-  settings stay as they are.
-- **Watch folders** (optional, off by default): notes dropped into one or more
-  folders you choose (comma-separated) are collected into one automatic batch
-  after a short quiet period.
-  Unchanged notes are skipped before any cloud work starts.
+The note is typeset on a fixed page grid — headings, lists, task boxes you can
+tick, quotes, tables, code — and every word is written as pen strokes.
 
-What happens to your note on the way:
+- **Inline styling** without moving a word: **bold** with a heavier pen, *italic*
+  slanted, `~~strike~~` and `<u>underline</u>` as pen lines, `==highlight==` and
+  `<mark style="background: …">` with the highlighter in the nearest tablet colour
+  — in table cells too.
+- **Colour accents** (*Settings → Handwriting → Colour accents*): light blue
+  behind code blocks, pink behind inline code, yellow behind quotes and
+  callouts, light grey behind table headers — the tablet's own light highlighter
+  tints, so text stays readable.
+- **Tables** in a full grid: border, column and row lines, a heavier rule under
+  the header, padded cells, and no column so narrow that a word has to break.
+  Empty rows become boxes to write in.
+- **Pictures** (`![[photo.png]]`, `![alt](path)`) are redrawn as hatching in the
+  tablet's inks — blue, red, green, yellow, pink, plus black and grey for tone.
+  An Obsidian size alias (`![[photo.png|300]]`) sets the width.
+- **Mermaid diagrams** are rendered with Obsidian's own Mermaid in a pen-friendly
+  theme and traced into strokes: lines with a slight hand-drawn wobble, labels in
+  your handwriting, coloured areas filled with the highlighter (hatched with
+  colour accents off). Flowcharts,
+  sequence, class, state, ER, pie, gantt and mindmap diagrams are tested.
+- **Symbols** ✓ ✗ → ← ↔ ↑ ↓ are written as such, in your hand once learned.
+- Colour shows on the Paper Pro and Move; other models show it in grey.
 
-- Wikilinks become readable text, `![[embeds]]` are resolved inline, callouts
-  become titled quotes, comments are dropped, and frontmatter is left out — or
-  rendered as a small title block, if you prefer.
-- An embed pointing at part of a note — `![[Note#Section]]`, a nested
-  `#Heading#Subheading` path, or `![[Note#^block-id]]` — brings that part
-  only, as Obsidian shows it. Handy for reviewing one chapter of a long
-  note: put the single embed in a small note of its own and send that.
-  What comes back is a summary of your marks rather than an annotated copy,
-  because the note you sent holds the link, not the text.
-- Task checkboxes (`- [ ]`) become real drawn squares you can tick with the
-  pen, and a table row that is empty — or holds only a label in its first
-  column — becomes a fill-in row with room to write: a note with log tables
-  turns into a form you complete on the device.
-- A `\pagebreak` line (Pandoc's convention) forces a new page — or let the
-  plugin decide: the default **Smart** setting measures each `#`/`##`
-  section and turns the page only when it would otherwise be split, so a
-  day-per-heading log gets a page per day while a compact card stays on
-  one. Prefer a fixed rule? A new page before `#` (or `#` and `##`)
-  headings is still there. Tables that fit on a page stay whole instead of
-  snapping in two, and a heading never dangles at the bottom without its
-  text.
-- A paragraph that is entirely bold or italic — `**Goal**` as a label line —
-  keeps its emphasis on the page.
-- It is typeset as a PDF on your reMarkable's own page grid — pick your
-  model under *Settings → Page layout* (reMarkable 1/2/Paper Pure or
-  Paper Pro) — with a layout preset for what the page is for: easy
-  reading, fill-in form, compact, or custom font size, line spacing and
-  margins. Reading rather than annotating? Switch to
-  **EPUB**: it reflows, the device picks the type size, your headings become a
-  table of contents, and non-Latin scripts survive intact.
-- Your vault folders are recreated on the device under a base folder you
-  choose. Re-sending replaces the previous copy; the old one goes to the
-  device trash. Folder creation always finishes before file upload; if it
-  fails, the affected batch is left unsent rather than placed in the root.
-- Each note gets a stable `remarkable-id` in its frontmatter. That id — not the
-  file path — is how a document finds its note again, so you can move and
-  rename freely.
+Layout presets (*Easy reading*, *Fill-in form*, *Compact*, or your own sizes)
+and page breaks (smart: a section moves to a new page only when it would be
+split; or before every `#` / `##`; `\pagebreak` always works) are under
+*Settings → Page layout*.
 
-## Write on it, too
+## Your own handwriting
 
-Reviewing with the pen is one half of the tablet; writing without
-distraction is the other. Send a note as **editable text** — right-click →
-*Send to reMarkable as editable text*, or run the command — and it arrives
-as a typed-text notebook you edit with the keyboard, not as a fixed page
-you annotate.
+1. Run **Send handwriting sheet to reMarkable** (or the button under
+   *Settings → Handwriting*). A notebook of boxes arrives: letters, digits,
+   ä ö ü ß, punctuation, brackets (`[ ] { } < > « » „ “ ”`), symbols
+   (`^ ~ _ | \ $ € £ ° @ # % & * + =`) and ✓ ✗ → ← ↑ ↓.
+2. Each box shows its character on the left, at writing size, on the same lines
+   you write on: cap line (dashed), x-height (dotted), baseline (solid),
+   descender (dotted). Copy it in the space to its right; skip any you like.
+   Accented letters (é, à, ç…) need no box — they are written as your own base
+   letter with the accent added.
+3. Let it sync, then run **Learn my handwriting from the sheet**. From then on
+   notes are written in your letters.
+4. Optional: fill in a fresh sheet and run **Add handwriting variations from the
+   sheet** — up to three samples per character, used in turn.
 
-- `##` headings, bold label lines, bullets (nested one level deep) and
-  task checkboxes arrive as real device paragraph styles. Everything else
-  — links, tables, code, single-`#` headings, inline styling — travels
-  along as literal text, byte for byte, so nothing of your markdown is
-  ever lost or renamed.
-- Frontmatter stays home: properties are vault metadata, not text to edit.
-  The note on the device is exactly the note body.
-- Re-sending replaces the previous copy (the old one goes to the device
-  trash), and the annotation import knows to leave these documents alone.
+Without a sheet, four bundled single-line fonts are available: Readability
+(clean print, the default), Hershey Sans, Allure and Hershey Script. Code is
+always written in Hershey Sans. See [FONTS-LICENSE.md](FONTS-LICENSE.md).
 
-And the text comes back. Run **Get edited text back from reMarkable** (or
-right-click the note) and the edited text lands **in the note itself**,
-frontmatter untouched. With guard rails, because this is the one place the
-plugin replaces your own text:
+## Reading handwriting
 
-- It only ever runs when you ask, per note.
-- Before the note is touched, the previous version is saved to a
-  `previous` folder — the message tells you where.
-- If the note changed in your vault *and* on the device, nothing is merged
-  silently: a dialog lets you pick which version the note keeps, and the
-  other one is saved either way.
-- If only your note changed, or nothing changed, the note is left alone
-  and the message says so.
+Remarks come back as an image of your ink and — when they can be read — as text
+(*Settings → Reading handwriting → Read handwriting with*):
 
-## Getting your thinking back
+- **Built-in** (default): reads the pen strokes themselves, inside the plugin — no
+  model, no download, nothing sent anywhere, mobile included. Letters are matched
+  against your handwriting sheet (or print letters without one), words against
+  the words in your vault, so German, English and your own names and jargon are
+  covered without a dictionary. **Joined-up writing** is read word by word
+  against words you wrote before. It learns them two ways:
+  - **From corrections:** fix the text under a remark's image in the note — or
+    type what it says under one that came back as an image only — and the next
+    sync learns those words from that ink.
+  - **From the word sheet:** **Send joined-up word sheet to reMarkable**, write
+    each everyday German and English word once the way you usually write, then
+    **Learn my joined-up words from the sheet**.
 
-Run **Import annotations from reMarkable**. The plugin finds the documents you
-have touched since last time and writes what it read into your vault. Just
-reviewed one note? Right-click it → *Import annotations from reMarkable* (or
-use the current-note command) to check only that one. *Re-import annotations
-from reMarkable* reads that one document again even when nothing changed on
-the device — handy after changing a mark-style setting.
+  A reading it is unsure of stays image only rather than come back as a wrong
+  guess.
+- **Vision model endpoint**: any OpenAI-compatible vision model — local (Ollama,
+  LM Studio) or hosted. Only the cropped remark images are sent there, never the
+  note.
+- **Off**: images only.
 
-Deleted a document on the reMarkable? The next import notices, stops
-checking it, and says so in the report. The note in your vault is untouched
-and keeps its id — send it again and it is re-linked seamlessly.
+## Several copies of the vault
 
-What you get is an **annotated copy of your note**: your own text, unchanged,
-with the marks worked in where you drew them. Bold, italics, headings, links
-and lists all survive, because the copy starts from your note rather than being
-rebuilt from the page.
+What ties a note to its notebook — which notebook it is, the text it was written
+from, your learned handwriting and word samples — lives in the vault itself, in
+`reMarkable/.sync/` (*Settings → Sync → Shared sync state folder*): one small file
+per note, pictures stored once by their content. Sync the vault with git,
+Obsidian Sync or Syncthing and every copy knows what the others sent — none sends
+duplicates, and each can bring back what you did on the tablet. Notebooks written
+by any copy are recognised by their pages, so they are never brought in as new.
+Your pairing token and device settings stay in the plugin's own data.
 
-It lands in a companion note (`Your note — annotations.md`) so your source note
-stays untouched; a setting puts it inside the source note instead. Either way
-the plugin only ever replaces its own marked block, so anything you write
-around it survives a re-import.
+Turn **Sync automatically from this device** off on all but one copy: two copies
+syncing at once could both send a note changed before the vault sync carried
+their state across. The others sync when you run **Sync with reMarkable now**.
 
-The companion note always links back to the note it annotates. Want the
-other direction too? Turn on *Link the source note to its annotations* and
-each import keeps an `annotations` property in your note pointing at the
-companion — the two are one click apart, both ways.
+## Commands
 
-### Which marks are understood
+| Command | What it does |
+|---|---|
+| Sync with reMarkable now | Read the tablet back, bring in new notebooks, send what changed |
+| Sync current note with reMarkable | The same for one note (also right-click on notes, folders and selections) |
+| Re-read current note from reMarkable | Read its notebook again even when the tablet reports no change |
+| Show sync status | Queue, running batch (*Uploading 12/80*), tracked notes |
+| Check reMarkable cloud status (read-only) | Diagnose the connection |
+| Send handwriting sheet / Learn my handwriting / Add handwriting variations | Your letters |
+| Send joined-up word sheet / Learn my joined-up words | Your joined-up writing |
+| Detect reMarkable page size from my notebooks | Read the canvas from a notebook made on the tablet |
 
-The plugin typeset the page itself, so it knows where every word sits and
-can tell from the shape and position of a stroke what it did and which words
-it points at — read locally, from stroke geometry alone.
+## How it works
 
-| Draw this on the tablet | Recognised as | Default result in your vault |
-|---|---|---|
-| A line **through** words | Strike-through | `~~the struck words~~` |
-| A line **under** words, clear of the baseline | Underline | `<u>the underlined words</u>` |
-| A **loop around** a word or phrase | Circle | `**the circled phrase**` |
-| A **vertical bar in the margin** | Margin bar | The lines it ran alongside, as a `>` quote |
-| The **text highlighter** | Highlight | `<mark>` in the colour you used |
-| A **tick or cross in a drawn checkbox** | Task done | `- [x]` on that task line |
-| A **flat stripe through a drawn checkbox** | Task cancelled | `- [-]` on that task line |
-| A **strike through a whole task line** | Task cancelled | `- [-]` on that task line |
-| Anything else — handwriting, arrows, scribbles | Remark | A cropped image in a callout, under the line it was written against |
-| **A page you added** on the tablet to write on | Added page | The whole page as an image, placed after the text it follows |
+The typesetter lays the note out on a page grid matching the tablet's canvas and
+records where every word lands. Its drawing calls are recorded and turned into
+pen strokes from single-line glyphs, written as a v6 `.rm` notebook — the format
+the tablet writes for its own notebooks, following
+[rmscene](https://github.com/ricklupton/rmscene). Every stroke carries its own id
+under the plugin's own author. When a page comes back, the plugin regenerates
+its strokes — deterministically, jitter included — and compares: a stroke with
+its id and shape is untouched; a new stroke whose `move_id` points at one of its
+own is a lasso move; a new stroke lying along one of its own that disappeared is
+what the eraser left; everything else is yours and goes to the mark reader.
+Missing ink is summed per word: mostly gone means erased, mostly elsewhere means
+moved.
 
-Worth knowing:
+Everything a send depends on — fonts, handwriting version, typography, pen,
+canvas, pictures as quantised — is recorded per send and versioned, so a
+notebook sent today is read back exactly even after the settings or the plugin
+changed.
 
-- **A strike-through may be several strokes.** Go back over it as often as you
-  like; passes over the same words count as one mark.
-- **Through or under decides the meaning.** Ink crossing the letters is a
-  strike-through, ink below them an underline. Right on the baseline,
-  strike-through wins.
-- **Two marks side by side on one line stay two marks.**
-- **A margin bar must sit outside the text column**, and be straight — a
-  stroke with a corner in it is read as a remark.
-- **Highlight colours come back as the colours you used**, straight from the
-  device rather than mapped to a palette.
-- **A page you insert on the tablet keeps its place** — it comes back whole,
-  after the text it follows, and the pages after it still line up.
+## Worth knowing
 
-### Changing what a mark means
+- **Older sends.** Notes sent as PDF, EPUB or editable text by earlier versions,
+  or before the two-way merge existed, are re-sent as handwriting on the next
+  sync; changes that arrive without a record of the sent text are added to the
+  note as a summary block instead of woven in.
+- **A re-send replaces the notebook.** Ink written in the seconds between a
+  sync's read and its send lands in the trashed copy.
+- **A partly erased word** (a nicked letter) stays; the log lists it. **Moves**
+  into empty space are reported but not applied.
+- **First sync of many notes** can take a while: the reMarkable cloud limits how
+  fast it accepts uploads, and the plugin waits when told to.
+- **Pages are bigger than a PDF's.** A full page is a few hundred KB of strokes.
 
-The shapes are fixed — they are what a pen can draw. What they *mean* is your
-own convention. Under **Settings → What a pen mark becomes**, each of the three
-inline marks can be set to strikethrough, bold, italic, underline, highlight,
-or left alone. Circle the things you want highlighted? Set *Loop around words*
-to **Highlight**.
+## Privacy
 
-Margin bars always quote the lines they ran alongside, and handwriting always
-comes back as an image; those are not styling choices.
+Your notes go only to the endpoint you configure — the official reMarkable cloud
+or your own rmfakecloud — and, if you choose the vision endpoint, cropped remark
+images to that endpoint. No telemetry. The pairing is a device token obtained
+from a code you enter; it stays in the plugin's own settings and never goes into
+the shared sync state.
 
-### When placement is not possible
+## Status
 
-Placing marks needs the note to still match what was sent.
+Tested against the `.rm` reference implementation and real device sample files
+(paper sizes, tombstones, lasso moves), with the full suite of unit tests
+passing; real-device testing is ongoing. Reports and ideas:
+[issues](https://github.com/weissi1994/obsidian-remarkable-round-trip/issues) —
+attach `reMarkable Ink Round-Trip log.md`, it answers most questions.
+[CHANGELOG-INK.md](CHANGELOG-INK.md) lists what changed;
+[CHANGELOG.md](CHANGELOG.md) is the upstream history.
 
-- **Edited the note since?** The annotations still come back, as a summary
-  rather than a copy, with a warning saying they describe the earlier version.
-  Send the note again to annotate the current one.
-- **Sent it as EPUB?** EPUB reflows on the device, so there is no fixed page to
-  anchor to; annotations come back at page level.
-- **Moved or renamed the note?** No problem — it is found again by its
-  `remarkable-id`, and the companion note moves along with it.
+## Licence
 
-Every run writes a report to `reMarkable Round-Trip log.md` and copies it to
-your clipboard: what was read, what ended up in your vault, and which words
-each mark landed on.
-
-## Privacy and permissions
-
-Your notes go directly from Obsidian to the endpoint you configure — the
-official reMarkable cloud or your own rmfakecloud server. No other services, no
-telemetry, no analytics.
-
-Obsidian's plugin scan flags three capabilities. Here is what each is for:
-
-- **Reads and writes vault files.** It reads the note you send and writes the
-  annotations back. Nothing else is touched: generated blocks live between
-  markers, so your own text around them survives a re-import.
-- **Lists all files in the vault.** Only to find a note again by its
-  `remarkable-id` when its path no longer matches — that is what lets you move
-  or rename an annotated note without losing the link. Paths are read,
-  contents are not.
-- **Writes to the clipboard.** The import report is copied there so you can
-  paste it into a bug report. The same report always goes to a note in your
-  vault as well, so nothing depends on the clipboard. It is never read.
-
-Your reMarkable pairing is a device token, obtained once from a code you enter
-yourself. It is stored in the plugin's own settings, and it is the only
-credential the plugin holds.
-
-## Known limitations
-
-- Images render as placeholders in the PDF.
-- Standard PDF fonts (full Latin-1 coverage; other scripts get ASCII
-  fallbacks).
-- Handwriting comes back as an image, not as text — reading handwriting is a
-  different problem, and guessing at it would be worse than showing you what
-  you wrote.
-- The stroke reader is written against an undocumented format: unusual pens or
-  a future firmware may not render. The import report says so when a page could
-  not be read.
-
-## Reporting something, or helping out
-
-Bugs, questions and ideas all belong in the
-[issues](https://github.com/maxonamission/obsidian-remarkable-round-trip/issues).
-For a bug, attach `reMarkable Round-Trip log.md` from your vault: the import
-writes it every run, and it answers most of what I would otherwise have to ask.
-
-Patches are welcome too, with one thing worth knowing before you spend an
-evening on one: this repository is a mirror of a private development
-repository, so a pull request cannot be merged here — it is read and
-discussed here, and what is accepted travels onward with your commits and
-your name on them. [CONTRIBUTING.md](CONTRIBUTING.md) explains how that
-works, and where the product's boundaries lie.
-
-## License
-
-GPL-3.0-or-later — Copyright (C) 2026 Max Kloosterman.
-
-Versions up to and including 0.26.2 were released under MIT and remain so;
-from 0.27.0 the plugin is GPL, so that derivatives — in particular of the
-`.rm` stroke reader, which did not exist in JavaScript before — stay open.
+GPL-3.0-or-later, as upstream — Copyright (C) 2026 Max Kloosterman, and the fork's
+contributors. Bundled fonts: see [FONTS-LICENSE.md](FONTS-LICENSE.md) (SIL OFL 1.1
+and the Hershey licence).
