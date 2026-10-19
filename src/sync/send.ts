@@ -178,7 +178,7 @@ export async function sendNote(
 		const parentId = deps.resolveParent
 			? await deps.resolveParent(note.path)
 			: undefined;
-		const blocks = parseBlocks(markdown, { html: true });
+		const blocks = parseBlocks(markdown, { html: true, quotePictures: true });
 		const images = (await deps.ink.loadImages?.(note)) ?? {};
 		const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
 		const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
@@ -188,7 +188,7 @@ export async function sendNote(
 			title: note.basename,
 			markdown,
 			body: splitNote(note.content).body,
-			images: rendered.snapshot.imageStyle === undefined ? undefined : images,
+			images: Object.keys(images).length > 0 ? images : undefined,
 			drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
 		});
 		const upload = await deps.client.uploadInk(note.basename, rendered.pages, {

@@ -159,6 +159,7 @@ export class InkEdge {
 			imageStyle: s.inkImages === "placeholder" ? undefined : s.inkImages,
 			...(s.inkAccents ? { accents: true as const } : {}),
 			inline: true,
+			quotePictures: true,
 		};
 	}
 
@@ -177,7 +178,7 @@ export class InkEdge {
 		if (found === null) throw new Error("The selected handwriting could not be loaded.");
 		const options = {
 			...found,
-			images: base.imageStyle === undefined ? undefined : images,
+			images,
 			drawings,
 		};
 		const snapshot = {
@@ -229,7 +230,7 @@ export class InkEdge {
 		// The pictures exactly as quantised at send time, never re-read from disk.
 		const options = { ...found, images: sent.images, drawings: sent.drawings };
 		return renderInk(
-			parseBlocks(sent.markdown, { html: entry.ink.inline === true }),
+			parseBlocks(sent.markdown, { html: entry.ink.inline === true, quotePictures: entry.ink.quotePictures === true }),
 			sent.title,
 			{ ...entry.pdfLayout, typo: entry.pdfLayout.typo ?? 1 },
 			options,

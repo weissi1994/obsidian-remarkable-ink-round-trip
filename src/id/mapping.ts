@@ -109,6 +109,8 @@ export interface InkSnapshot {
 	accents?: true;
 	/** Inline styling was drawn and inline HTML read as styling; absent = neither. */
 	inline?: true;
+	/** Pictures inside quotes and callouts were drawn as pictures; absent = left as text. */
+	quotePictures?: true;
 	/** The title the notebook was written with (its first line). */
 	title?: string;
 	/**

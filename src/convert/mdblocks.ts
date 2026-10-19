@@ -124,7 +124,16 @@ export interface ParseOptions {
 	 * before it existed: their text kept the tags, and must replay so.
 	 */
 	html?: boolean;
+	/**
+	 * A picture on its own line inside a quote or callout — a remark's ink —
+	 * becomes a picture block, not the text of its placeholder. Off for sends
+	 * made before it.
+	 */
+	quotePictures?: boolean;
 }
+
+/** A picture's placeholder line, as preprocessing leaves it (`*[image: name]*`). */
+const PICTURE_LINE_RE = /^\*?\[image: [^\]]+\]\*?$/;
 
 type StyleKind = "code" | "bold" | "italic" | "strike" | "underline" | "highlight";
 
@@ -404,6 +413,12 @@ export function parseBlocks(markdown: string, options: ParseOptions = {}): Block
 		if (line.trimStart().startsWith(">")) {
 			flushParagraph();
 			flushList();
+			const inner = line.replace(/^\s*>\s?/, "").trim();
+			if (options.quotePictures === true && PICTURE_LINE_RE.test(inner)) {
+				flushQuote();
+				blocks.push({ type: "paragraph", text: stripInline(inner) });
+				continue;
+			}
 			const part = stripInlineStyles(line.replace(/^\s*>\s?/, ""), options);
 			quote.push(part.text);
 			// drawQuote joins the lines with a space; the word indices follow.

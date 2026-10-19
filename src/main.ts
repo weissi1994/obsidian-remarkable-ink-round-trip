@@ -1405,7 +1405,7 @@ export default class RoundTripPlugin extends Plugin {
 	 */
 	private async noteImages(note: NoteInput): Promise<Record<string, Picture>> {
 		const out: Record<string, Picture> = {};
-		if (this.settings.inkImages === "placeholder") return out;
+		const placeholders = this.settings.inkImages === "placeholder";
 		const seen = new Set<string>();
 		const visit = async (content: string, sourcePath: string, depth: number): Promise<void> => {
 			for (const match of content.matchAll(/!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g)) {
@@ -1419,7 +1419,8 @@ export default class RoundTripPlugin extends Plugin {
 					);
 					if (names.length === 0) continue;
 					// Ink from the tablet goes back as its own strokes.
-					const image = (await this.state.readInk(file.name)) ?? (await this.decodeImage(file, alias));
+					const image =
+						(await this.state.readInk(file.name)) ?? (placeholders ? null : await this.decodeImage(file, alias));
 					if (image !== null) for (const name of names) out[name] = image;
 				} else if (file.extension === "md" && depth < MAX_EMBED_DEPTH && !seen.has(file.path)) {
 					seen.add(file.path);
@@ -1438,7 +1439,7 @@ export default class RoundTripPlugin extends Plugin {
 				}
 				const file = this.app.metadataCache.getFirstLinkpathDest(decoded, sourcePath);
 				if (file === null || !IMAGE_EXTENSIONS.has(file.extension.toLowerCase())) continue;
-				const image = await this.decodeImage(file);
+				const image = (await this.state.readInk(file.name)) ?? (placeholders ? null : await this.decodeImage(file));
 				if (image !== null) out[alt] = image;
 			}
 		};

@@ -157,6 +157,16 @@ export function withImageBlocks(
 	});
 }
 
+/**
+ * The pictures a render draws: all of them, or — with pictures left as
+ * placeholders — only the owner's own ink, which is no picture they embedded.
+ * One rule for the send and its replay.
+ */
+function drawnPictures(options: InkRenderOptions): Record<string, Picture> | undefined {
+	if (options.images === undefined || options.imageStyle !== undefined) return options.images;
+	return Object.fromEntries(Object.entries(options.images).filter(([, picture]) => isInkStrokes(picture)));
+}
+
 /** One stroke this plugin wrote, as the import needs to recognise it. */
 export interface GeneratedStroke {
 	/** CRDT counter of the line item (author 1). */
@@ -373,7 +383,7 @@ export function renderInk(
 	const backend = new RecordingBackend(options.fonts);
 	const pageSize = pageSizeFor(options.profile);
 	const typeset = typesetBlocks(
-		withImageBlocks(blocks, options.images, options.drawings),
+		withImageBlocks(blocks, drawnPictures(options), options.drawings),
 		title,
 		{ ...layoutOptions, ...pageSize },
 		backend,
