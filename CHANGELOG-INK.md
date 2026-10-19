@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Your ink comes back as your ink:** a remark or page brought in from the
+  tablet keeps its original strokes (`reMarkable/.sync/ink/`), and sending the
+  note writes those strokes again — same pens, colours and size — instead of a
+  hatched copy of its picture, or, inside a remark callout, the text
+  `[image: …]` it used to become. Notebooks brought in from the tablet keep
+  their real handwriting the same way. Remarks read before this get their
+  shapes back from what the built-in reader remembered, in a black pen.
 - **Light highlighter colours, for real:** on the Paper Pro and Move the bands
   are now written the way the tablet writes its own highlighter — its
   "highlight" colour with the exact tint — which the tablet honours; the tint

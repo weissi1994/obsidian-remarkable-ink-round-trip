@@ -70,7 +70,7 @@ On every sync the plugin first reads the notebooks back, then sends what changed
 | A **bar in the margin** | The lines it ran along, as a `>` quote |
 | The **highlighter** over words | `<mark>` in the colour you used |
 | A **tick** in a drawn checkbox / a **stripe** through it | `- [x]` / `- [-]` |
-| **Handwriting** between the lines or in the margin | A remark callout with the image — and its text (see [OCR](#reading-handwriting)) |
+| **Handwriting** between the lines or in the margin | A remark callout with the image — and its text (see [OCR](#reading-handwriting)); sent back, it is your original strokes again |
 | A **page you added** | The whole page as a remark, after the text it follows |
 
 What the three inline marks become is yours to choose (*Settings → What a pen
