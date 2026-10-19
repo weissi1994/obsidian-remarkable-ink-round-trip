@@ -70,7 +70,7 @@ On every sync the plugin first reads the notebooks back, then sends what changed
 | A **bar in the margin** | The lines it ran along, as a `>` quote |
 | The **highlighter** over words | `<mark>` in the colour you used |
 | A **tick** in a drawn checkbox / a **stripe** through it | `- [x]` / `- [-]` |
-| **Handwriting** between the lines or in the margin | A remark callout with the image — and its text (see [OCR](#reading-handwriting)); sent back, it is your original strokes again |
+| **Handwriting** between the lines or in the margin | A remark callout with the image — and its text (see [OCR](#reading-handwriting)); sent back, it is your original strokes again, where you wrote them |
 | A **page you added** | The whole page as a remark, after the text it follows |
 
 What the three inline marks become is yours to choose (*Settings → What a pen
@@ -97,6 +97,12 @@ tick, quotes, tables, code — and every word is written as pen strokes.
 - **Tables** in a full grid: border, column and row lines, a heavier rule under
   the header, padded cells, and no column so narrow that a word has to break.
   Empty rows become boxes to write in.
+- **Your handwritten remarks** come back as your own strokes, where you wrote
+  them, beside the line you wrote them against — the callout, its title and its
+  text stay in Obsidian. If that line was rewritten, the ink goes right under
+  the text it followed. (*Settings → Handwriting → Handwritten remarks →
+  Callout with text* sends the callout instead; remarks read before this
+  version are always sent that way.)
 - **Pictures** (`![[photo.png]]`, `![alt](path)`) are redrawn as hatching in the
   tablet's inks — blue, red, green, yellow, pink, plus black and grey for tone.
   An Obsidian size alias (`![[photo.png|300]]`) sets the width.

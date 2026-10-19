@@ -147,21 +147,61 @@ function matchAt(source: string, from: number, word: string, typo: number): numb
  */
 const WINDOW = 200;
 
-/** Where a word sits in the source, searching forward from `from`. */
+/**
+ * Where a word sits in the source, searching forward from `from`. Text in
+ * `skip` is not on the page (remarks drawn back in place): it is stepped
+ * over without counting against the window.
+ */
 function findWord(
 	source: string,
 	from: number,
 	word: string,
 	typo: number,
 	window = WINDOW,
+	skip: Range[] = [],
 ): Range | null {
-	const limit = Math.min(source.length, from + window);
+	let limit = Math.min(source.length, from + window);
 	for (let at = from; at < limit; at++) {
+		const hidden = skip.find((range) => at >= range.start && at < range.end);
+		if (hidden !== undefined) {
+			limit = Math.min(source.length, limit + (hidden.end - at));
+			at = hidden.end - 1;
+			continue;
+		}
 		if (SYNTAX.has(source[at])) continue;
 		const end = matchAt(source, at, word, typo);
 		if (end !== null) return { start: at, end };
 	}
 	return null;
+}
+
+/**
+ * The callouts of remarks drawn back where they were written (named by their
+ * image): in the note, but not on the page.
+ */
+export function hiddenRemarks(source: string, names: string[] | undefined): Range[] {
+	if (names === undefined || names.length === 0) return [];
+	const wanted = new Set(names);
+	const lines = source.split("\n");
+	const out: Range[] = [];
+	let offset = 0;
+	const starts = lines.map((line) => {
+		const at = offset;
+		offset += line.length + 1;
+		return at;
+	});
+	for (let i = 0; i < lines.length; i++) {
+		if (!/^>\s*\[!/.test(lines[i])) continue;
+		let end = i;
+		while (end + 1 < lines.length && lines[end + 1].startsWith(">") && !/^>\s*\[!/.test(lines[end + 1])) end++;
+		const shown = lines
+			.slice(i, end + 1)
+			.flatMap((line) => [...line.matchAll(/!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g)])
+			.some((embed) => wanted.has(embed[2]?.trim() || (embed[1].trim().split("/").pop() ?? "")));
+		if (shown) out.push({ start: starts[i], end: starts[end] + lines[end].length });
+		i = end;
+	}
+	return out;
 }
 
 /**
@@ -171,13 +211,13 @@ function findWord(
  * first word that starts a run of three consecutive matches near the top of
  * the note — that is where the two texts genuinely meet.
  */
-function syncPoint(source: string, words: { text: string }[], typo: number): number {
+function syncPoint(source: string, words: { text: string }[], typo: number, skip: Range[] = []): number {
 	const head = Math.min(words.length, 60);
 	for (let index = 0; index < head; index++) {
 		let cursor = 0;
 		let run = 0;
 		for (let step = 0; step < 3 && index + step < words.length; step++) {
-			const hit = findWord(source, cursor, words[index + step].text, typo, cursor === 0 ? 400 : 40);
+			const hit = findWord(source, cursor, words[index + step].text, typo, cursor === 0 ? 400 : 40, skip);
 			if (hit === null) break;
 			cursor = hit.end;
 			run++;
@@ -229,11 +269,12 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	// where the source has an em dash, and mapping modern against it fails
 	// at the first typographic character.
 	const typo = input.layout.typo ?? 1;
-	const start = syncPoint(input.source, words, typo);
+	const skip = hiddenRemarks(input.source, input.layout.remarksInPlace);
+	const start = syncPoint(input.source, words, typo, skip);
 	let cursor = 0;
 	let found = 0;
 	for (const word of words.slice(start)) {
-		const hit = findWord(input.source, cursor, word.text, typo);
+		const hit = findWord(input.source, cursor, word.text, typo, WINDOW, skip);
 		if (hit === null) continue;
 		ranges.set(word.id, hit);
 		cursor = hit.end;

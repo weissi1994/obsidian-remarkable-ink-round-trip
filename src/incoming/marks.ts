@@ -50,6 +50,8 @@ export interface Mark {
 	blocks?: number[];
 	/** The line(s) around the mark, for context. */
 	quote?: string;
+	/** A handwritten note: where it sits relative to the row it is quoted from. */
+	at?: { text: string; x: number; below: number };
 	/** Strokes making up this mark, for the kinds that stay an image. */
 	strokes: Stroke[];
 	/** Device-unit bounds, for rendering. */
@@ -59,7 +61,7 @@ export interface Mark {
 }
 
 /** A row of text: everything placed at one baseline, left to right. */
-interface Row {
+export interface Row {
 	y: number;
 	size: number;
 	lines: LaidOutLine[];
@@ -68,7 +70,11 @@ interface Row {
 	right: number;
 }
 
-function rowsOf(layout: PdfLayout, page: number): Row[] {
+/**
+ * Text rows of one page, top to bottom: everything placed at one baseline.
+ * Shared with the ink renderer, which finds a remark's row again by its text.
+ */
+export function rowsOf(layout: PdfLayout, page: number): Row[] {
 	const byBaseline = new Map<number, LaidOutLine[]>();
 	for (const line of layout.lines) {
 		if (line.page !== page) continue;
@@ -563,10 +569,14 @@ function groupNotes(leftovers: Candidate[], rows: Row[], gap: number): Mark[] {
 	// the nearest one above — where a remark written under a line points.
 	for (const group of groups) {
 		const row = rowFor(rows, group.pdf) ?? nearestRow(rows, group.pdf);
-		if (row !== undefined) group.mark.quote = row.text;
+		if (row === undefined) continue;
+		group.mark.quote = row.text;
+		group.mark.at = { text: row.text, x: round1(group.pdf.minX), below: round1(row.y - group.pdf.maxY) };
 	}
 	return groups.map((group) => group.mark);
 }
+
+const round1 = (value: number) => Math.round(value * 10) / 10;
 
 function merge(a: Bounds, b: Bounds): Bounds {
 	return {

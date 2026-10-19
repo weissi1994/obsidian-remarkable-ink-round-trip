@@ -66,6 +66,20 @@ export interface InkStrokes {
 		/** Flat x, y, width per point; width in the pen's own v2 units. */
 		points: number[];
 	}[];
+	/**
+	 * Where a remark was written: beside the printed row with this text, its
+	 * left edge `x` points from the page's left, its top `below` points under
+	 * that row's baseline (negative: above it). Lets a send draw the ink back
+	 * where it was instead of in a callout (inkrender.ts overlays). Absent for
+	 * a page the owner added and for remarks read before it was kept.
+	 */
+	at?: RemarkPlace;
+}
+
+export interface RemarkPlace {
+	text: string;
+	x: number;
+	below: number;
 }
 
 export function isInkStrokes(picture: InkImage | InkStrokes): picture is InkStrokes {

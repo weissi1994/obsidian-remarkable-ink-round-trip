@@ -26,6 +26,43 @@ non-blank lines (table, callout, paragraph), carried across blank lines while
 a list continues. It is inserted with a blank line before and after, so it
 never splits a block or absorbs the lines after it.
 
+## Back on the tablet — where it was written
+
+With *Settings → Handwriting → Handwritten remarks* on **Ink where I wrote
+it** (the default), a remark goes back to the tablet as its ink alone, at the
+spot it was written — not as a callout with a title and typeset text.
+
+1. **Import** (`incoming/marks.ts` `groupNotes`): besides the quote, a note
+   mark records `at = { text, x, below }` — the text of the row it was quoted
+   from, its left edge in points, and how far its top sits under that row's
+   baseline. It travels in the render request (`StrokeRenderRequest.at`)
+   into the remark's stroke record (`reMarkable/.sync/ink/<image>.json`,
+   `InkStrokes.at`).
+2. **Send** (`preprocess/preprocess.ts` `remarksInPlace`): the embed map
+   flags a remark image whose stroke record has `at` (`inPlace`). Its whole
+   callout — title, text, image, id — becomes one `*[remark: <image>]*` line.
+   Any other remark callout is sent as before, minus its `^ink-` line, which
+   was written onto the page as stray text until now.
+3. **Render** (`ink/inkrender.ts`): the placeholder becomes an `inkoverlay`
+   block. The typesetter (`convert/pdf.ts`) gives it no room and no layout
+   line; it only reports the cursor (`drawOverlay`). `overlayPlacements`
+   then looks for the nearest row before it whose text is `at.text` and puts
+   the ink at the recorded offset — so it follows its line when text above
+   it grows or shrinks. When that row is gone (the line was edited) the ink
+   goes right under the text it follows. It is clamped onto the page. A
+   remark whose position was never recorded is drawn in the flow at its
+   natural size instead.
+4. **Re-import**: the redrawn ink is the plugin's own (author 1, regenerated
+   from the stored send), so it is not read as a new remark. The layout lists
+   the remarks it drew in place (`PdfLayout.remarksInPlace`); the projection
+   steps over their callouts in the note (`hiddenRemarks`), which are no
+   longer on the page and would otherwise break the word alignment.
+
+Limits: only remarks imported from this version on have a recorded place —
+older ones stay callouts on the tablet (their original ink is no longer in
+the notebook to measure). Erasing or lasso-moving a redrawn remark on the
+tablet changes nothing in the note; the next send draws it where it was.
+
 ## Keeping the note's text — `src/sync/twoway.ts`
 
 Every import re-reads the whole notebook, and the three-way merge base is the

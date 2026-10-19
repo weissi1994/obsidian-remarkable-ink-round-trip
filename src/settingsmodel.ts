@@ -87,6 +87,11 @@ export interface RoundTripSettings {
 	pendingWordSheet: PendingSheet | null;
 	/** How embedded pictures are drawn in a handwritten notebook. */
 	inkImages: "colour-hatch" | "mono-hatch" | "placeholder";
+	/**
+	 * Handwritten remarks sent back to the tablet: as the ink alone, where it
+	 * was written, or as the callout the note shows (title, text and ink).
+	 */
+	inkRemarks: "in-place" | "callout";
 	/** Mermaid diagrams in a handwritten notebook: drawn by hand, or as code. */
 	inkDiagrams: "handwritten" | "code";
 	/** Highlighter colour behind code and quotes, and for diagram fills. */
@@ -147,6 +152,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	pendingSheet: null,
 	pendingWordSheet: null,
 	inkImages: "colour-hatch",
+	inkRemarks: "in-place",
 	inkDiagrams: "handwritten",
 	inkAccents: true,
 	erasedAs: "delete",

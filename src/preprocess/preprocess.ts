@@ -6,6 +6,8 @@
  * - `![[embeds]]` resolved inline (with recursion/cycle guards),
  * - `[[wikilinks]]` flattened to their display text,
  * - callouts flattened to titled blockquotes,
+ * - remark callouts whose ink goes back where it was written swapped for a
+ *   `*[remark: name]*` placeholder (ink fork),
  * - `%%comments%%` and `<!-- comments -->` removed (inline formatting tags
  *   stay: the block parser reads them as styling).
  *
@@ -13,9 +15,16 @@
  * is pure and unit-testable (and mobile-safe per N7 — no Node APIs).
  */
 
+import { isRemarkIdLine } from "../incoming/remarkid";
+
 export type EmbedContent =
 	| { kind: "markdown"; content: string }
-	| { kind: "image"; name: string }
+	/**
+	 * `inPlace`: the image is a handwritten remark whose ink can be drawn
+	 * back where it was written (ink fork) — its callout is then sent as a
+	 * `*[remark: name]*` placeholder that takes no room on the page.
+	 */
+	| { kind: "image"; name: string; inPlace?: boolean }
 	| { kind: "missing" };
 
 export type EmbedResolver = (linkpath: string) => EmbedContent;
@@ -269,6 +278,47 @@ export function extractSection(markdown: string, subpath: string): string | null
 	return text === "" ? null : text;
 }
 
+/** The placeholder a remark drawn back in place leaves in the sent text. */
+export const REMARK_PLACEHOLDER_RE = /^\[remark: (.+)\]$/;
+
+/**
+ * Remark callouts whose ink is drawn back where it was written (ink fork):
+ * the whole callout — title, text, image and id — becomes one placeholder
+ * line, which the ink renderer turns into strokes at the remark's place and
+ * no room on the page. A callout whose image cannot go back in place (an
+ * older remark, no recorded position) stays as it is, minus its id line.
+ */
+function remarksInPlace(markdown: string, resolveEmbed: EmbedResolver): string {
+	const lines = markdown.split("\n");
+	const out: string[] = [];
+	let fenced = false;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+		// A remark's id is for Obsidian; on paper it would be a stray "^ink-…" line.
+		if (!fenced && isRemarkIdLine(line)) continue;
+		if (fenced || !CALLOUT_HEAD_RE.test(line)) {
+			out.push(line);
+			continue;
+		}
+		let end = i;
+		while (end + 1 < lines.length && lines[end + 1].startsWith(">") && !CALLOUT_HEAD_RE.test(lines[end + 1])) end++;
+		const block = lines.slice(i, end + 1);
+		const embeds = block.flatMap((l) => [...l.matchAll(EMBED_RE)]);
+		const embed = embeds.length === 1 ? embeds[0] : undefined;
+		const target = embed?.[1].trim();
+		const resolved = target === undefined ? undefined : resolveEmbed(target);
+		if (embed === undefined || !block.some(isRemarkIdLine) || resolved?.kind !== "image" || resolved.inPlace !== true) {
+			out.push(line);
+			continue;
+		}
+		// Blank lines around it: glued to a paragraph it would become its text.
+		out.push("", `*[remark: ${displayTextForLink(target!, embed[2])}]*`, "");
+		i = end;
+	}
+	return out.join("\n");
+}
+
 /** Flatten a callout block to a blockquote with a bold title line. */
 function flattenCallouts(markdown: string): string {
 	const lines = markdown.split("\n");
@@ -388,7 +438,7 @@ export function preprocess(
 	const { fields, body } = parseFrontmatter(source);
 	const missingEmbeds: string[] = [];
 
-	let text = body.replace(COMMENT_RE, "");
+	let text = remarksInPlace(body.replace(COMMENT_RE, ""), resolveEmbed);
 	text = resolveEmbeds(
 		text,
 		{ resolveEmbed, maxEmbedDepth, imagesAsBlocks: options.imagesAsBlocks },

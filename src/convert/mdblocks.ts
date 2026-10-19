@@ -52,7 +52,13 @@ export type Block =
 	 * the ink renderer swaps an image placeholder line for one when it has the
 	 * picture — so PDF and EPUB layout are untouched. Size in points.
 	 */
-	| { type: "inkimage"; name: string; width: number; height: number };
+	| { type: "inkimage"; name: string; width: number; height: number }
+	/**
+	 * Ink fork: a handwritten remark drawn back where it was written, over
+	 * the page rather than in the flow. Never produced by parseBlocks — the
+	 * ink renderer swaps a `[remark: name]` placeholder for one.
+	 */
+	| { type: "inkoverlay"; name: string };
 
 export interface ListItem {
 	depth: number;

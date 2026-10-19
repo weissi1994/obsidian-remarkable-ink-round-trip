@@ -15,6 +15,8 @@
  */
 
 import { imagePlaceholderText, type Block } from "../convert/mdblocks";
+import { REMARK_PLACEHOLDER_RE } from "../preprocess/preprocess";
+import { rowsOf } from "../incoming/marks";
 import {
 	DrawColor,
 	DrawPage,
@@ -27,7 +29,7 @@ import {
 } from "../convert/pdf";
 import { CAP_RATIO, HandFont } from "./glyphs";
 import { FIRST_STROKE_COUNTER, HIGHLIGHTER_ARGB, InkLine, InkPoint, PEN, PEN_COLOR, buildInkPageRm } from "./rmwrite";
-import { hatchImage, highlighterColorOf, ImageStyle, isInkStrokes, Picture } from "./inkimage";
+import { hatchImage, highlighterColorOf, ImageStyle, InkStrokes, isInkStrokes, Picture } from "./inkimage";
 import { diagramKey, drawingSize, drawingStrokes, InkDrawing } from "./inkdrawing";
 
 /** A device's notebook canvas: grid in device units and its pixel density. */
@@ -149,6 +151,14 @@ export function withImageBlocks(
 					? imagePlaceholderText(block)
 					: undefined;
 		if (text === undefined) return block;
+		const remark = REMARK_PLACEHOLDER_RE.exec(text);
+		if (remark !== null) {
+			const ink = images[remark[1]];
+			if (ink === undefined) return block;
+			// Where it was written when that is known, else in the flow like a picture.
+			if (isInkStrokes(ink) && ink.at !== undefined) return { type: "inkoverlay", name: remark[1] };
+			return { type: "inkimage", name: remark[1], width: ink.sourceWidth * 0.75, height: ink.sourceHeight * 0.75 };
+		}
 		const match = IMAGE_PLACEHOLDER.exec(text);
 		const image = match === null ? undefined : images[match[1]];
 		if (match === null || image === undefined) return block;
@@ -165,6 +175,45 @@ export function withImageBlocks(
 function drawnPictures(options: InkRenderOptions): Record<string, Picture> | undefined {
 	if (options.images === undefined || options.imageStyle !== undefined) return options.images;
 	return Object.fromEntries(Object.entries(options.images).filter(([, picture]) => isInkStrokes(picture)));
+}
+
+/**
+ * Where each remark overlay's ink goes (device units, its top-left), by page:
+ * beside the nearest row before it that carries the text it was written
+ * against, at the offset it had there — so it lands where it was written as
+ * long as that line is in the note. Without such a row (the line was
+ * edited) it goes right under the text it follows. Kept on the page.
+ */
+function overlayPlacements(
+	ops: DrawOp[][],
+	layout: PdfLayout,
+	images: Record<string, Picture> | undefined,
+	profile: DeviceProfile,
+	toDevice: (x: number, y: number) => { x: number; y: number },
+): Map<number, { ink: InkStrokes; left: number; top: number }[]> {
+	const out = new Map<number, { ink: InkStrokes; left: number; top: number }[]>();
+	if (!ops.some((page) => page.some((op) => op.kind === "overlay"))) return out;
+	const rows = Array.from({ length: layout.pageCount }, (_, i) => rowsOf(layout, i + 1).map((row) => ({ ...row, page: i + 1 }))).flat();
+	ops.forEach((pageOps, index) => {
+		const page = index + 1;
+		for (const op of pageOps) {
+			if (op.kind !== "overlay") continue;
+			const ink = images?.[op.name];
+			if (ink === undefined || !isInkStrokes(ink) || ink.at === undefined) continue;
+			const at = ink.at;
+			// Rows run top to bottom per page; the last match above the cursor is the nearest.
+			const row = rows.filter((r) => (r.page < page || (r.page === page && r.y >= op.y)) && r.text === at.text).pop();
+			const place = row === undefined ? { page, top: op.y } : { page: row.page, top: row.y - at.below };
+			const corner = toDevice(at.x, place.top);
+			const half = profile.width / 2;
+			const left = Math.max(-half, Math.min(corner.x, half - ink.width));
+			const top = Math.max(0, Math.min(corner.y, profile.height - ink.height));
+			const list = out.get(place.page) ?? [];
+			list.push({ ink, left, top });
+			out.set(place.page, list);
+		}
+	});
+	return out;
 }
 
 /** One stroke this plugin wrote, as the import needs to recognise it. */
@@ -195,6 +244,7 @@ export interface InkRender {
 type DrawOp =
 	| { kind: "text"; text: string; x: number; y: number; size: number; font: HandFont; color?: DrawColor }
 	| { kind: "image"; name: string; x: number; y: number; width: number; height: number }
+	| { kind: "overlay"; name: string; y: number }
 	| {
 			kind: "highlight";
 			x: number;
@@ -295,6 +345,9 @@ class RecordingBackend implements TypesetBackend {
 			},
 			drawImage: (name, o) => {
 				ops.push({ kind: "image", name, x: o.x, y: o.y, width: o.width, height: o.height });
+			},
+			drawOverlay: (name, o) => {
+				ops.push({ kind: "overlay", name, y: o.y });
 			},
 		};
 	}
@@ -407,6 +460,10 @@ export function renderInk(
 		y: round2((layout.pageHeight - y) * sy),
 	});
 
+	const inPlace = backend.pages.flatMap((ops) => ops.flatMap((op) => (op.kind === "overlay" ? [op.name] : [])));
+	if (inPlace.length > 0) layout.remarksInPlace = inPlace;
+	const overlays = overlayPlacements(backend.pages, layout, drawnPictures(options), options.profile, toDevice);
+
 	const pages: GeneratedStroke[][] = backend.pages.map((ops, pageIndex) => {
 		const page = pageIndex + 1;
 		const strokes: GeneratedStroke[] = [];
@@ -430,6 +487,24 @@ export function renderInk(
 			};
 			if (pen !== undefined) stroke.width = pen.width;
 			strokes.push(stroke);
+		};
+		/** The owner's own ink, written again as it was: same pens, same colours. */
+		const addInk = (image: InkStrokes, left: number, top: number, scale: number) => {
+			for (const stroke of image.strokes) {
+				const points: { x: number; y: number }[] = [];
+				const widths: number[] = [];
+				for (let i = 0; i + 2 < stroke.points.length; i += 3) {
+					points.push({ x: left + stroke.points[i] * scale, y: top + stroke.points[i + 1] * scale });
+					widths.push(stroke.points[i + 2]);
+				}
+				if (points.length === 0) continue;
+				if (points.length === 1) points.push({ ...points[0], x: points[0].x + 0.5 });
+				widths.sort((a, b) => a - b);
+				add(null, points, stroke.color, stroke.thicknessScale, {
+					tool: stroke.tool,
+					width: Math.max(1, Math.round(widths[widths.length >> 1] * scale)),
+				});
+			}
 		};
 
 		for (const op of ops) {
@@ -562,22 +637,7 @@ export function renderInk(
 					const boxWidth = bottomRight.x - topLeft.x;
 					const boxHeight = bottomRight.y - topLeft.y;
 					// Never enlarged: a small remark stays the size it was written.
-					const scale = Math.min(1, boxWidth / image.width, boxHeight / image.height);
-					for (const stroke of image.strokes) {
-						const points: { x: number; y: number }[] = [];
-						const widths: number[] = [];
-						for (let i = 0; i + 2 < stroke.points.length; i += 3) {
-							points.push({ x: topLeft.x + stroke.points[i] * scale, y: topLeft.y + stroke.points[i + 1] * scale });
-							widths.push(stroke.points[i + 2]);
-						}
-						if (points.length === 0) continue;
-						if (points.length === 1) points.push({ ...points[0], x: points[0].x + 0.5 });
-						widths.sort((a, b) => a - b);
-						add(null, points, stroke.color, stroke.thicknessScale, {
-							tool: stroke.tool,
-							width: Math.max(1, Math.round(widths[widths.length >> 1] * scale)),
-						});
-					}
+					addInk(image, topLeft.x, topLeft.y, Math.min(1, boxWidth / image.width, boxHeight / image.height));
 					continue;
 				}
 				const hatch = hatchImage(image, {
@@ -599,6 +659,9 @@ export function renderInk(
 					penColorFor(op.color, options.pen),
 					op.thickness >= 1.2 ? options.pen.thicknessScale : Math.max(1, options.pen.thicknessScale / 2),
 				);
+			} else if (op.kind === "overlay") {
+				// Placed with the page it belongs to (overlayPlacements), below.
+				continue;
 			} else {
 				add(
 					null,
@@ -614,6 +677,8 @@ export function renderInk(
 				);
 			}
 		}
+		// Remarks drawn back where they were written, after everything else.
+		for (const overlay of overlays.get(page) ?? []) addInk(overlay.ink, overlay.left, overlay.top, 1);
 		return strokes;
 	});
 

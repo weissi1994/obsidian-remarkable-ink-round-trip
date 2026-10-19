@@ -343,6 +343,21 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				},
 			},
 			{
+				key: "inkRemarks",
+				name: "Handwritten remarks",
+				desc:
+					"How remarks you wrote on the tablet look when the note goes back: your " +
+					"ink alone, where you wrote it — or the remark callout as the note shows " +
+					"it, with its title and text.",
+				control: {
+					type: "dropdown",
+					options: {
+						"in-place": "Ink where I wrote it",
+						callout: "Callout with text",
+					},
+				},
+			},
+			{
 				key: "inkDiagrams",
 				name: "Mermaid diagrams",
 				desc:

@@ -142,6 +142,12 @@ export interface PdfLayout {
 	 * deviceGridFor cannot tell apart. Absent for PDFs.
 	 */
 	grid?: { width: number; height: number };
+	/**
+	 * Ink fork: remarks drawn back where they were written, by image name.
+	 * Their callouts are in the note but not on the page, so the projection
+	 * skips them. Absent when there are none.
+	 */
+	remarksInPlace?: string[];
 }
 
 // reMarkable 2 screen in PDF points (1404×1872 px at 226 DPI).
@@ -305,6 +311,11 @@ export interface DrawPage {
 	drawDecoration?(options: { x1: number; x2: number; y: number; size: number; kind: "strike" | "underline" }): void;
 	/** A pre-embedded PNG for an image block; a backend without one leaves the space blank. */
 	drawPng?(block: Block, options: { x: number; y: number; width: number; height: number }): void;
+	/**
+	 * Ink fork: a remark drawn back where it was written passes here, at the
+	 * cursor (baseline y, points). Takes no room; the backend places the ink.
+	 */
+	drawOverlay?(name: string, options: { y: number }): void;
 }
 
 export type HighlightKind = "code" | "inline-code" | "quote" | "mark" | "table-header";
@@ -1166,6 +1177,10 @@ function drawBlock(ts: Typesetter, block: Block): void {
 		case "inkimage":
 			drawImage(ts, block);
 			break;
+		case "inkoverlay":
+			// No room taken, no line placed: the ink goes where it was written.
+			ts.page.drawOverlay?.(block.name, { y: ts.y });
+			break;
 	}
 }
 
@@ -1296,6 +1311,11 @@ export function typesetBlocks(
 		const block = content[index];
 		if (block.type === "pagebreak") {
 			pendingBreak = true;
+			continue;
+		}
+		if (block.type === "inkoverlay") {
+			// Not content: a page break or heading rule must not count it.
+			drawBlock(ts, block);
 			continue;
 		}
 		const startsSection =

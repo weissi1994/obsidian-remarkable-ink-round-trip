@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Handwritten remarks go back to the tablet as you wrote them:** ink only,
+  at the spot you wrote it, beside the line you wrote it against (it follows
+  that line when text above it changes) — no longer a callout box with a title,
+  the typeset reading and a second copy of the ink below the paragraph. The
+  note keeps its remark callout. *Settings → Handwriting → Handwritten
+  remarks* switches back to callouts. Applies to remarks imported from now
+  on. Notes with such remarks are re-sent once.
+- **No more stray `^ink-…` lines on the tablet:** a remark callout's id line
+  was written onto the page as text.
+
 - **Insert a handwritten remark into the note as text (⤵):** a button on
   the remark callout (and in the correction editor, and a command) puts its
   text where the ink was written — into the table cell under it, as a line of

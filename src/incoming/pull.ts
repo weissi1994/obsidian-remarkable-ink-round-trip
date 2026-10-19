@@ -15,6 +15,7 @@ import type { Highlight } from "./highlights";
 import type { MarkKind } from "./marks";
 import type { Stroke } from "./rmlines";
 import type { InkRender } from "../ink/inkrender";
+import type { RemarkPlace } from "../ink/inkimage";
 import { collectInkAnnotations } from "./inkpull";
 
 /** One file belonging to a device document. */
@@ -141,6 +142,8 @@ export interface StrokeRenderRequest {
 	column?: number;
 	/** Ink fork: highlighter drawn over the remark's own handwriting. */
 	inkHighlights?: InkHighlight[];
+	/** Ink fork: where the remark sits relative to the row it was written against. */
+	at?: RemarkPlace;
 }
 
 /** Highlighter strokes over handwriting, device units, with the colour they carry. */

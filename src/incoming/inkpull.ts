@@ -441,6 +441,7 @@ export async function collectInkAnnotations(
 							remark: position + 1,
 							...(column === undefined ? {} : { column }),
 							...(inkHighlights.length === 0 ? {} : { inkHighlights }),
+							...(mark.at === undefined ? {} : { at: mark.at }),
 						},
 						mark.quote,
 						deps,

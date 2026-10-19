@@ -1174,7 +1174,11 @@ export default class RoundTripPlugin extends Plugin {
 				if (!target) {
 					map.set(linkpath, { kind: "missing" });
 				} else if (IMAGE_EXTENSIONS.has(target.extension.toLowerCase())) {
-					map.set(linkpath, { kind: "image", name: target.basename });
+					// A remark whose position was recorded goes back as ink in place.
+					const inPlace =
+						this.settings.inkRemarks === "in-place" &&
+						(await this.state.readInk(target.name).catch(() => null))?.at !== undefined;
+					map.set(linkpath, { kind: "image", name: target.basename, ...(inPlace ? { inPlace } : {}) });
 				} else if (target.extension === "md") {
 					const content = await this.app.vault.cachedRead(target);
 					map.set(linkpath, { kind: "markdown", content });
@@ -2107,7 +2111,8 @@ export default class RoundTripPlugin extends Plugin {
 		const legacy = `${request.deviceDocId}-p${page}-${request.remark}.png`;
 		if (ink !== null && this.app.vault.getFileByPath(inFolder(legacy)) !== null) {
 			const kept = await this.state.readInk(legacy).catch(() => null);
-			if (kept !== null && JSON.stringify(kept) === JSON.stringify(ink)) return inFolder(legacy);
+			// The same strokes; where they sit may have been recorded since.
+			if (kept !== null && JSON.stringify(kept.strokes) === JSON.stringify(ink.strokes)) return inFolder(legacy);
 		}
 		return inFolder(`${request.deviceDocId}-p${page}-${remarkId(request.strokes)}.png`);
 	}
@@ -2143,7 +2148,9 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		// The strokes behind the picture, so a send writes this ink back as
 		// itself rather than as a hatched copy of the image.
-		const ink = inkStrokesOf(request.strokes, this.ink.profile().dpi);
+		const strokes = inkStrokesOf(request.strokes, this.ink.profile().dpi);
+		// Where it was written, so a send can draw it back there (inkRemarks).
+		const ink = strokes === null || request.at === undefined ? strokes : { ...strokes, at: request.at };
 		const path = await this.remarkImagePath(request, ink);
 		this.remarkImages.set(remarkId(request.strokes), path);
 		if (ink !== null) await this.state.writeInk(path.split("/").pop() ?? path, ink);
