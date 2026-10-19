@@ -153,6 +153,26 @@ describe("a reading nobody touched", () => {
 	});
 });
 
+describe("a confirmed reading", () => {
+	it("is never replaced, even by a better one", () => {
+		const checked = copy(SOURCE, [misread]).body.replace("> [!note] Remark", "> [!note] Remark ✓");
+		const { body, refreshed } = copy(checked, [{ ...misread, transcript: "hello world", replaces: "helo wrld" }]);
+		expect(body).toBe(checked);
+		expect(refreshed).toEqual([]);
+	});
+
+	it("keeps its ✓ when the summary block is written again", () => {
+		const block = summary(SOURCE, [misread]).body.replace("Note at: “First paragraph with some words.”", "$& ✓");
+		const { body } = summary(block, [{ ...misread, transcript: "hello world", replaces: "helo wrld" }]);
+		expect(body).toContain("Note at: “First paragraph with some words.” ✓");
+		expect(body).toContain("> helo wrld");
+	});
+
+	it("is written with its ✓ when placed again", () => {
+		expect(copy(SOURCE, [{ ...misread, confirmed: true }]).body).toContain("> [!note] Remark ✓");
+	});
+});
+
 describe("a remark the note already has (summary block)", () => {
 	it("keeps the owner's correction when the block is written again", () => {
 		const first = summary(SOURCE, [misread]).body;

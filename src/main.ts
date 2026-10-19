@@ -73,9 +73,11 @@ import {
 	learnFromNotes,
 	notedReadings,
 	refOf,
+	type ReaderName,
 	rememberRemark,
 	remarkText,
 	type RemarkRecord,
+	scoreAbove,
 	withEarlierReadings,
 } from "./ocr/samples";
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
@@ -1632,13 +1634,22 @@ export default class RoundTripPlugin extends Plugin {
 		if (known !== null) return known;
 		const lexicon = await this.vaultLexicon();
 		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
-		let text = result !== null && result.confidence >= OCR_TRUST ? result.text : null;
-		if (text === null) {
+		let text: string | null = null;
+		// How sure each reader was, above its own cut-off: decides whether this
+		// reading may later replace one the note already shows.
+		let scored: { score?: number; by?: ReaderName } = {};
+		if (result !== null && result.confidence >= OCR_TRUST) {
+			text = result.text;
+			scored = { score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
+		} else {
 			// Joined-up writing, most likely: WritePad was made for it.
 			const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
-			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) text = cursive.text;
+			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) {
+				text = cursive.text;
+				scored = { score: scoreAbove(cursive.confidence, WRITEPAD_TRUST), by: "writepad" };
+			}
 		}
-		await this.rememberReading(request, text);
+		await this.rememberReading(request, text, scored);
 		return text;
 	}
 
@@ -1647,7 +1658,11 @@ export default class RoundTripPlugin extends Plugin {
 	 * in the note — or text typed under an image-only remark — can teach the
 	 * reader this hand (ocr/samples.ts).
 	 */
-	private async rememberReading(request: StrokeRenderRequest & { quote?: string }, text: string | null): Promise<void> {
+	private async rememberReading(
+		request: StrokeRenderRequest & { quote?: string },
+		text: string | null,
+		scored: { score?: number; by?: ReaderName },
+	): Promise<void> {
 		const id = remarkId(request.strokes);
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
 		const entry = Object.values(this.settings.mappings).find((m) => m.deviceDocId === request.deviceDocId);
@@ -1657,7 +1672,7 @@ export default class RoundTripPlugin extends Plugin {
 			note,
 			quote: request.quote,
 			wholePage: request.wholePage === true ? true : undefined,
-		});
+		}, text === null ? {} : scored);
 		this.samplesDirty = true;
 	}
 
@@ -1734,6 +1749,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (learned.remarks > 0) {
 			log(`learned ${learned.words} word(s) of your handwriting from ${learned.remarks} corrected remark(s)`);
 		}
+		if (learned.confirmed > 0) log(`${learned.confirmed} reading(s) confirmed by you (✓) — kept as they are`);
 		if (learned.unlearned.length > 0) {
 			// Said once: the correction is remembered as made and not looked at again.
 			log(`${learned.unlearned.length} correction(s) taught no words — text and ink did not line up word for word:`);
@@ -1816,7 +1832,9 @@ export default class RoundTripPlugin extends Plugin {
 		const png = await this.strokesToPng(request.strokes);
 		if (png === null) return null;
 		const text = await this.ink.ocr(obsidianHttp, png, request.quote, request.wholePage === true, await this.ocrExamples());
-		await this.rememberReading(request, text);
+		// No confidence from a chat endpoint: its readings fill empty callouts
+		// but never replace text the note already shows.
+		await this.rememberReading(request, text, { by: "endpoint" });
 		return text;
 	}
 

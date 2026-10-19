@@ -10,12 +10,14 @@ import {
 	corrections,
 	describeUnlearned,
 	emptyStore,
+	isBetterReading,
 	knownText,
 	learnCorrection,
 	learnFromNotes,
 	notedReadings,
 	rememberRemark,
 	remarkText,
+	scoreAbove,
 	withEarlierReadings,
 } from "../ocr/samples";
 import { WordReader } from "../ocr/words";
@@ -192,17 +194,51 @@ describe("remembered remarks", () => {
 		expect(knownText(store, ID)).toBe("Termin morgen");
 	});
 
-	it("carry the plugin's own earlier reading to the merge, never the owner's", () => {
+	it("carry the plugin's own earlier reading to the merge only for a clearly better one", () => {
 		const store = emptyStore();
-		rememberRemark(store, ID, strokes(), "Termin morgan", new Date("2026-10-19"));
-		rememberRemark(store, "c0ffee000000", strokes(), "x", new Date("2026-10-19"));
-		store.remarks.c0ffee000000.corrected = true;
-		const marks = withEarlierReadings(store, [
-			{ kind: "note", page: 1, id: ID, transcript: "Termin morgen" },
-			{ kind: "note", page: 1, id: "c0ffee000000", transcript: "y" },
-			{ kind: "note", page: 1, id: "unknown00000", transcript: "z" },
+		const at = new Date("2026-10-19");
+		const later = new Date("2026-10-20");
+		rememberRemark(store, "a00000000000", strokes(), "Termin morgan", at, {}, { score: 0.2, by: "builtin" });
+		rememberRemark(store, "a00000000000", strokes(), "Termin morgen", later, {}, { score: 0.6, by: "builtin" });
+		rememberRemark(store, "b00000000000", strokes(), "Termin morgan", at, {}, { score: 0.5, by: "builtin" });
+		rememberRemark(store, "b00000000000", strokes(), "Termin morgen", later, {}, { score: 0.55, by: "writepad" });
+		rememberRemark(store, "c00000000000", strokes(), "Termin morgan", at, {}, { by: "endpoint" });
+		rememberRemark(store, "c00000000000", strokes(), "Termin morgen", later, {}, { by: "endpoint" });
+		rememberRemark(store, "d00000000000", strokes(), "", at);
+		rememberRemark(store, "d00000000000", strokes(), "Termin morgen", later, {}, { by: "endpoint" });
+		rememberRemark(store, "e00000000000", strokes(), "x", at, {}, { score: 0 });
+		rememberRemark(store, "e00000000000", strokes(), "y", later, {}, { score: 1 });
+		store.remarks.e00000000000.corrected = true;
+		const marks = withEarlierReadings(
+			store,
+			["a", "b", "c", "d", "e", "f"].map((k) => ({ kind: "note" as const, page: 1, id: `${k}00000000000`, transcript: "new" })),
+		);
+		expect(marks.map((m) => m.replaces)).toEqual([
+			"Termin morgan", // scored clearly higher
+			undefined, // about as sure: a fluke must not swap a correct reading
+			undefined, // no score from a vision endpoint
+			"", // an empty callout takes any reading
+			undefined, // the owner's
+			undefined, // unknown
 		]);
-		expect(marks.map((m) => m.replaces)).toEqual(["Termin morgan", undefined, undefined]);
+	});
+
+	it("are confirmed from the note and then left alone", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, strokes(), "Termin morgen prüfen", new Date("2026-10-19"), {}, { score: 0.1, by: "builtin" });
+		const checked = note("Termin morgen prüfen").replace("[!note] Remark", "[!note] Remark ✓");
+		const result = learnFromNotes(store, () => checked);
+		expect(result).toMatchObject({ confirmed: 1, remarks: 0, words: 3 });
+		expect(Object.keys(store.words).sort()).toEqual(["Termin", "morgen", "prüfen"]);
+		expect(store.remarks[ID]).toMatchObject({ confirmed: true });
+		expect(store.remarks[ID].corrected).toBeUndefined();
+		expect(knownText(store, ID)).toBe("Termin morgen prüfen");
+		expect(corrections(store).map(([key]) => key)).toEqual([ID]);
+		// Once only.
+		expect(learnFromNotes(store, () => checked).confirmed).toBe(0);
+		// Taking the ✓ away hands the reading back to the plugin.
+		learnFromNotes(store, () => note("Termin morgen prüfen"));
+		expect(knownText(store, ID)).toBeNull();
 	});
 
 	it("take the new reading once the note shows it — and not the owner's text typed meanwhile", () => {
@@ -268,5 +304,22 @@ describe("corrections", () => {
 		Object.assign(store.remarks.new, { corrected: true, transcript: "new fix" });
 		Object.assign(store.remarks.emptied, { corrected: true, transcript: "" });
 		expect(corrections(store).map(([key]) => key)).toEqual(["new", "old"]);
+	});
+});
+
+describe("reading scores", () => {
+	it("measure how far a reader is above its own cut-off", () => {
+		expect(scoreAbove(0.65, 0.65)).toBe(0);
+		expect(scoreAbove(1, 0.65)).toBe(1);
+		expect(scoreAbove(0.85, 0.7)).toBeCloseTo(0.5);
+		expect(scoreAbove(0.3, 0.65)).toBe(0);
+	});
+
+	it("let a new reading replace an old one only when clearly better", () => {
+		expect(isBetterReading({ score: 0.3 }, { score: 0.45 })).toBe(true);
+		expect(isBetterReading({ score: 0.3 }, { score: 0.38 })).toBe(false);
+		expect(isBetterReading({ score: 0.3 }, {})).toBe(false);
+		expect(isBetterReading({}, { score: 0.6 })).toBe(true);
+		expect(isBetterReading({}, { score: 0.3 })).toBe(false);
 	});
 });

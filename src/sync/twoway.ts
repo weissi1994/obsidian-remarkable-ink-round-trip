@@ -13,7 +13,9 @@
  * block, in place of it. What the callout says depends on who wrote it:
  * text the owner changed stands for good; a reading the plugin wrote and
  * nobody touched (the mark's `replaces`) gives way to a newer, different
- * reading, so remarks read badly before improve as the reader learns.
+ * reading that scores better (see withEarlierReadings), so remarks read
+ * badly before improve as the reader learns. A reading the owner confirmed
+ * (✓ in the title) is never replaced.
  */
 
 import type { PdfLayout } from "../convert/pdf";
@@ -75,7 +77,7 @@ export function settleRemarks(
 		}
 		const quoted = lines[found.end].startsWith(">");
 		if (mark.id !== undefined && !found.hasId) lines.splice(found.end + 1, 0, remarkIdLine(mark.id, quoted));
-		if (found.titled && takesNewReading(mark, found.text)) {
+		if (found.titled && !found.confirmed && takesNewReading(mark, found.text)) {
 			// The text lines go; the new reading takes their place under the title.
 			const block = lines.slice(found.start + 1, found.end + 1).filter((line) => !isTextLine(line));
 			lines = [
@@ -93,13 +95,14 @@ export function settleRemarks(
 /** In the summary block, a remark keeps the note's text unless it is the plugin's untouched reading. */
 function withNoteTexts(ours: string, marks: ImportedMark[], refreshed: string[]): ImportedMark[] {
 	return marks.map((mark) => {
-		const text = isRemark(mark) ? findRemark(ours, refOf(mark))?.text : undefined;
-		if (text === undefined) return mark;
-		if (takesNewReading(mark, text)) {
+		const found = isRemark(mark) ? findRemark(ours, refOf(mark)) : null;
+		if (found === null) return mark;
+		if (!found.confirmed && takesNewReading(mark, found.text)) {
 			if (mark.id !== undefined) refreshed.push(mark.id);
 			return mark;
 		}
-		return text === "" ? mark : { ...mark, transcript: text };
+		const kept = found.confirmed ? { ...mark, confirmed: true } : mark;
+		return found.text === "" ? kept : { ...kept, transcript: found.text };
 	});
 }
 

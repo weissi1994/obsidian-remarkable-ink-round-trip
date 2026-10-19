@@ -16,7 +16,7 @@ import { PdfLayout, toWinAnsi } from "../convert/pdf";
 import { Highlight, colorName, rgbName } from "./highlights";
 import { DEFAULT_MARK_STYLES, MarkStyle, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
-import { remarkIdLine } from "./remarkid";
+import { CONFIRM_MARK, remarkIdLine } from "./remarkid";
 
 /** Markdown punctuation that carries no text and may sit between words. */
 const SYNTAX = new Set([
@@ -672,9 +672,10 @@ function applyBlockMarks(
 			// say what it is, so a page of thinking is not mistaken for a
 			// scribble (GP_E3_S20).
 			const title =
-				mark.addedPage === undefined
+				(mark.addedPage === undefined
 					? "> [!note] Remark"
-					: `> [!note] Page added on the reMarkable (page ${mark.addedPage})`;
+					: `> [!note] Page added on the reMarkable (page ${mark.addedPage})`) +
+				(mark.confirmed === true ? ` ${CONFIRM_MARK}` : "");
 			remarks.set(anchor, [
 				...(remarks.get(anchor) ?? []),
 				title,

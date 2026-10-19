@@ -12,7 +12,7 @@ import { projectOntoSource } from "./sourceprojection";
 import { Highlight, colorName, rgbName } from "./highlights";
 import { DEFAULT_MARK_STYLES, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
-import { remarkIdLine } from "./remarkid";
+import { CONFIRM_MARK, remarkIdLine } from "./remarkid";
 
 export const BEGIN_MARKER = "<!-- remarkable-round-trip:begin -->";
 export const END_MARKER = "<!-- remarkable-round-trip:end -->";
@@ -162,6 +162,7 @@ function fallbackReason(input: AnnotationRenderInput): AnnotationOutcome["reason
  * (GP_E3_S9).
  */
 function renderMark(mark: ImportedMark, styles: MarkStyles): string[] {
+	const check = mark.confirmed === true ? ` ${CONFIRM_MARK}` : "";
 	const image = [
 		...(mark.path === undefined ? [] : [`![[${mark.path}]]`]),
 		...(mark.id === undefined ? [] : [remarkIdLine(mark.id, false)]),
@@ -198,10 +199,14 @@ function renderMark(mark: ImportedMark, styles: MarkStyles): string[] {
 			];
 		default:
 			if (mark.addedPage !== undefined) {
-				return [`**Page added on the reMarkable** (page ${mark.addedPage})`, ...image];
+				return [`**Page added on the reMarkable** (page ${mark.addedPage})${check}`, ...image];
 			}
 			return [
-				...(mark.quote === undefined ? [] : [`Note at: “${mark.quote}”`]),
+				...(mark.quote === undefined
+					? mark.confirmed === true
+						? [`Remark${check}`]
+						: []
+					: [`Note at: “${mark.quote}”${check}`]),
 				...(mark.transcript === undefined ? [] : [`> ${mark.transcript.replace(/\n/g, "\n> ")}`]),
 				...image,
 			];

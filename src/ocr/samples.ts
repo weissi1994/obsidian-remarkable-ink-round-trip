@@ -14,12 +14,13 @@
  *
  * The text the note has for a remark is the owner's from the moment they
  * change it: a later reading of the same ink never replaces it, here or in
- * the note (sync/twoway.ts). A reading nobody touched is the plugin's: the
- * remark is read again, and a better reading replaces it in the note.
+ * the note (sync/twoway.ts) — as does a reading they confirmed (✓). A
+ * reading nobody touched is the plugin's: the remark is read again, and a
+ * reading that scores clearly better replaces it in the note.
  */
 
 import type { ImportedMark } from "../incoming/pull";
-import { remarkText, type RemarkRef } from "../incoming/remarkid";
+import { findRemark, remarkText, type RemarkRef } from "../incoming/remarkid";
 import { splitLineInto, splitWords, type Point } from "./recognize";
 
 export { remarkText };
@@ -28,8 +29,38 @@ export { remarkText };
 const PER_WORD = 3;
 /** Remarks remembered for learning that were never corrected, newest kept. */
 const REMARKS_KEPT = 500;
-/** Corrected remarks kept (worked examples, training export), newest kept. */
+/** Corrected or confirmed remarks kept (worked examples, training export), newest kept. */
 const CORRECTIONS_KEPT = 2000;
+
+/** Which reader produced a reading. */
+export type ReaderName = "builtin" | "writepad" | "endpoint";
+
+/**
+ * How sure a reader was, made comparable across readers: how far its
+ * confidence sits above that reader's own cut-off, 0 (just passed) to 1
+ * (certain). Readers without a confidence (a vision endpoint) have none.
+ */
+export function scoreAbove(confidence: number, cutOff: number): number {
+	return Math.max(0, Math.min(1, (confidence - cutOff) / (1 - cutOff)));
+}
+
+/** A new reading must beat the old score by this much to replace it. */
+const BETTER_BY = 0.1;
+/** …or, against an old reading with no score, reach this. */
+const SURE_ENOUGH = 0.5;
+
+/**
+ * Whether a new reading is clearly better than the one the note shows. A
+ * reading without a score can never be shown to be better; one with a score
+ * must beat the old score by a margin, or — when the old one has none —
+ * be well above its reader's cut-off. Different texts with similar scores
+ * stay as they are, so a correct reading is not swapped for a fluke.
+ */
+export function isBetterReading(old: { score?: number }, next: { score?: number }): boolean {
+	if (next.score === undefined) return false;
+	if (old.score === undefined) return next.score >= SURE_ENOUGH;
+	return next.score > old.score + BETTER_BY;
+}
 
 export interface RemarkRecord {
 	/** The remark's strokes, device units. */
@@ -40,6 +71,14 @@ export interface RemarkRecord {
 	read?: string;
 	/** The owner changed or typed in the text in the note. */
 	corrected?: boolean;
+	/** The owner checked the reading and marked it ✓. */
+	confirmed?: boolean;
+	/** Score and reader of the text the note shows (scoreAbove), when it is a reading. */
+	score?: number;
+	by?: ReaderName;
+	/** Score and reader of the latest reading. */
+	readScore?: number;
+	readBy?: ReaderName;
 	at: string;
 	/** Vault path of its image, when it has one. */
 	image?: string;
@@ -57,6 +96,11 @@ export interface SampleStore {
 	words: Record<string, Point[][][]>;
 	/** Remarks by id — or by the vault path of their image, in stores from before ids. */
 	remarks: Record<string, RemarkRecord>;
+}
+
+/** Corrected or confirmed: the note's text for it is the owner's word, final. */
+export function isVerified(record: RemarkRecord): boolean {
+	return record.corrected === true || record.confirmed === true;
 }
 
 export function emptyStore(): SampleStore {
@@ -90,14 +134,25 @@ export function rememberRemark(
 	read: string,
 	at: Date,
 	context: RemarkContext = {},
+	scored: { score?: number; by?: ReaderName } = {},
 ): void {
 	const known = store.remarks[key];
 	if (known !== undefined) {
 		known.read = read;
+		known.readScore = scored.score;
+		known.readBy = scored.by;
 		known.at = at.toISOString();
 		Object.assign(known, context);
 	} else {
-		store.remarks[key] = { strokes: round(strokes), transcript: read, read, at: at.toISOString(), ...context };
+		store.remarks[key] = {
+			strokes: round(strokes),
+			transcript: read,
+			read,
+			at: at.toISOString(),
+			...context,
+			...(scored.score === undefined ? {} : { score: scored.score, readScore: scored.score }),
+			...(scored.by === undefined ? {} : { by: scored.by, readBy: scored.by }),
+		};
 	}
 	prune(store);
 }
@@ -108,7 +163,7 @@ function prune(store: SampleStore): void {
 		[false, REMARKS_KEPT],
 		[true, CORRECTIONS_KEPT],
 	] as const) {
-		const keys = Object.keys(store.remarks).filter((key) => (store.remarks[key].corrected === true) === corrected);
+		const keys = Object.keys(store.remarks).filter((key) => isVerified(store.remarks[key]) === corrected);
 		if (keys.length <= limit) continue;
 		keys.sort((a, b) => store.remarks[a].at.localeCompare(store.remarks[b].at));
 		for (const key of keys.slice(0, keys.length - limit)) delete store.remarks[key];
@@ -116,12 +171,12 @@ function prune(store: SampleStore): void {
 }
 
 /**
- * The text the owner gave a remark, if they corrected it: such a remark is
+ * The text of a remark the owner corrected or confirmed: such a remark is
  * not read again — their text stands. Every other remark is read anew.
  */
 export function knownText(store: SampleStore, key: string): string | null {
 	const known = store.remarks[key];
-	return known?.corrected === true && known.transcript !== "" ? known.transcript : null;
+	return known !== undefined && isVerified(known) && known.transcript !== "" ? known.transcript : null;
 }
 
 /**
@@ -132,7 +187,11 @@ export function knownText(store: SampleStore, key: string): string | null {
 export function withEarlierReadings(store: SampleStore, marks: ImportedMark[]): ImportedMark[] {
 	return marks.map((mark) => {
 		const known = mark.id === undefined ? undefined : store.remarks[mark.id];
-		return known === undefined || known.corrected === true ? mark : { ...mark, replaces: known.transcript };
+		if (known === undefined) return mark;
+		if (isVerified(known)) return known.confirmed === true ? { ...mark, confirmed: true } : mark;
+		// Only a clearly better reading may replace text; an empty callout takes any.
+		const better = known.transcript === "" || isBetterReading(known, { score: known.readScore });
+		return better ? { ...mark, replaces: known.transcript } : mark;
 	});
 }
 
@@ -145,9 +204,13 @@ export function withEarlierReadings(store: SampleStore, marks: ImportedMark[]): 
 export function notedReadings(store: SampleStore, marks: ImportedMark[], note: string): void {
 	for (const mark of marks) {
 		const known = mark.id === undefined ? undefined : store.remarks[mark.id];
-		if (known === undefined || known.corrected === true) continue;
+		if (known === undefined || isVerified(known)) continue;
 		const text = remarkText(note, { id: mark.id, image: mark.path });
-		if (text !== null && text === (mark.transcript ?? "")) known.transcript = text;
+		if (text !== null && text === (mark.transcript ?? "") && text !== known.transcript) {
+			known.transcript = text;
+			known.score = known.readScore;
+			known.by = known.readBy;
+		}
 	}
 }
 
@@ -229,15 +292,30 @@ export function describeUnlearned(item: UnlearnedCorrection): string {
 export function learnFromNotes(
 	store: SampleStore,
 	noteOf: (key: string, record: RemarkRecord) => string | null,
-): { remarks: number; words: number; unlearned: UnlearnedCorrection[] } {
+): { remarks: number; words: number; unlearned: UnlearnedCorrection[]; confirmed: number } {
 	let remarks = 0;
 	let words = 0;
+	let confirmed = 0;
 	const unlearned: UnlearnedCorrection[] = [];
 	for (const [key, record] of Object.entries(store.remarks)) {
 		const note = noteOf(key, record);
 		if (note === null) continue;
-		const text = remarkText(note, refOf(key, record));
-		if (text === null || text === "" || text === record.transcript) continue;
+		const found = findRemark(note, refOf(key, record));
+		if (found === null) continue;
+		const text = found.text;
+		// A ✓ taken away again makes the reading the plugin's once more.
+		const newlyConfirmed = found.confirmed && record.confirmed !== true && text !== "";
+		record.confirmed = found.confirmed ? true : undefined;
+		if (text === "" || text === record.transcript) {
+			// Confirmed as read: the words are known-correct, so the built-in
+			// reader learns them as it would from a correction.
+			if (newlyConfirmed) {
+				confirmed++;
+				words += learnCorrection(store, record, text);
+			}
+			continue;
+		}
+		if (newlyConfirmed) confirmed++;
 		const learned = learnCorrection(store, record, text);
 		record.transcript = text;
 		record.corrected = true;
@@ -257,15 +335,16 @@ export function learnFromNotes(
 			});
 		}
 	}
-	return { remarks, words, unlearned };
+	return { remarks, words, unlearned, confirmed };
 }
 
 /**
- * The owner's corrections, newest first: remarks whose text they changed or
- * typed in. Worked examples for a vision model, and the training export.
+ * The owner's verified remarks, newest first: those whose text they changed,
+ * typed in or confirmed. Worked examples for a vision model, and the
+ * training export — readings they confirmed are its known-correct samples.
  */
 export function corrections(store: SampleStore): [string, RemarkRecord][] {
 	return Object.entries(store.remarks)
-		.filter(([, record]) => record.corrected === true && record.transcript !== "")
+		.filter(([, record]) => isVerified(record) && record.transcript !== "")
 		.sort(([, a], [, b]) => b.at.localeCompare(a.at));
 }

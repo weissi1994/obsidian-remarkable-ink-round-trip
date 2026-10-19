@@ -119,6 +119,8 @@ export interface ImportedMark {
 	 * reading; any other text in the note is the owner's and stays.
 	 */
 	replaces?: string;
+	/** Ink fork: the owner confirmed this reading (✓); kept when the remark is written again. */
+	confirmed?: boolean;
 	/** Ink fork, kind "moved": insert the moved words after this word id… */
 	moveAfter?: number;
 	/** …or before this one, when they landed at the start of a line. */
