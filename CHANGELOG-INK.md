@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Handwriting sheets have a layer of their own to write on:** the boxes,
+  guides and labels sit on a "Sheet" layer, and the page opens on an empty
+  "Your handwriting" layer above it. The tablet's eraser and lasso only touch
+  the selected layer, so fixing a letter can no longer erase a box line.
+  Notebooks of your notes keep one layer — erasing and moving their words is
+  how you edit them.
 - **Handwritten remarks go back to the tablet as you wrote them:** ink only,
   at the spot you wrote it, beside the line you wrote it against (it follows
   that line when text above it changes) — no longer a callout box with a title,

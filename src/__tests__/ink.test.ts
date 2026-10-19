@@ -375,6 +375,7 @@ import {
 	learnHand,
 	SHEET_CHARS,
 	SHEET_CHARSETS,
+	SHEET_LAYERS,
 	SHEET_VERSION,
 	sheetPagesToRm,
 } from "../ink/handsheet";
@@ -406,13 +407,30 @@ describe("handwriting capture", () => {
 						points.push({ x: x0 + path[i] * cap, y: box.baseline - path[i + 1] * cap, width: 16, pressure: 200, speed: 5, direction: 0 });
 					}
 					if (points.length < 2) continue;
-					items.push({ author: 2, counter: counter++, line: { tool: 15, color: 0, thicknessScale: 2, points } });
+					// On the layer the sheet opens on, as the tablet writes it.
+					items.push({ author: 2, counter: counter++, line: { tool: 15, color: 0, thicknessScale: 2, points }, onWritingLayer: true });
 				}
 			}
-			filled.set(pageIds[index], buildScenePageRm(items, { paperSize: { width: profile.width, height: profile.height } }));
+			filled.set(
+				pageIds[index],
+				buildScenePageRm(items, { paperSize: { width: profile.width, height: profile.height }, layers: SHEET_LAYERS }),
+			);
 		});
 		return { sheet, pageIds, filled, profile };
 	}
+
+	it("sends the sheet with an empty layer on top to write on, and reads the ink from it", () => {
+		const { pageIds, filled } = filledSheet();
+		const sent = sheetPagesToRm(buildSheet(DEVICE_PROFILES.rm2), DEVICE_PROFILES.rm2)[0];
+		const text = new TextDecoder("latin1").decode(sent);
+		expect(text).toContain("Your handwriting");
+		expect(text).toContain("Sheet");
+		const scene = parseRmScene(filled.get(pageIds[0])!);
+		const owners = scene.lines.filter((line) => line.id.author === 2);
+		expect(owners.length).toBeGreaterThan(0);
+		expect(owners.every((line) => line.parent.author === 0 && line.parent.counter === 14)).toBe(true);
+		expect(scene.lines.filter((line) => line.id.author === INK_AUTHOR).every((line) => line.parent.counter === 11)).toBe(true);
+	});
 
 	it("still reads back a sheet sent with the first layout", () => {
 		const { pageIds, filled, profile } = filledSheet(DEVICE_PROFILES.rm2, "", 1);

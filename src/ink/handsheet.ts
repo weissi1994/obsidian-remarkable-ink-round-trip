@@ -302,11 +302,21 @@ function densify(points: { x: number; y: number }[], step = 6): { x: number; y: 
 	return out;
 }
 
+/**
+ * Boxes, guides and labels on one layer, the owner's writing on another on
+ * top, selected when the sheet opens: the tablet's eraser and lasso act on
+ * the selected layer only, so erasing a slip cannot take a box line with it.
+ * Reading back does not depend on it — the diff tells the plugin's strokes
+ * from the owner's on any layer.
+ */
+export const SHEET_LAYERS = { strokes: "Sheet", writing: "Your handwriting" };
+
 /** The `.rm` pages of a sheet. */
 export function sheetPagesToRm(sheet: Sheet, profile: DeviceProfile): Uint8Array[] {
 	return sheet.pages.map((strokes) =>
 		buildInkPageRm(toInkLines(strokes, GUIDE_PEN), {
 			paperSize: { width: profile.width, height: profile.height },
+			layers: SHEET_LAYERS,
 		}),
 	);
 }

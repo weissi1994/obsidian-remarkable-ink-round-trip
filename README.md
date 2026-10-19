@@ -128,6 +128,8 @@ split; or before every `#` / `##`; `\pagebreak` always works) are under
 2. Each box shows its character on the left, at writing size, on the same lines
    you write on: cap line (dashed), x-height (dotted), baseline (solid),
    descender (dotted). Copy it in the space to its right; skip any you like.
+   The page opens on its own layer, *Your handwriting*, above the boxes: erase
+   a slip freely, the boxes stay.
    Accented letters (é, à, ç…) need no box — they are written as your own base
    letter with the accent added.
 3. Let it sync, then run **Learn my handwriting from the sheet**. From then on

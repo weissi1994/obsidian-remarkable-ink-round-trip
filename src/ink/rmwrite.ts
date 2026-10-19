@@ -4,7 +4,8 @@
  * The block list follows rmscene (MIT, Rick Lupton) — the same reference the
  * stroke reader was built
  * against: author table, migration and page info, the scene info carrying the
- * paper size, the root group and "Layer 1", then one line item per stroke,
+ * paper size, the root group and "Layer 1" (plus an empty layer on top to
+ * write on, for handwriting sheets), then one line item per stroke,
  * chained left-to-right as a CRDT sequence inside the layer.
  *
  * Every stroke gets an id the import can recognise: author 1 (our own, an
@@ -37,6 +38,15 @@ const id = (part1: number, part2: number): CrdtId => ({ part1, part2 });
 const END = id(0, 0);
 const ROOT = id(0, 1);
 const LAYER = id(0, 11);
+/**
+ * A second layer, on top, for the owner to write on (handwriting sheets): the
+ * node, its label's timestamp, and its place among the root's children —
+ * structural ids, below FIRST_STROKE_COUNTER like Layer 1's. Shaped as in
+ * rmscene's Normal_A_stroke_2_layers test file.
+ */
+const WRITING_LAYER = id(0, 14);
+const WRITING_LAYER_LABEL = id(0, 15);
+const WRITING_LAYER_ITEM = id(0, 16);
 
 /** reMarkable pen ids (rmscene `Pen`). */
 export const PEN = {
@@ -103,6 +113,14 @@ export const HIGHLIGHTER_ARGB: Record<number, number> = {
 export interface InkPageOptions {
 	/** Paper size in device units, written to the scene info block. */
 	paperSize: { width: number; height: number };
+	/**
+	 * Names of two layers: the strokes go on the first, and the second — on
+	 * top, and selected when the page opens — stays empty for the owner to
+	 * write on. The tablet's eraser and lasso act on the selected layer only,
+	 * so the owner's corrections cannot touch what was written. Absent: one
+	 * layer, "Layer 1", as every notebook page.
+	 */
+	layers?: { strokes: string; writing: string };
 }
 
 /**
@@ -119,6 +137,8 @@ export interface SceneItemSpec {
 	/** Counters this (value-less) item deletes, starting at its own. */
 	deletedLength?: number;
 	moveFrom?: { author: number; counter: number };
+	/** Written on the writing layer (InkPageOptions.layers), as the owner's ink lands there. */
+	onWritingLayer?: boolean;
 }
 
 /**
@@ -170,7 +190,7 @@ export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions
 		// current layer
 		b.subblock(1, (s) => {
 			s.taggedId(1, id(0, 1));
-			s.taggedId(2, LAYER);
+			s.taggedId(2, options.layers === undefined ? LAYER : WRITING_LAYER);
 		});
 		b.lwwBool(2, id(0, 1), true); // background visible
 		b.lwwBool(3, id(0, 1), true); // root document visible
@@ -186,6 +206,14 @@ export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions
 		b.taggedBool(3, true);
 		b.subblock(4, (s) => s.taggedId(1, ROOT));
 	});
+	if (options.layers !== undefined) {
+		w.block(BLOCK_SCENE_TREE, 1, 1, (b) => {
+			b.taggedId(1, WRITING_LAYER);
+			b.taggedId(2, END);
+			b.taggedBool(3, true);
+			b.subblock(4, (s) => s.taggedId(1, ROOT));
+		});
+	}
 
 	w.block(BLOCK_TREE_NODE, 1, 2, (b) => {
 		b.taggedId(1, ROOT);
@@ -195,9 +223,18 @@ export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions
 
 	w.block(BLOCK_TREE_NODE, 1, 2, (b) => {
 		b.taggedId(1, LAYER);
-		b.lwwString(2, id(0, 12), "Layer 1");
+		b.lwwString(2, id(0, 12), options.layers?.strokes ?? "Layer 1");
 		b.lwwBool(3, END, true);
 	});
+
+	if (options.layers !== undefined) {
+		const label = options.layers.writing;
+		w.block(BLOCK_TREE_NODE, 1, 2, (b) => {
+			b.taggedId(1, WRITING_LAYER);
+			b.lwwString(2, WRITING_LAYER_LABEL, label);
+			b.lwwBool(3, END, true);
+		});
+	}
 
 	w.block(BLOCK_SCENE_GROUP_ITEM, 1, 1, (b) => {
 		b.taggedId(1, ROOT);
@@ -211,12 +248,27 @@ export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions
 		});
 	});
 
+	if (options.layers !== undefined) {
+		// After Layer 1 among the root's children: on top of it.
+		w.block(BLOCK_SCENE_GROUP_ITEM, 1, 1, (b) => {
+			b.taggedId(1, ROOT);
+			b.taggedId(2, WRITING_LAYER_ITEM);
+			b.taggedId(3, id(0, 13));
+			b.taggedId(4, END);
+			b.taggedInt(5, 0);
+			b.subblock(6, (s) => {
+				s.u8(GROUP_ITEM_TYPE);
+				s.taggedId(2, WRITING_LAYER);
+			});
+		});
+	}
+
 	let left = END;
 	for (const item of items) {
 		const itemId = id(item.author, item.counter);
 		const line = item.line;
 		w.block(BLOCK_SCENE_LINE_ITEM, 2, 2, (b) => {
-			b.taggedId(1, LAYER);
+			b.taggedId(1, item.onWritingLayer === true ? WRITING_LAYER : LAYER);
 			b.taggedId(2, itemId);
 			b.taggedId(3, left);
 			b.taggedId(4, END);
