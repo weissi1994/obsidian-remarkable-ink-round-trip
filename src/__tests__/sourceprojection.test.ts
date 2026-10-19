@@ -204,9 +204,12 @@ describe("projectOntoSource", () => {
 				page: 1,
 				quote: "Neem die groeiende ledencijfers. Ze vertellen niet waarom mensen lid",
 				path: "img/dev-p01-1.png",
+				id: "3f9a2c1b0d4e",
 			},
 		])?.markdown;
 		const lines = out?.split("\n") ?? [];
+		// The remark's id ends the callout, so it is found again next import.
+		expect(lines[lines.indexOf("> ![[img/dev-p01-1.png]]") + 1]).toBe("> ^ink-3f9a2c1b0d4e");
 		const text = lines.findIndex((line) => line.includes("Neem die groeiende"));
 		const remark = lines.findIndex((line) => line.includes("[!note] Remark"));
 		expect(remark).toBeGreaterThan(text);

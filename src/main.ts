@@ -62,6 +62,7 @@ import { parseRmScene } from "./incoming/rmscene";
 import { readNotebook } from "./transport/notebook";
 import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
+import { remarkId } from "./incoming/remarkid";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
@@ -1195,6 +1196,7 @@ export default class RoundTripPlugin extends Plugin {
 		await this.refreshState();
 		const log: string[] = [];
 		this.inkCache.clear();
+		this.remarkImages.clear();
 		this.lexicon = null;
 		this.words = null;
 		this.dropWritePad();
@@ -1605,8 +1607,9 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		// Kept so a correction in the note — or text typed under an image-only
 		// remark — can teach the reader this hand.
-		if (this.settings.importHandwriting) {
-			rememberRemark(await this.ink.loadSamples(), this.remarkImagePath(request), strokes, text ?? "", new Date());
+		const image = this.remarkImages.get(remarkId(request.strokes));
+		if (image !== undefined) {
+			rememberRemark(await this.ink.loadSamples(), image, strokes, text ?? "", new Date());
 			this.samplesDirty = true;
 		}
 		return text;
@@ -1835,16 +1838,27 @@ export default class RoundTripPlugin extends Plugin {
 	 * turned out to be empty.
 	 */
 	/**
-	 * Where a remark's image goes. Deterministic, so a re-import overwrites
-	 * the remark instead of piling up copies — and the built-in OCR finds the
-	 * remark's ink again by it when its text is corrected.
+	 * Where a remark's image goes: named by the remark's id (a hash of its
+	 * ink, incoming/remarkid.ts), so a re-import overwrites the same remark
+	 * instead of piling up copies, and a remark written above it later cannot
+	 * take its name. An image from before ids, under its old numbered name,
+	 * keeps that name while it holds exactly this ink — notes embedding it
+	 * stay as they are.
 	 */
-	private remarkImagePath(request: StrokeRenderRequest): string {
+	private async remarkImagePath(request: StrokeRenderRequest, ink: InkStrokes | null): Promise<string> {
 		const folder = this.settings.handwritingFolder.replace(/^\/+|\/+$/g, "");
+		const inFolder = (name: string) => (folder === "" ? name : `${folder}/${name}`);
 		const page = String(request.page).padStart(2, "0");
-		const name = `${request.deviceDocId}-p${page}-${request.remark}.png`;
-		return folder === "" ? name : `${folder}/${name}`;
+		const legacy = `${request.deviceDocId}-p${page}-${request.remark}.png`;
+		if (ink !== null && this.app.vault.getFileByPath(inFolder(legacy)) !== null) {
+			const kept = await this.state.readInk(legacy).catch(() => null);
+			if (kept !== null && JSON.stringify(kept) === JSON.stringify(ink)) return inFolder(legacy);
+		}
+		return inFolder(`${request.deviceDocId}-p${page}-${remarkId(request.strokes)}.png`);
 	}
+
+	/** Image paths of the remarks rendered this run, by remark id (for the sample store). */
+	private remarkImages = new Map<string, string>();
 
 	private async renderHandwriting(
 		request: StrokeRenderRequest,
@@ -1872,10 +1886,11 @@ export default class RoundTripPlugin extends Plugin {
 		if (folder !== "" && !this.app.vault.getFolderByPath(folder)) {
 			await this.app.vault.createFolder(folder);
 		}
-		const path = this.remarkImagePath(request);
 		// The strokes behind the picture, so a send writes this ink back as
 		// itself rather than as a hatched copy of the image.
 		const ink = inkStrokesOf(request.strokes, this.ink.profile().dpi);
+		const path = await this.remarkImagePath(request, ink);
+		this.remarkImages.set(remarkId(request.strokes), path);
 		if (ink !== null) await this.state.writeInk(path.split("/").pop() ?? path, ink);
 		const existing = this.app.vault.getFileByPath(path);
 		if (existing) {

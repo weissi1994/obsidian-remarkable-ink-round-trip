@@ -108,6 +108,11 @@ export interface ImportedMark {
 	 * Opt-in; the image stays alongside unless the owner turned it off.
 	 */
 	transcript?: string;
+	/**
+	 * Ink fork: the remark's id, a hash of its ink (remarkid.ts). Names its
+	 * image and marks its callout, so it is found again in the note.
+	 */
+	id?: string;
 	/** Ink fork, kind "moved": insert the moved words after this word id… */
 	moveAfter?: number;
 	/** …or before this one, when they landed at the start of a line. */

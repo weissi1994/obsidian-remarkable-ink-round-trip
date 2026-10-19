@@ -23,6 +23,7 @@ import { pageIdOfFile, parsePageOrder } from "./pagemap";
 import type { DocumentFile, DocumentScan, ImportedMark, PullDeps, StrokeRenderRequest } from "./pull";
 import { TEXT_ONLY_KINDS } from "./pull";
 import { parseRmScene, SceneLine } from "./rmscene";
+import { remarkId } from "./remarkid";
 
 /** Freehand highlighter pens (rmscene HIGHLIGHTER_1 / HIGHLIGHTER_2). */
 const HIGHLIGHTER_TOOLS = new Set([5, 18]);
@@ -191,7 +192,7 @@ async function pictureOf(
 	quote: string | undefined,
 	deps: PullDeps,
 	scan: DocumentScan,
-): Promise<{ path?: string; transcript?: string } | null> {
+): Promise<{ id: string; path?: string; transcript?: string } | null> {
 	const path = deps.renderStrokes ? await deps.renderStrokes(request) : null;
 	let transcript: string | undefined;
 	if (deps.transcribe !== undefined) {
@@ -207,7 +208,7 @@ async function pictureOf(
 	}
 	if (path === null && transcript === undefined) return null;
 	const keepImage = deps.keepImageWithTranscript !== false || transcript === undefined;
-	return { path: keepImage && path !== null ? path : undefined, transcript };
+	return { id: remarkId(request.strokes), path: keepImage && path !== null ? path : undefined, transcript };
 }
 
 /**
@@ -376,7 +377,7 @@ export async function collectInkAnnotations(
 			);
 			let onThisPage = 0;
 			for (const [position, mark] of marks.entries()) {
-				let picture: { path?: string; transcript?: string } | null = null;
+				let picture: { id: string; path?: string; transcript?: string } | null = null;
 				if (!TEXT_ONLY_KINDS.has(mark.kind)) {
 					if (deps.renderStrokes === undefined && deps.transcribe === undefined) continue;
 					picture = await pictureOf(

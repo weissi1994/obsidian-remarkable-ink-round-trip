@@ -12,6 +12,7 @@ import { projectOntoSource } from "./sourceprojection";
 import { Highlight, colorName, rgbName } from "./highlights";
 import { DEFAULT_MARK_STYLES, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
+import { remarkIdLine } from "./remarkid";
 
 export const BEGIN_MARKER = "<!-- remarkable-round-trip:begin -->";
 export const END_MARKER = "<!-- remarkable-round-trip:end -->";
@@ -159,7 +160,10 @@ function fallbackReason(input: AnnotationRenderInput): AnnotationOutcome["reason
  * (GP_E3_S9).
  */
 function renderMark(mark: ImportedMark, styles: MarkStyles): string[] {
-	const image = mark.path === undefined ? [] : [`![[${mark.path}]]`];
+	const image = [
+		...(mark.path === undefined ? [] : [`![[${mark.path}]]`]),
+		...(mark.id === undefined ? [] : [remarkIdLine(mark.id, false)]),
+	];
 	// The summary form names the gesture; the styling follows the same
 	// setting as the annotated copy so the two never disagree (GP_E3_S19).
 	const styled = (kind: keyof MarkStyles, label: string): string[] => {

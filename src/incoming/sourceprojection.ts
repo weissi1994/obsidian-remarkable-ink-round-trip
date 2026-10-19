@@ -16,6 +16,7 @@ import { PdfLayout, toWinAnsi } from "../convert/pdf";
 import { Highlight, colorName, rgbName } from "./highlights";
 import { DEFAULT_MARK_STYLES, MarkStyle, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
+import { remarkIdLine } from "./remarkid";
 
 /** Markdown punctuation that carries no text and may sit between words. */
 const SYNTAX = new Set([
@@ -683,6 +684,9 @@ function applyBlockMarks(
 					? []
 					: mark.transcript.split("\n").map((line) => `> ${line}`)),
 				...(mark.path === undefined ? [] : [`> ![[${mark.path}]]`]),
+				// The remark's id, so the note's own text for it is found
+				// again on the next import (remarkid.ts).
+				...(mark.id === undefined ? [] : [remarkIdLine(mark.id)]),
 			]);
 		}
 	}
