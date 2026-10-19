@@ -167,18 +167,45 @@ export function learnCorrection(store: SampleStore, record: RemarkRecord, correc
 }
 
 /**
+ * A correction no words could be learned from: the text and the ink did not
+ * line up word for word. Kept as a correction all the same (worked examples,
+ * training export); only the word reader goes without.
+ */
+export interface UnlearnedCorrection {
+	key: string;
+	note?: string;
+	image?: string;
+	/** Words per line in the ink as it was cut, and in the corrected text. */
+	inkLines: number[];
+	textLines: number[];
+}
+
+/** Why a correction taught no words, in the owner's terms. */
+export function describeUnlearned(item: UnlearnedCorrection): string {
+	const where = item.note ?? item.image ?? item.key;
+	const words = (lines: number[]) => lines.reduce((sum, n) => sum + n, 0);
+	const reason =
+		item.inkLines.length !== item.textLines.length
+			? `the ink reads as ${item.inkLines.length} line(s), the text has ${item.textLines.length}`
+			: `the ink splits into ${words(item.inkLines)} word(s), the text has ${words(item.textLines)}`;
+	return `${where}: ${reason}`;
+}
+
+/**
  * Remarks whose text in the note differs from what they were given: the
  * owner corrected or filled them in. `noteOf` returns the note a remark was
  * imported into (or embeds its image), or null. Learns from each and
  * remembers the new text as the owner's, so the same correction is learned
- * once and never overwritten by a later reading.
+ * once and never overwritten by a later reading. Corrections whose words
+ * could not be paired with the ink are reported, not silently dropped.
  */
 export function learnFromNotes(
 	store: SampleStore,
 	noteOf: (key: string, record: RemarkRecord) => string | null,
-): { remarks: number; words: number } {
+): { remarks: number; words: number; unlearned: UnlearnedCorrection[] } {
 	let remarks = 0;
 	let words = 0;
+	const unlearned: UnlearnedCorrection[] = [];
 	for (const [key, record] of Object.entries(store.remarks)) {
 		const note = noteOf(key, record);
 		if (note === null) continue;
@@ -190,7 +217,18 @@ export function learnFromNotes(
 		if (learned > 0) {
 			remarks++;
 			words += learned;
+		} else {
+			unlearned.push({
+				key,
+				note: record.note,
+				image: record.image ?? (refOf(key, record).image === key ? key : undefined),
+				inkLines: splitWords(record.strokes).map((line) => line.length),
+				textLines: text
+					.split("\n")
+					.map((line) => line.split(/\s+/).map(bare).filter((word) => word !== "").length)
+					.filter((n) => n > 0),
+			});
 		}
 	}
-	return { remarks, words };
+	return { remarks, words, unlearned };
 }

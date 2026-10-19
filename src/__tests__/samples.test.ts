@@ -7,6 +7,7 @@ import { buildScenePageRm, INK_AUTHOR, SceneItemSpec } from "../ink/rmwrite";
 import { Lexicon, OCR_TRUST, Point, recognize, templatesFrom } from "../ocr/recognize";
 import {
 	addSample,
+	describeUnlearned,
 	emptyStore,
 	knownText,
 	learnCorrection,
@@ -87,9 +88,9 @@ describe("learning from a correction", () => {
 
 		// …the owner types what it says under the image…
 		const note = `> [!note] Remark\n> Termin morgen prüfen\n> ![[${IMAGE}]]`;
-		expect(learnFromNotes(store, (path) => (path === IMAGE ? note : null))).toEqual({ remarks: 1, words: 3 });
+		expect(learnFromNotes(store, (path) => (path === IMAGE ? note : null))).toMatchObject({ remarks: 1, words: 3, unlearned: [] });
 		// …and is not taught the same thing twice.
-		expect(learnFromNotes(store, (path) => (path === IMAGE ? note : null))).toEqual({ remarks: 0, words: 0 });
+		expect(learnFromNotes(store, (path) => (path === IMAGE ? note : null))).toMatchObject({ remarks: 0, words: 0, unlearned: [] });
 
 		// Next time the same words, written anew, are read.
 		const later = recognize(
@@ -162,7 +163,7 @@ describe("remembered remarks", () => {
 	it("are found in their note by id, with no image to go by", () => {
 		const store = emptyStore();
 		rememberRemark(store, ID, strokes(), "Termin morgen prufen", new Date("2026-10-19"), { note: "N.md" });
-		expect(learnFromNotes(store, (key, record) => (record.note === "N.md" ? note("Termin morgen prüfen") : null))).toEqual({
+		expect(learnFromNotes(store, (key, record) => (record.note === "N.md" ? note("Termin morgen prüfen") : null))).toMatchObject({
 			remarks: 1,
 			words: 3,
 		});
@@ -177,7 +178,7 @@ describe("remembered remarks", () => {
 		expect(knownText(store, ID)).toBe("Termin morgen prüfen");
 		expect(store.remarks[ID].read).toBe("Termin morgan prufen");
 		// Nothing new in the note, so nothing is learned twice.
-		expect(learnFromNotes(store, () => note("Termin morgen prüfen"))).toEqual({ remarks: 0, words: 0 });
+		expect(learnFromNotes(store, () => note("Termin morgen prüfen"))).toMatchObject({ remarks: 0, words: 0, unlearned: [] });
 	});
 
 	it("take a first reading for a remark that had none", () => {
@@ -198,5 +199,30 @@ describe("remembered remarks", () => {
 		expect(store.remarks.kept).toBeDefined();
 		expect(store.remarks.r0).toBeUndefined();
 		expect(store.remarks.r500).toBeDefined();
+	});
+});
+
+describe("a correction that teaches nothing", () => {
+	const ID = "3f9a2c1b0d4e";
+	const note = (text: string) => `> [!note] Remark\n> ${text}\n> ^ink-${ID}`;
+
+	it("is reported with what did not line up, and still kept as a correction", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, joinedUp("Termin morgen prüfen", "u"), "", new Date("2026-10-19"), { note: "Plans.md" });
+		const result = learnFromNotes(store, () => note("Termin ist morgen, bitte prüfen"));
+		expect(result).toMatchObject({ remarks: 0, words: 0 });
+		expect(result.unlearned).toEqual([
+			{ key: ID, note: "Plans.md", image: undefined, inkLines: [3], textLines: [5] },
+		]);
+		expect(describeUnlearned(result.unlearned[0])).toBe("Plans.md: the ink splits into 3 word(s), the text has 5");
+		expect(store.remarks[ID]).toMatchObject({ corrected: true, transcript: "Termin ist morgen, bitte prüfen" });
+		// Reported once: the same text is not looked at again.
+		expect(learnFromNotes(store, () => note("Termin ist morgen, bitte prüfen")).unlearned).toEqual([]);
+	});
+
+	it("names a line mismatch as such", () => {
+		expect(describeUnlearned({ key: "k", image: "a.png", inkLines: [2], textLines: [1, 1] })).toBe(
+			"a.png: the ink reads as 1 line(s), the text has 2",
+		);
 	});
 });

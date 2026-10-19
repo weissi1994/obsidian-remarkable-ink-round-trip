@@ -66,7 +66,7 @@ import { remarkId } from "./incoming/remarkid";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
-import { knownText, learnFromNotes, refOf, rememberRemark, remarkText } from "./ocr/samples";
+import { describeUnlearned, knownText, learnFromNotes, refOf, rememberRemark, remarkText } from "./ocr/samples";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -1703,6 +1703,20 @@ export default class RoundTripPlugin extends Plugin {
 		});
 		if (learned.remarks > 0) {
 			log(`learned ${learned.words} word(s) of your handwriting from ${learned.remarks} corrected remark(s)`);
+		}
+		if (learned.unlearned.length > 0) {
+			// Said once: the correction is remembered as made and not looked at again.
+			log(`${learned.unlearned.length} correction(s) taught no words — text and ink did not line up word for word:`);
+			for (const item of learned.unlearned) log(`  ${describeUnlearned(item)}`);
+			const shown = learned.unlearned.slice(0, 3).map(describeUnlearned);
+			const more = learned.unlearned.length - shown.length;
+			notify(
+				`${learned.unlearned.length} handwriting correction(s) could not be matched to the ink word for word, ` +
+					"so no words were learned from them (they are kept as corrections):\n" +
+					shown.join("\n") +
+					(more > 0 ? `\n…and ${more} more` : ""),
+				15000,
+			);
 		}
 		await this.ink.saveSamples();
 		this.words = null;
