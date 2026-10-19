@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Lighter highlighter colours:** every highlighter band the plugin writes —
+  code blocks, inline code, quotes, highlights, table headers, diagram fills —
+  now carries the exact light tint the tablet's own highlighter uses (light
+  blue, yellow, pink…), so text on it stays readable. Before, code blocks came
+  out in the pen palette's dark blue. Models without exact colours keep showing
+  the palette colour.
 - **Tables with a full grid:** an outer border, lines between columns and
   under every row, a heavier rule under the header (with a light grey band
   when colour accents are on), and padded cells so no line touches the text.

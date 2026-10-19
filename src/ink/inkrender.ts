@@ -26,7 +26,7 @@ import {
 	typesetBlocks,
 } from "../convert/pdf";
 import { CAP_RATIO, HandFont } from "./glyphs";
-import { FIRST_STROKE_COUNTER, InkLine, InkPoint, PEN, PEN_COLOR, buildInkPageRm } from "./rmwrite";
+import { FIRST_STROKE_COUNTER, HIGHLIGHTER_ARGB, InkLine, InkPoint, PEN, PEN_COLOR, buildInkPageRm } from "./rmwrite";
 import { hatchImage, highlighterColorOf, ImageStyle, InkImage } from "./inkimage";
 import { diagramKey, drawingSize, drawingStrokes, InkDrawing } from "./inkdrawing";
 
@@ -609,12 +609,14 @@ export function toInkLines(strokes: GeneratedStroke[], pen: InkPen): InkLine[] {
 				direction: directionOf(next.x - prev.x, next.y - prev.y),
 			};
 		});
+		const argb = stroke.tool === PEN.highlighter ? HIGHLIGHTER_ARGB[stroke.color] : undefined;
 		return {
 			counter: stroke.counter,
 			tool: stroke.tool,
 			color: stroke.color,
 			thicknessScale: stroke.thicknessScale,
 			points,
+			...(argb === undefined ? {} : { argb }),
 		};
 	});
 }

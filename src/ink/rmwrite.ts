@@ -77,7 +77,26 @@ export interface InkLine {
 	color: number;
 	thicknessScale: number;
 	points: InkPoint[];
+	/**
+	 * Exact colour as 0xAARRGGBB. The Paper Pro shows this instead of the
+	 * palette entry `color` names, which other models keep using.
+	 */
+	argb?: number;
 }
+
+/**
+ * The light tints the tablet's own highlighter lays down, per palette entry
+ * (blue, yellow and pink as Paper Pro pages record them). Without them a
+ * highlighter in the pen palette's blue is dark enough to drown the text.
+ */
+export const HIGHLIGHTER_ARGB: Record<number, number> = {
+	3: 0xffffed75, // yellow
+	4: 0xffb2f2bb, // green
+	5: 0xfff29eff, // pink
+	6: 0xffbeeafe, // blue
+	7: 0xffffc9c9, // red
+	1: 0xffdee2e6, // grey
+};
 
 export interface InkPageOptions {
 	/** Paper size in device units, written to the scene info block. */
@@ -221,6 +240,7 @@ export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions
 				if (item.moveFrom !== undefined) {
 					s.taggedId(7, id(item.moveFrom.author, item.moveFrom.counter));
 				}
+				if (line.argb !== undefined) s.taggedInt(8, line.argb >>> 0);
 			});
 		});
 		left = itemId;

@@ -85,6 +85,17 @@ describe("colour accents", () => {
 		});
 	});
 
+	it("writes the highlighter's light tints, not the pen palette's dark ones", () => {
+		const { render: r, options } = render(true);
+		const [page] = inkPagesToRm(r, options);
+		const scene = parseRmScene(page);
+		const bands = scene.lines.filter((line) => line.stroke.tool === PEN.highlighter);
+		const tints = new Set(bands.map((line) => line.rgb));
+		expect(tints).toEqual(new Set(["#beeafe", "#f29eff", "#ffed75"]));
+		// Pen strokes carry no colour of their own: they stay in the palette.
+		expect(scene.lines.filter((line) => line.stroke.tool !== PEN.highlighter).every((line) => line.rgb === undefined)).toBe(true);
+	});
+
 	it("recognises its own bands when the page comes back", () => {
 		const { render: r, options } = render(true);
 		const [page] = inkPagesToRm(r, options);
