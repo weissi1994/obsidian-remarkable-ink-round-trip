@@ -561,7 +561,8 @@ export function renderInk(
 					// colours, scaled only when the page is narrower than the remark.
 					const boxWidth = bottomRight.x - topLeft.x;
 					const boxHeight = bottomRight.y - topLeft.y;
-					const scale = Math.min(boxWidth / image.width, boxHeight / image.height);
+					// Never enlarged: a small remark stays the size it was written.
+					const scale = Math.min(1, boxWidth / image.width, boxHeight / image.height);
 					for (const stroke of image.strokes) {
 						const points: { x: number; y: number }[] = [];
 						const widths: number[] = [];
