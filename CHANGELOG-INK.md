@@ -11,10 +11,8 @@
   - A remark the note already shows is no longer imported again: a corrected
     text used to come back on every sync as an "Also changed on the
     reMarkable" conflict holding the old reading — or, in the summary block,
-    replaced it. Your text and placement now stand. Readings you never
-    edited are read again and replaced by a better one as the reader learns
-    (counted in the import report); an image-only remark gets its text once
-    it can be read.
+    replaced it. Your text and placement now stand; an image-only remark
+    gets its text once it can be read.
   - A correction that cannot be matched to the ink word for word is reported
     in a notice instead of being dropped silently.
   - The vision endpoint learns too: your latest corrections go along with
@@ -22,6 +20,14 @@
     corrections*, default 3).
   - **Export handwriting corrections as training data** writes them as a
     LLaMA-Factory dataset for fine-tuning a vision model outside the plugin.
+  - **Confirm or correct in the note:** ✓ and ✎ buttons on every remark
+    callout; ✎ opens the ink beside its text. Commands to confirm the remark
+    at the cursor or all in a note. A confirmed reading (✓ in the title) is
+    never replaced and counts as known-correct for learning and export.
+  - An untouched reading is only replaced by one the reader is clearly surer
+    of (scores compared above each reader's threshold), so a right reading is
+    no longer swapped for a different one of equal certainty. Vision-endpoint
+    readings carry no score and only fill image-only remarks.
 
 - **Joined-up writing read by WritePad:** remarks the built-in letter reader is
   unsure of are read again by the WritePad handwriting engine (PhatWare,

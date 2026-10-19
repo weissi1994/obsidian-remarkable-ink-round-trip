@@ -179,18 +179,33 @@ remark's ink, which also names its image. Link to it like any block
 > ^ink-3f9a2c1b0d4e
 ```
 
-Edit the text in the callout (or type it under an image-only remark) and keep
-the id line. From then on the text is yours:
+Each remark callout has two buttons in its title:
+
+- **✓ Confirm**: the reading is right. Adds ✓ to the title (typing ✓ at the
+  end of the title does the same).
+- **✎ Correct**: opens the ink next to its text — fix it, then **Save** or
+  **Save and confirm ✓**.
+
+The same as commands: **Confirm handwriting reading at cursor**, **Correct
+handwriting reading at cursor**, **Confirm all handwriting readings in this
+note**. Or simply edit the text in the callout (keep the id line). Either way,
+from then on the text is yours:
 
 - **Later syncs keep it.** The notebook is read again on every import, but a
   remark the note already has is never placed again — your text, and where you
   moved the callout, stand.
-- **Readings you never touched keep improving.** A remark whose text is still
-  exactly what the plugin wrote is read again whenever its notebook changes;
-  a different reading replaces the old one in the callout (the import report
-  counts them, and the note's previous version is kept as usual). If the
-  reader is unsure this time, the old reading stays. Once you edit a remark,
-  it is never read again.
+- **Readings you never touched improve — only when clearly better.** A
+  remark whose text is still exactly what the plugin wrote is read again
+  whenever its notebook changes. The new reading replaces the old one only if
+  the reader is clearly surer of it than of the old one (scores are compared
+  relative to each reader's own threshold); a different reading with about the
+  same certainty doesn't swap a right one for a fluke. A vision endpoint gives
+  no certainty, so its readings only fill in image-only remarks. The import
+  report counts replaced readings; the note's previous version is kept as usual.
+- **Confirmed or corrected remarks are final**: never read again, never
+  replaced. A confirmed reading also teaches the built-in reader its words, and
+  goes into the worked examples and the training export as a known-correct
+  sample.
 - **The reader learns from it.** The built-in reader stores the words with your
   ink; the vision endpoint gets your latest corrections as worked examples. A
   correction whose words can't be matched to the ink one by one (a different

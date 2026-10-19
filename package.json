@@ -29,6 +29,7 @@
 		"esbuild": "^0.28.1",
 		"eslint": "^10.6.0",
 		"eslint-plugin-obsidianmd": "^0.4.1",
+		"happy-dom": "^21.0.3",
 		"jszip": "^3.10.1",
 		"obsidian": "~1.13.1",
 		"pdf-lib": "^1.17.1",

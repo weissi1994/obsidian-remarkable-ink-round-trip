@@ -52,3 +52,29 @@
 	left: -100000px;
 	pointer-events: none;
 }
+
+/* Ink fork: confirm / correct buttons in a handwritten remark's callout title. */
+.remarkable-ink-remark-actions {
+	display: flex;
+	gap: var(--size-2-1);
+	margin-inline-start: auto;
+}
+
+.remarkable-ink-remark-action {
+	padding: var(--size-2-1);
+}
+
+/* The correction editor: the ink, then its text. */
+.remarkable-ink-remark-ink {
+	display: block;
+	max-width: 100%;
+	max-height: 40vh;
+	margin: 0 auto var(--size-4-3);
+	background: #fff;
+	border-radius: var(--radius-s);
+}
+
+.remarkable-ink-remark-text {
+	width: 100%;
+	font-family: var(--font-text);
+}

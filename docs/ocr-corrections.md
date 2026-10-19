@@ -27,12 +27,13 @@ the note would be inserted again on both sides of the merge and conflict.
 
 - a remark found in the note is dropped from the marks to place — its
   position and the owner's text win;
-- **untouched readings improve:** the edge attaches to each uncorrected
-  remark the text the plugin last wrote for it (`mark.replaces`, from
-  `withEarlierReadings`). If the callout still shows exactly that and the new
-  reading differs (and isn't empty), the callout's text lines are replaced.
-  An image-only remark is the case `replaces === ""`. Any other text — the
-  owner's, even typed mid-sync — stays;
+- **untouched readings improve, when clearly better:** the edge attaches to
+  each unverified remark the text the plugin last wrote for it
+  (`mark.replaces`, from `withEarlierReadings`) — but only if the new reading
+  `isBetterReading` than the one the note shows, or the callout is empty
+  (`replaces === ""`). If the callout still shows exactly that text, isn't
+  confirmed, and the new reading differs, its text lines are replaced. Any
+  other text — the owner's, even typed mid-sync — stays;
 - a pre-id callout gets its `^ink-` line.
 
 The summary-block form (no merge base) rewrites the whole block, so there the
@@ -46,6 +47,50 @@ the plugin placed, so an edit made during the sync is still detected as a
 correction on the next one.
 
 Tests: `src/__tests__/remarkkeep.test.ts`.
+
+## Scores — when is a new reading better?
+
+Each reading is stored with its reader (`builtin`, `writepad`, `endpoint`)
+and a score: `scoreAbove(confidence, cutOff)` = how far the reader's
+confidence sits above that reader's own acceptance threshold, 0–1
+(`OCR_TRUST` 0.65 for built-in, `WRITEPAD_TRUST` 0.7). That makes the two
+local readers comparable. `isBetterReading(old, new)`:
+
+- new reading has no score (vision endpoint) → never better;
+- old reading has a score → new must beat it by `BETTER_BY` (0.1);
+- old reading has none (stores from before scores, endpoint) → new must
+  reach `SURE_ENOUGH` (0.5).
+
+Record fields: `score`/`by` belong to the text the note shows, `readScore`/
+`readBy` to the latest reading; `notedReadings` moves the latter into the
+former once the note shows the new reading.
+
+## Confirming — ✓
+
+A remark is confirmed when its callout title (or, in the summary block, its
+first line) ends in `✓` (`CONFIRM_MARK`). A ✓ inside the text — handwriting can
+contain one — doesn't count. `learnFromNotes` copies it into
+`record.confirmed` each sync (removing the ✓ un-confirms); a newly confirmed
+reading teaches its words like a correction. Confirmed and corrected records
+are *verified* (`isVerified`): never re-read, never replaced (also guarded in
+`settleRemarks` against a ✓ added mid-sync), kept under the larger pruning
+limit, and used as worked examples and training samples.
+
+## In-note UI — `src/remarkui.ts`
+
+A markdown post-processor adds ✓ (confirm) and ✎ (correct) buttons to the
+title of every rendered remark callout. Block ids are hidden when rendered,
+so the callout is matched by its source line (`getSectionInfo` →
+`remarkAt`), or — in live-preview widgets where that is missing — by its
+image. Buttons only edit the note (`confirmRemarkAt`, `setRemarkTextAt` via
+`vault.process`), the same as typing; the next sync learns from it. ✎ opens a
+modal with the ink image and a textarea (Save / Save and confirm ✓).
+Commands: confirm / correct at cursor, confirm all in note (edited through the
+editor, so undo works).
+
+Tests: `remarkui.test.ts` runs in happy-dom against
+`src/__tests__/helpers/obsidian.ts`, a stand-in for the types-only
+`obsidian` package (aliased in `vitest.config.ts`).
 
 ## Sample store — `src/ocr/samples.ts`
 
@@ -64,7 +109,7 @@ stores from before ids):
 
 - `rememberRemark` never overwrites a known remark's `transcript` (that
   follows the note, via `notedReadings`); it updates `read`.
-- `knownText`: a *corrected* remark is not read again. Uncorrected remarks
+- `knownText`: a *verified* (corrected or confirmed) remark is not read again. Uncorrected remarks
   are re-read whenever their notebook changes (with a vision endpoint: one
   request each, per changed notebook).
 - Records from before ids (keyed by image path) are never matched to marks,

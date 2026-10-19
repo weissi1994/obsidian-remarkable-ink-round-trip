@@ -62,7 +62,8 @@ import { parseRmScene } from "./incoming/rmscene";
 import { readNotebook } from "./transport/notebook";
 import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
-import { remarkId } from "./incoming/remarkid";
+import { confirmAllRemarks, confirmRemarkAt, remarkAt, remarkId } from "./incoming/remarkid";
+import { RemarkControls } from "./remarkui";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
@@ -303,6 +304,47 @@ export default class RoundTripPlugin extends Plugin {
 			id: "learn-word-sheet",
 			name: "Learn my joined-up words from the sheet",
 			callback: () => void this.learnWordSheet(),
+		});
+		// Ink fork: confirm or correct a handwritten remark's reading in the note.
+		const remarkControls = new RemarkControls(this.app);
+		this.registerMarkdownPostProcessor(remarkControls.process);
+		this.addCommand({
+			id: "confirm-remark-reading",
+			name: "Confirm handwriting reading at cursor",
+			editorCheckCallback: (checking, editor) => {
+				const note = editor.getValue();
+				const line = editor.getCursor().line;
+				const remark = remarkAt(note, line);
+				if (remark === null || remark.confirmed || remark.text === "") return false;
+				if (!checking) {
+					const confirmed = confirmRemarkAt(note, line);
+					if (confirmed !== null) editor.setLine(remark.title, confirmed.split("\n")[remark.title]);
+				}
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "correct-remark-reading",
+			name: "Correct handwriting reading at cursor",
+			editorCheckCallback: (checking, editor, view) => {
+				const remark = remarkAt(editor.getValue(), editor.getCursor().line);
+				if (remark === null || view.file === null) return false;
+				if (!checking) remarkControls.openEditor(view.file, remark.id);
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "confirm-all-remark-readings",
+			name: "Confirm all handwriting readings in this note",
+			editorCallback: (editor) => {
+				const before = editor.getValue().split("\n");
+				const { note, confirmed } = confirmAllRemarks(editor.getValue());
+				// Line by line, so the cursor and undo history stay as they are.
+				note.split("\n").forEach((line, i) => {
+					if (line !== before[i]) editor.setLine(i, line);
+				});
+				notify(confirmed === 0 ? "No unconfirmed handwriting readings in this note." : `Confirmed ${confirmed} handwriting reading(s).`);
+			},
 		});
 		this.addCommand({
 			id: "export-handwriting-training-set",
