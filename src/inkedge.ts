@@ -32,7 +32,7 @@ import {
 	renderInk,
 } from "./ink/inkrender";
 import { parseRmScene } from "./incoming/rmscene";
-import type { InkImage } from "./ink/inkimage";
+import type { Picture } from "./ink/inkimage";
 import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
@@ -167,7 +167,7 @@ export class InkEdge {
 		title: string,
 		docId: string,
 		layout: PdfLayoutOptions | undefined,
-		images: Record<string, InkImage> = {},
+		images: Record<string, Picture> = {},
 		drawings: Record<string, InkDrawing> = {},
 	): { pages: Uint8Array[]; snapshot: Omit<InkSnapshot, "pageIds"> } {
 		const base = this.snapshotBase();

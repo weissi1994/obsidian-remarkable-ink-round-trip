@@ -27,7 +27,7 @@ import {
 } from "../convert/pdf";
 import { CAP_RATIO, HandFont } from "./glyphs";
 import { FIRST_STROKE_COUNTER, HIGHLIGHTER_ARGB, InkLine, InkPoint, PEN, PEN_COLOR, buildInkPageRm } from "./rmwrite";
-import { hatchImage, highlighterColorOf, ImageStyle, InkImage } from "./inkimage";
+import { hatchImage, highlighterColorOf, ImageStyle, isInkStrokes, Picture } from "./inkimage";
 import { diagramKey, drawingSize, drawingStrokes, InkDrawing } from "./inkdrawing";
 
 /** A device's notebook canvas: grid in device units and its pixel density. */
@@ -93,7 +93,7 @@ export interface InkRenderOptions {
 	 * Pictures by the name their placeholder line carries (`[image: name]`),
 	 * already quantised. A placeholder without one stays a text line.
 	 */
-	images?: Record<string, InkImage>;
+	images?: Record<string, Picture>;
 	/** How pictures are drawn; absent = coloured hatch. */
 	imageStyle?: ImageStyle;
 	/** Diagrams by diagramKey(source): Mermaid blocks drawn by hand. */
@@ -128,7 +128,7 @@ const IMAGE_PLACEHOLDER = /^\[image: (.+)\]$/;
  */
 export function withImageBlocks(
 	blocks: Block[],
-	images: Record<string, InkImage> | undefined,
+	images: Record<string, Picture> | undefined,
 	drawings: Record<string, InkDrawing> | undefined = undefined,
 ): Block[] {
 	const hasImages = images !== undefined && Object.keys(images).length > 0;
@@ -546,6 +546,29 @@ export function renderInk(
 				}
 				const image = options.images?.[op.name];
 				if (image === undefined) continue;
+				if (isInkStrokes(image)) {
+					// The owner's own ink, written again as it was: same pens, same
+					// colours, scaled only when the page is narrower than the remark.
+					const boxWidth = bottomRight.x - topLeft.x;
+					const boxHeight = bottomRight.y - topLeft.y;
+					const scale = Math.min(boxWidth / image.width, boxHeight / image.height);
+					for (const stroke of image.strokes) {
+						const points: { x: number; y: number }[] = [];
+						const widths: number[] = [];
+						for (let i = 0; i + 2 < stroke.points.length; i += 3) {
+							points.push({ x: topLeft.x + stroke.points[i] * scale, y: topLeft.y + stroke.points[i + 1] * scale });
+							widths.push(stroke.points[i + 2]);
+						}
+						if (points.length === 0) continue;
+						if (points.length === 1) points.push({ ...points[0], x: points[0].x + 0.5 });
+						widths.sort((a, b) => a - b);
+						add(null, points, stroke.color, stroke.thicknessScale, {
+							tool: stroke.tool,
+							width: Math.max(1, Math.round(widths[widths.length >> 1] * scale)),
+						});
+					}
+					continue;
+				}
 				const hatch = hatchImage(image, {
 					box: {
 						left: topLeft.x,

@@ -46,6 +46,64 @@ export interface InkImage {
 	cells: string;
 }
 
+/**
+ * Ink the tablet's owner wrote, kept as strokes rather than pixels: what a
+ * remark or page image in the vault was drawn from. Sent back, it is written
+ * as the very same strokes instead of a hatched copy of its picture.
+ */
+export interface InkStrokes {
+	kind: "strokes";
+	/** Natural size as a picture's would be (pixels at 96 dpi): points ÷ 0.75. */
+	sourceWidth: number;
+	sourceHeight: number;
+	/** Extent of the strokes, device units, from 0,0. */
+	width: number;
+	height: number;
+	strokes: {
+		tool: number;
+		color: number;
+		thicknessScale: number;
+		/** Flat x, y, width per point; width in the pen's own v2 units. */
+		points: number[];
+	}[];
+}
+
+export function isInkStrokes(picture: InkImage | InkStrokes): picture is InkStrokes {
+	return (picture as InkStrokes).kind === "strokes";
+}
+
+/** Strokes in device units (as read from a page) → a record at their own size. */
+export function inkStrokesOf(
+	strokes: { tool: number; color: number; thicknessScale: number; points: { x: number; y: number; width: number }[] }[],
+	dpi: number,
+): InkStrokes | null {
+	const all = strokes.flatMap((s) => s.points);
+	if (all.length === 0) return null;
+	const minX = Math.min(...all.map((p) => p.x));
+	const minY = Math.min(...all.map((p) => p.y));
+	const width = Math.max(1, Math.max(...all.map((p) => p.x)) - minX);
+	const height = Math.max(1, Math.max(...all.map((p) => p.y)) - minY);
+	const round = (v: number) => Math.round(v * 10) / 10;
+	// Device pixels at the tablet's density, as points, as "96 dpi pixels".
+	const toSource = (v: number) => ((v * 72) / dpi) / 0.75;
+	return {
+		kind: "strokes",
+		sourceWidth: toSource(width),
+		sourceHeight: toSource(height),
+		width,
+		height,
+		strokes: strokes.map((s) => ({
+			tool: s.tool,
+			color: s.color,
+			thicknessScale: s.thicknessScale,
+			points: s.points.flatMap((p) => [round(p.x - minX), round(p.y - minY), Math.round(p.width)]),
+		})),
+	};
+}
+
+/** What a picture embed is sent as: hatched pixels, or the owner's own strokes. */
+export type Picture = InkImage | InkStrokes;
+
 export type ImageStyle = "colour-hatch" | "mono-hatch";
 
 export const GRID_MAX = 200;

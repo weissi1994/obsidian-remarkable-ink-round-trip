@@ -11,7 +11,7 @@ import { resolveLayoutOptions, PdfLayoutOptions } from "../convert/pdf";
 import { ensureDocId } from "../id/docid";
 import { InkSnapshot, MappingTable, contentHash, recordUpload } from "../id/mapping";
 import type { Block } from "../convert/mdblocks";
-import type { InkImage } from "../ink/inkimage";
+import type { Picture } from "../ink/inkimage";
 import type { InkDrawing } from "../ink/inkdrawing";
 import type { UploadResult } from "../transport/cloud";
 
@@ -31,7 +31,7 @@ export interface SentRecord {
 	markdown: string;
 	/** The note body (no frontmatter) as it was when sent: the merge base. */
 	body?: string;
-	images?: Record<string, InkImage>;
+	images?: Record<string, Picture>;
 	drawings?: Record<string, InkDrawing>;
 }
 
@@ -55,13 +55,13 @@ export interface SendDeps {
 			title: string,
 			docId: string,
 			layout: PdfLayoutOptions | undefined,
-			images?: Record<string, InkImage>,
+			images?: Record<string, Picture>,
 			drawings?: Record<string, InkDrawing>,
 		): { pages: Uint8Array[]; snapshot: Omit<InkSnapshot, "pageIds"> };
 		/** The note's Mermaid diagrams, traced, by diagramKey(source). */
 		loadDrawings?(markdown: string): Promise<Record<string, InkDrawing>>;
 		/** The note's embedded pictures, quantised, by placeholder name. */
-		loadImages?(note: NoteInput): Promise<Record<string, InkImage>>;
+		loadImages?(note: NoteInput): Promise<Record<string, Picture>>;
 		/** Keep the sent text, so the import can regenerate it after edits. */
 		persistSent?(docId: string, sent: SentRecord): Promise<void>;
 	};

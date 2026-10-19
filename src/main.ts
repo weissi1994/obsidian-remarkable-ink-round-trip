@@ -87,7 +87,7 @@ import type { Highlight } from "./incoming/highlights";
 import { flattenSelection, relativeFolderPath } from "./sync/selection";
 import { shouldAnnounceUpdate } from "./updatenotice";
 import { InkEdge } from "./inkedge";
-import { gridSizeFor, InkImage, quantizeImage } from "./ink/inkimage";
+import { gridSizeFor, InkImage, inkStrokesOf, Picture, quantizeImage } from "./ink/inkimage";
 import { diagramKey, InkDrawing } from "./ink/inkdrawing";
 import { extractDrawing } from "./ink/svgextract";
 import { mermaidBlocks, withInkTheme } from "./ink/mermaidtheme";
@@ -1403,8 +1403,8 @@ export default class RoundTripPlugin extends Plugin {
 	 * preprocessing writes into `*[image: …]*`. Embedded notes are followed
 	 * as deep as the preprocessing follows them.
 	 */
-	private async noteImages(note: NoteInput): Promise<Record<string, InkImage>> {
-		const out: Record<string, InkImage> = {};
+	private async noteImages(note: NoteInput): Promise<Record<string, Picture>> {
+		const out: Record<string, Picture> = {};
 		if (this.settings.inkImages === "placeholder") return out;
 		const seen = new Set<string>();
 		const visit = async (content: string, sourcePath: string, depth: number): Promise<void> => {
@@ -1418,7 +1418,8 @@ export default class RoundTripPlugin extends Plugin {
 						(name) => out[name] === undefined,
 					);
 					if (names.length === 0) continue;
-					const image = await this.decodeImage(file, alias);
+					// Ink from the tablet goes back as its own strokes.
+					const image = (await this.state.readInk(file.name)) ?? (await this.decodeImage(file, alias));
 					if (image !== null) for (const name of names) out[name] = image;
 				} else if (file.extension === "md" && depth < MAX_EMBED_DEPTH && !seen.has(file.path)) {
 					seen.add(file.path);
@@ -1816,6 +1817,10 @@ export default class RoundTripPlugin extends Plugin {
 			await this.app.vault.createFolder(folder);
 		}
 		const path = this.remarkImagePath(request);
+		// The strokes behind the picture, so a send writes this ink back as
+		// itself rather than as a hatched copy of the image.
+		const ink = inkStrokesOf(request.strokes, this.ink.profile().dpi);
+		if (ink !== null) await this.state.writeInk(path.split("/").pop() ?? path, ink);
 		const existing = this.app.vault.getFileByPath(path);
 		if (existing) {
 			await this.app.vault.modifyBinary(existing, buffer);

@@ -17,7 +17,7 @@
 import type { MappingEntry, MappingTable } from "../id/mapping";
 import type { HandLibrary } from "../ink/handsheet";
 import type { InkDrawing } from "../ink/inkdrawing";
-import type { InkImage } from "../ink/inkimage";
+import type { InkStrokes, Picture } from "../ink/inkimage";
 import type { SampleStore } from "../ocr/samples";
 import type { SentRecord } from "./send";
 
@@ -190,7 +190,7 @@ export class SyncState {
 		const note = (await this.readJson<NoteFile>(file)) ?? {};
 		const stored: StoredSent = {
 			...sent,
-			images: await this.storePictures<InkImage>(sent.images),
+			images: await this.storePictures<Picture>(sent.images),
 			drawings: await this.storePictures<InkDrawing>(sent.drawings),
 		};
 		await this.writeJson(file, { ...note, sent: stored });
@@ -201,9 +201,20 @@ export class SyncState {
 		if (note?.sent === undefined) return null;
 		return {
 			...note.sent,
-			images: await this.loadPictures<InkImage>(note.sent.images),
+			images: await this.loadPictures<Picture>(note.sent.images),
 			drawings: await this.loadPictures<InkDrawing>(note.sent.drawings),
 		};
+	}
+
+	/* ------------------------------ ink ------------------------------- */
+
+	/** The strokes a remark or page image in the vault was drawn from, by image file name. */
+	readInk(imageName: string): Promise<InkStrokes | null> {
+		return this.readJson<InkStrokes>(this.path("ink", `${imageName}.json`));
+	}
+
+	writeInk(imageName: string, ink: InkStrokes): Promise<void> {
+		return this.writeJson(this.path("ink", `${imageName}.json`), ink);
 	}
 
 	/* ------------------------- hands and samples ----------------------- */
