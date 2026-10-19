@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { DeviceItem, findNewNotebooks, importedNote, noteFileName } from "../sync/deviceimport";
+import { DeviceItem, findNewNotebooks, importedNote, noteFileName, writtenByPlugin } from "../sync/deviceimport";
+import { buildInkPageRm } from "../ink/rmwrite";
+import { parseRmScene } from "../incoming/rmscene";
 import { remarkText } from "../ocr/samples";
 import { parseFrontmatter } from "../preprocess/preprocess";
 import { notesNeedingUpload, sendNote, type SendDeps } from "../sync/send";
@@ -66,6 +68,22 @@ describe("finding notebooks started on the tablet", () => {
 		expect(
 			findNewNotebooks(items, { baseFolder: "", vaultFolders: ["Projects"], known: new Set(), now: NOW, quietMs: 0 }),
 		).toEqual([{ id: "n", hash: "h-n", name: "Ideas", folder: "Projects" }]);
+	});
+});
+
+describe("recognising the plugin's own notebooks", () => {
+	it("by the plugin's author on the page, whichever vault instance sent it", () => {
+		const page = buildInkPageRm(
+			[{ counter: 100, tool: 17, color: 0, thicknessScale: 2, points: [{ x: 0, y: 0, width: 16, pressure: 200, speed: 5, direction: 0 }] }],
+			{ paperSize: { width: 1404, height: 1872 } },
+		);
+		expect(writtenByPlugin(parseRmScene(page).authors)).toBe(true);
+		expect(writtenByPlugin(new Map([[1, "4ba8e2f1c0d94b7e9c1f2a3b4c5d6e7f"]]))).toBe(false);
+	});
+
+	it("never brings such a notebook in", () => {
+		const items = [folder("p", "Projects"), { ...doc("n", "Weekly", "p"), ours: true }];
+		expect(findNewNotebooks(items, { baseFolder: "", vaultFolders: ["Projects"], known: new Set(), now: NOW, quietMs: 0 })).toEqual([]);
 	});
 });
 

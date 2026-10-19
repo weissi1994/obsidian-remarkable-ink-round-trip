@@ -55,7 +55,8 @@ import { EmbedContent } from "./preprocess/preprocess";
 import { DOCID_FRONTMATTER_KEY, generateDocId } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
-import { findNewNotebooks, importedNote, noteFileName } from "./sync/deviceimport";
+import { findNewNotebooks, importedNote, noteFileName, writtenByPlugin } from "./sync/deviceimport";
+import { parseRmScene } from "./incoming/rmscene";
 import { readNotebook } from "./transport/notebook";
 import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
@@ -640,6 +641,10 @@ export default class RoundTripPlugin extends Plugin {
 			const { pages, content } = await readNotebook(api.raw, notebook.id);
 			if (content === null || (JSON.parse(content) as { fileType?: string }).fileType !== "notebook") {
 				cache[notebook.id] = { ...cache[notebook.id], notNotebook: true };
+				continue;
+			}
+			if (pages.some((page) => writtenByPlugin(parseRmScene(page.bytes).authors))) {
+				cache[notebook.id] = { ...cache[notebook.id], ours: true };
 				continue;
 			}
 			const order = parsePageOrder(content);

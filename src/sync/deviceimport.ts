@@ -17,6 +17,18 @@ export interface DeviceItem {
 	lastModified: string;
 	/** Read and found not to be a notebook (a PDF, an EPUB): not looked at again at this hash. */
 	notNotebook?: boolean;
+	/** Written by this plugin — from this or another vault instance — so never brought in. */
+	ours?: boolean;
+}
+
+/**
+ * Whether a page was written by this plugin, whichever vault instance sent
+ * it: its strokes carry the plugin's own author, an all-zero UUID no tablet
+ * uses. Needs no record of the send, so a second instance recognises the
+ * first one's notebooks too.
+ */
+export function writtenByPlugin(authors: Map<number, string>): boolean {
+	return [...authors.values()].some((uuid) => /^0+$/.test(uuid));
 }
 
 export interface NewNotebook {
@@ -55,7 +67,7 @@ export function findNewNotebooks(
 	const base = options.baseFolder.replace(/^\/+|\/+$/g, "");
 	const out: NewNotebook[] = [];
 	for (const item of items) {
-		if (item.type !== "DocumentType" || item.notNotebook === true || options.known.has(item.id)) continue;
+		if (item.type !== "DocumentType" || item.notNotebook === true || item.ours === true || options.known.has(item.id)) continue;
 		if (options.now - Number(item.lastModified) < options.quietMs) continue;
 		const path = folderPathOf(item, byId);
 		if (path === null) continue;
