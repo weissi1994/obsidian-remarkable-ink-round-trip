@@ -52,9 +52,13 @@ import {
 } from "./transport/diagnose";
 import { ByteCompatReport, installByteCompat } from "./transport/bytescompat";
 import { EmbedContent } from "./preprocess/preprocess";
-import { DOCID_FRONTMATTER_KEY } from "./id/docid";
+import { DOCID_FRONTMATTER_KEY, generateDocId } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
+import { findNewNotebooks, importedNote, noteFileName } from "./sync/deviceimport";
+import { readNotebook } from "./transport/notebook";
+import { parsePageOrder } from "./incoming/pagemap";
+import { parseRmPage } from "./incoming/rmlines";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { learnFromNotes, rememberRemark } from "./ocr/samples";
@@ -71,7 +75,7 @@ import {
 import { renderImportReport } from "./incoming/report";
 import { paintPlan, planRender } from "./incoming/strokerender";
 import { MappingEntry, contentHash } from "./id/mapping";
-import { displayTextForLink, preprocess, splitNote } from "./preprocess/preprocess";
+import { displayTextForLink, parseFrontmatter, preprocess, splitNote } from "./preprocess/preprocess";
 import type { AnnotationOutcome } from "./incoming/annotationnote";
 import { WatchQueue, parseFolderList } from "./sync/watcher";
 import { PullQueue, PushQueue, SyncQueueCoordinator } from "./sync/queues";
@@ -549,6 +553,9 @@ export default class RoundTripPlugin extends Plugin {
 		this.syncRunning = (async () => {
 			try {
 				const changed = await this.pullAnnotations({ background: options.background });
+				// Notebooks started on the tablet: in as notes, then out below as ink.
+				const imported = await this.importNewNotebooks(options.background === true);
+				for (const path of imported) changed.add(path);
 				const files = new Map<string, TFile>();
 				for (const file of this.syncFolderFiles()) files.set(file.path, file);
 				// A note synced once from outside the folders stays in sync too.
@@ -572,6 +579,116 @@ export default class RoundTripPlugin extends Plugin {
 			}
 		})();
 		return this.syncRunning;
+	}
+
+	/**
+	 * Bring notebooks started on the tablet into the vault (sync/deviceimport.ts):
+	 * those in the device folder of a synced vault folder that the plugin did
+	 * not write. Each becomes a note — page images and their text — mapped to
+	 * the original, so the send that follows replaces it with a handwritten
+	 * notebook of the note. Returns the new notes' paths.
+	 */
+	private importNewNotebooks(background: boolean): Promise<string[]> {
+		const created: string[] = [];
+		if (!this.settings.watchFolderEnabled || !this.settings.mirrorFolders) return Promise.resolve(created);
+		return this.pullQueue
+			.enqueue("import-new-notebooks", () => this.runImportNewNotebooks(created))
+			.then(() => created)
+			.catch((error: unknown) => {
+				const message = toTransportError(error).message;
+				if (background) console.warn(`reMarkable Ink Round-Trip: importing new notebooks failed — ${message}`);
+				else notify(`Importing new notebooks failed: ${message}`, 10000);
+				return created;
+			});
+	}
+
+	private async runImportNewNotebooks(created: string[]): Promise<void> {
+		const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+		const cache = await this.ink.loadDeviceItems();
+		const live = await api.listIds(true);
+		const present = new Set<string>();
+		for (const { id, hash } of live) {
+			present.add(id);
+			if (cache[id]?.hash === hash) continue;
+			try {
+				const meta = await api.getMetadata(id, hash);
+				cache[id] = {
+					id,
+					hash,
+					type: meta.type,
+					parent: meta.parent,
+					visibleName: meta.visibleName,
+					lastModified: meta.lastModified,
+				};
+			} catch {
+				// One unreadable item must not stop the rest; it is tried again next time.
+			}
+		}
+		for (const id of Object.keys(cache)) if (!present.has(id)) delete cache[id];
+		const known = new Set(Object.values(this.settings.mappings).map((entry) => entry.deviceDocId));
+		for (const sheet of [this.settings.pendingSheet, this.settings.pendingWordSheet]) {
+			if (sheet !== null) known.add(sheet.deviceDocId);
+		}
+		const found = findNewNotebooks(Object.values(cache), {
+			baseFolder: this.settings.deviceBaseFolder,
+			vaultFolders: parseFolderList(this.settings.watchFolderPath),
+			known,
+			now: Date.now(),
+			quietMs: 10 * 60_000,
+		});
+		for (const notebook of found) {
+			const { pages, content } = await readNotebook(api.raw, notebook.id);
+			if (content === null || (JSON.parse(content) as { fileType?: string }).fileType !== "notebook") {
+				cache[notebook.id] = { ...cache[notebook.id], notNotebook: true };
+				continue;
+			}
+			const order = parsePageOrder(content);
+			pages.sort((a, b) => order.indexOf(a.pageId) - order.indexOf(b.pageId));
+			const written: { image?: string; text?: string }[] = [];
+			for (const [index, page] of pages.entries()) {
+				const strokes = parseRmPage(page.bytes).strokes;
+				if (strokes.length === 0) continue;
+				const request: StrokeRenderRequest = {
+					deviceDocId: notebook.id,
+					strokes,
+					page: index + 1,
+					remark: 1,
+					wholePage: true,
+				};
+				const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
+				const text =
+					this.settings.ocrMode === "builtin"
+						? await this.recognizeLocally(request)
+						: this.settings.ocrMode === "endpoint"
+							? await this.transcribeStrokes(request).catch(() => null)
+							: null;
+				written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
+			}
+			const docId = generateDocId();
+			const base = [notebook.folder, noteFileName(notebook.name)].filter((part) => part !== "").join("/");
+			let path = `${base}.md`;
+			for (let n = 2; this.app.vault.getFileByPath(path) !== null; n++) path = `${base} (${n}).md`;
+			await this.writeVaultFile(path, importedNote(docId, written));
+			this.settings.mappings = {
+				...this.settings.mappings,
+				[docId]: {
+					docId,
+					notePath: path,
+					deviceDocId: notebook.id,
+					uploadedAt: new Date().toISOString(),
+					contentHash: "",
+					format: "device",
+				},
+			};
+			await this.persistSettings();
+			created.push(path);
+		}
+		if (this.samplesDirty) {
+			await this.ink.saveSamples();
+			this.samplesDirty = false;
+		}
+		await this.ink.saveDeviceItems(cache);
+		if (created.length > 0) notify(`Brought ${created.length} notebook(s) from the reMarkable into the vault.`);
 	}
 
 	/** Every note in the sync folders, when they are on. */
@@ -635,14 +752,16 @@ export default class RoundTripPlugin extends Plugin {
 		const embedMaps = new Map<string, Map<string, EmbedContent>>();
 		try {
 			for (const file of files) {
+				const content = await this.app.vault.read(file);
 				notes.push({
 					path: file.path,
 					basename: file.basename,
-					content: await this.app.vault.read(file),
-					existingDocId: getFrontmatterValue(
-						this.app.metadataCache.getFileCache(file)?.frontmatter,
-						DOCID_FRONTMATTER_KEY,
-					),
+					content,
+					// A note just written (one brought in from the tablet) may not be
+					// in the metadata cache yet: its own frontmatter has the id too.
+					existingDocId:
+						getFrontmatterValue(this.app.metadataCache.getFileCache(file)?.frontmatter, DOCID_FRONTMATTER_KEY) ??
+						parseFrontmatter(content).fields[DOCID_FRONTMATTER_KEY],
 				});
 				embedMaps.set(file.path, await this.buildEmbedMap(file));
 			}

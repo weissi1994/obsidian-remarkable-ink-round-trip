@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Notebooks started on the tablet come into the vault:** a notebook in the
+  device folder of a synced vault folder becomes a note there — each page's ink
+  as an image, with its text as read — and is sent back as a handwritten
+  notebook in place of the original (moved to the tablet's trash), so it syncs
+  both ways from then on. Fixing the read text teaches the built-in reader your
+  hand. Notebooks changed in the last ten minutes are left until you are done.
 - **Lighter highlighter colours:** every highlighter band the plugin writes —
   code blocks, inline code, quotes, highlights, table headers, diagram fills —
   now carries the exact light tint the tablet's own highlighter uses (light

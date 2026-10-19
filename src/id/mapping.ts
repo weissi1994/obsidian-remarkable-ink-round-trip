@@ -20,7 +20,8 @@ export interface MappingEntry {
 	 * a write-mode notebook whose import is the write-mode route, not the
 	 * annotation pull. Absent = a pre-0.36 upload, always a review copy.
 	 */
-	format?: "pdf" | "epub" | "text" | "ink";
+	/** "device": a notebook started on the tablet, brought in and about to be re-sent as ink. */
+	format?: "pdf" | "epub" | "text" | "ink" | "device";
 	/**
 	 * Hash of the canonical form of the sent text (GP_E7_S3): exactly what
 	 * an UNEDITED device copy reads back as. Lets the import tell "the

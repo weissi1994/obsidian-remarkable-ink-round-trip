@@ -37,6 +37,7 @@ import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
 import { addSample, emptyStore, type SampleStore } from "./ocr/samples";
+import type { DeviceItem } from "./sync/deviceimport";
 import type { HttpClient } from "./transport/http";
 import { readNotebook, sendNotebook, type RawSyncApi } from "./transport/notebook";
 import { transcribe } from "./transport/ocr";
@@ -255,6 +256,17 @@ export class InkEdge {
 		};
 		this.host.settings.pendingSheet = pending;
 		await this.host.persist();
+	}
+
+	/* ------------------------ device item cache ----------------------- */
+
+	/** What the account's documents and folders were at their last seen hash. */
+	loadDeviceItems(): Promise<Record<string, DeviceItem>> {
+		return this.readJson<Record<string, DeviceItem>>(`${this.dir}/device-items.json`).then((items) => items ?? {});
+	}
+
+	saveDeviceItems(items: Record<string, DeviceItem>): Promise<void> {
+		return this.writeJson(`${this.dir}/device-items.json`, items);
 	}
 
 	/* --------------------------- word samples ------------------------ */

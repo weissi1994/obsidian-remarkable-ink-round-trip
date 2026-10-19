@@ -20,6 +20,14 @@ understands both:
 | Handwrite between the lines or in the margin | A remark callout with the image — and, opt-in, the text read by OCR |
 | Add a page to write on | The whole page as a remark, after the text it follows |
 
+**Started a notebook on the tablet?** Put it in a synced folder (on the tablet,
+the folder under *Obsidian* named like the vault folder) and the next sync brings
+it into the vault as a note — each page's ink as an image with its text as read —
+and sends it back as a handwritten notebook in place of the original, which goes
+to the tablet's trash. From then on it syncs like any other note. A notebook
+changed in the last ten minutes is left alone, so it is never swapped out while
+you are still writing in it.
+
 Edited the note in Obsidian while the notebook was out? Both sides are merged —
 word by word within a paragraph. Only where both changed the same words does the
 note keep yours, with the tablet's version in an *Also changed on the
