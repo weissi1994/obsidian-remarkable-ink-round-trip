@@ -87,7 +87,8 @@ import type { Highlight } from "./incoming/highlights";
 import { flattenSelection, relativeFolderPath } from "./sync/selection";
 import { shouldAnnounceUpdate } from "./updatenotice";
 import { InkEdge } from "./inkedge";
-import { gridSizeFor, InkImage, inkStrokesOf, Picture, quantizeImage } from "./ink/inkimage";
+import { gridSizeFor, InkImage, InkStrokes, inkStrokesOf, Picture, quantizeImage } from "./ink/inkimage";
+import { PEN, PEN_COLOR } from "./ink/rmwrite";
 import { diagramKey, InkDrawing } from "./ink/inkdrawing";
 import { extractDrawing } from "./ink/svgextract";
 import { mermaidBlocks, withInkTheme } from "./ink/mermaidtheme";
@@ -1420,7 +1421,7 @@ export default class RoundTripPlugin extends Plugin {
 					if (names.length === 0) continue;
 					// Ink from the tablet goes back as its own strokes.
 					const image =
-						(await this.state.readInk(file.name)) ?? (placeholders ? null : await this.decodeImage(file, alias));
+						(await this.remarkInk(file)) ?? (placeholders ? null : await this.decodeImage(file, alias));
 					if (image !== null) for (const name of names) out[name] = image;
 				} else if (file.extension === "md" && depth < MAX_EMBED_DEPTH && !seen.has(file.path)) {
 					seen.add(file.path);
@@ -1439,12 +1440,33 @@ export default class RoundTripPlugin extends Plugin {
 				}
 				const file = this.app.metadataCache.getFirstLinkpathDest(decoded, sourcePath);
 				if (file === null || !IMAGE_EXTENSIONS.has(file.extension.toLowerCase())) continue;
-				const image = (await this.state.readInk(file.name)) ?? (placeholders ? null : await this.decodeImage(file));
+				const image = (await this.remarkInk(file)) ?? (placeholders ? null : await this.decodeImage(file));
 				if (image !== null) out[alt] = image;
 			}
 		};
 		await visit(note.content, note.path, 0);
 		return out;
+	}
+
+	/**
+	 * The tablet ink a vault image was drawn from, if it was: its stroke record,
+	 * or — for remarks read before records were kept — the shapes the built-in
+	 * reader remembered, in a plain black pen.
+	 */
+	private async remarkInk(file: TFile): Promise<InkStrokes | null> {
+		const recorded = await this.state.readInk(file.name);
+		if (recorded !== null) return recorded;
+		const remembered = (await this.ink.loadSamples()).remarks[file.path];
+		if (remembered === undefined) return null;
+		return inkStrokesOf(
+			remembered.strokes.map((points) => ({
+				tool: PEN.fineliner,
+				color: PEN_COLOR.black,
+				thicknessScale: 2,
+				points: points.map((p) => ({ ...p, width: 16 })),
+			})),
+			this.ink.profile().dpi,
+		);
 	}
 
 	/**
