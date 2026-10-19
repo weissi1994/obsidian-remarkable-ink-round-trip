@@ -62,12 +62,14 @@ import { parseRmScene } from "./incoming/rmscene";
 import { readNotebook } from "./transport/notebook";
 import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
-import { confirmAllRemarks, confirmRemarkAt, remarkAt, remarkId } from "./incoming/remarkid";
+import { confirmAllRemarks, confirmRemarkAt, findRemark, remarkAt, remarkId } from "./incoming/remarkid";
+import { highlightedText, insertRemarkText } from "./incoming/remarkinsert";
 import { RemarkControls } from "./remarkui";
 import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
 import {
+	acceptRemark,
 	corrections,
 	describeUnlearned,
 	knownText,
@@ -306,7 +308,7 @@ export default class RoundTripPlugin extends Plugin {
 			callback: () => void this.learnWordSheet(),
 		});
 		// Ink fork: confirm or correct a handwritten remark's reading in the note.
-		const remarkControls = new RemarkControls(this.app);
+		const remarkControls = new RemarkControls(this.app, (file, id) => this.insertRemark(file, id));
 		this.registerMarkdownPostProcessor(remarkControls.process);
 		this.addCommand({
 			id: "confirm-remark-reading",
@@ -330,6 +332,16 @@ export default class RoundTripPlugin extends Plugin {
 				const remark = remarkAt(editor.getValue(), editor.getCursor().line);
 				if (remark === null || view.file === null) return false;
 				if (!checking) remarkControls.openEditor(view.file, remark.id);
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "insert-remark-as-text",
+			name: "Insert handwriting reading as text at cursor",
+			editorCheckCallback: (checking, editor, view) => {
+				const remark = remarkAt(editor.getValue(), editor.getCursor().line);
+				if (remark === null || remark.text === "" || view.file === null) return false;
+				if (!checking) void this.insertRemark(view.file, remark.id);
 				return true;
 			},
 		});
@@ -1673,7 +1685,10 @@ export default class RoundTripPlugin extends Plugin {
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
 		// Read before: the note's text for it — the owner's, once corrected — stands.
 		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
-		if (known !== null) return known;
+		if (known !== null) {
+			await this.rememberReading(request, known, {});
+			return known;
+		}
 		const lexicon = await this.vaultLexicon();
 		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
 		let text: string | null = null;
@@ -1714,6 +1729,8 @@ export default class RoundTripPlugin extends Plugin {
 			note,
 			quote: request.quote,
 			wholePage: request.wholePage === true ? true : undefined,
+			column: request.column,
+			inkHighlights: request.inkHighlights,
 		}, text === null ? {} : scored);
 		this.samplesDirty = true;
 	}
@@ -1811,6 +1828,42 @@ export default class RoundTripPlugin extends Plugin {
 	}
 
 	/**
+	 * Take a remark into its note as plain text (remarkinsert.ts): its text,
+	 * with the handwriting's highlighter marks, goes where the ink was
+	 * written and the callout is removed. Recorded as confirmed at once —
+	 * with no callout left, the next sync could not find it — and never
+	 * placed again.
+	 */
+	async insertRemark(file: TFile, id: string): Promise<void> {
+		const found = findRemark(await this.app.vault.read(file), { id });
+		if (found === null || found.text === "") {
+			notify("This remark has no text to insert yet — correct it first.");
+			return;
+		}
+		const store = await this.ink.loadSamples();
+		const record = store.remarks[id];
+		const marked =
+			record === undefined ? { text: found.text, placed: true } : highlightedText(found.text, record.strokes, record.inkHighlights);
+		let done = false;
+		await this.app.vault.process(file, (note) => {
+			// The note as it is now: the owner may have edited it meanwhile.
+			const current = findRemark(note, { id });
+			if (current === null || current.text !== found.text) return note;
+			const next = insertRemarkText(note, id, marked.text, { quote: record?.quote, column: record?.column });
+			done = next !== null;
+			return next ?? note;
+		});
+		if (!done) {
+			notify("The remark changed while inserting — nothing was changed; try again.");
+			return;
+		}
+		acceptRemark(store, id, found.text);
+		await this.ink.saveSamples();
+		this.words = null;
+		if (!marked.placed) notify("Inserted as text. The highlighting could not be matched to words, so it was left out.");
+	}
+
+	/**
 	 * Write the owner's corrections out as a training set (ocr/trainingset.ts)
 	 * into `<handwriting folder>/training`, for fine-tuning a vision model
 	 * with an outside tool. Rewritten whole on every export.
@@ -1870,7 +1923,10 @@ export default class RoundTripPlugin extends Plugin {
 		request: StrokeRenderRequest & { quote?: string },
 	): Promise<string | null> {
 		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
-		if (known !== null) return known;
+		if (known !== null) {
+			await this.rememberReading(request, known, {});
+			return known;
+		}
 		const png = await this.strokesToPng(request.strokes);
 		if (png === null) return null;
 		const text = await this.ink.ocr(obsidianHttp, png, request.quote, request.wholePage === true, await this.ocrExamples());

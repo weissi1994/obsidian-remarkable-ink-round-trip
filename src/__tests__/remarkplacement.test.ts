@@ -4,6 +4,8 @@ import type { PdfLayout } from "../convert/pdf";
 import { renderPdf } from "./helpers/pdfrender";
 import { preprocess } from "../preprocess/preprocess";
 import { blockEnd, projectOntoSource } from "../incoming/sourceprojection";
+import { tableColumnUnder } from "../incoming/inkpull";
+import { deviceGridFor } from "../incoming/strokerender";
 
 /*
  * A remark callout inserted in the middle of a block splits it: a table
@@ -86,5 +88,29 @@ describe("blockEnd", () => {
 		expect(blockEnd(fenced, 1)).toBe(4);
 		expect(blockEnd(fenced, 3)).toBe(4);
 		expect(blockEnd(fenced, 5)).toBe(5);
+	});
+});
+
+describe("the table column under a remark", () => {
+	/** Strokes in device units covering the given PDF-point box (inverse of deviceBoundsToPdf). */
+	function inkAt(minX: number, maxX: number, y: number) {
+		const grid = deviceGridFor(layout);
+		const sx = grid.width / layout.pageWidth;
+		const sy = grid.height / layout.pageHeight;
+		const toDevice = (x: number, py: number) => ({ x: x * sx - grid.width / 2, y: (layout.pageHeight - py) * sy, width: 2, pressure: 100 });
+		return [{ tool: 2, color: 0, thicknessScale: 1, points: [toDevice(minX, y), toDevice(maxX, y + 4)] }];
+	}
+
+	it("is the column whose cells the ink sits in", () => {
+		const cells = layout.lines.filter((line) => line.role === "table" && line.text.includes("alpha row"));
+		const value = layout.lines.find((line) => line.role === "table" && line.text === "one")!;
+		const row = cells[0];
+		expect(tableColumnUnder(layout, row.page, inkAt(row.x + 2, row.x + 20, row.y))).toBe(0);
+		expect(tableColumnUnder(layout, value.page, inkAt(value.x + 10, value.x + 40, value.y))).toBe(1);
+	});
+
+	it("is undefined beside a line that is not in a table", () => {
+		const intro = layout.lines.find((line) => line.text.startsWith("Intro"))!;
+		expect(tableColumnUnder(layout, intro.page, inkAt(intro.x, intro.x + 30, intro.y))).toBeUndefined();
 	});
 });

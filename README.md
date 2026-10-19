@@ -183,12 +183,24 @@ Each remark callout has two buttons in its title:
 
 - **✓ Confirm**: the reading is right. Adds ✓ to the title (typing ✓ at the
   end of the title does the same).
-- **✎ Correct**: opens the ink next to its text — fix it, then **Save** or
-  **Save and confirm ✓**.
+- **✎ Correct**: opens the ink next to its text — fix it, then **Save**,
+  **Save and confirm ✓** or **Insert as text**.
+- **⤵ Insert as text**: the text goes into the note where you wrote it, and
+  the callout goes:
+  - in a **table**, into the cell under the ink (line breaks become `<br>`);
+  - in a **callout or quote**, as a line right after the one you wrote next to;
+  - next to a **list item**, as a new item after it;
+  - next to a **code block** or **paragraph**, as a paragraph after it.
+
+  Words you went over with the **highlighter** on the tablet come back
+  highlighted, in the same `<mark>` (in the tablet's colour) a highlight on
+  printed text gets. If the text and the ink can't be matched word by word,
+  a remark highlighted almost entirely is marked as a whole; otherwise the
+  highlighting is left out and a notice says so.
 
 The same as commands: **Confirm handwriting reading at cursor**, **Correct
-handwriting reading at cursor**, **Confirm all handwriting readings in this
-note**. Or simply edit the text in the callout (keep the id line). Either way,
+handwriting reading at cursor**, **Insert handwriting reading as text at
+cursor**, **Confirm all handwriting readings in this note**. Or simply edit the text in the callout (keep the id line). Either way,
 from then on the text is yours:
 
 - **Later syncs keep it.** The notebook is read again on every import, but a

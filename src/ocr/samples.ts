@@ -88,6 +88,12 @@ export interface RemarkRecord {
 	quote?: string;
 	/** A whole page added on the tablet rather than a margin remark. */
 	wholePage?: boolean;
+	/** The table column under it, when written on a table row (0-based). */
+	column?: number;
+	/** Highlighter drawn over its handwriting (device units), with colour. */
+	inkHighlights?: { strokes: Point[][]; rgb: string }[];
+	/** Taken into the note as plain text: no callout any more, never placed again. */
+	inserted?: boolean;
 }
 
 export interface SampleStore {
@@ -120,7 +126,7 @@ export function refOf(key: string, record: RemarkRecord): RemarkRef {
 	return /\.png$/i.test(key) ? { image: key } : { id: key, image: record.image };
 }
 
-export type RemarkContext = Pick<RemarkRecord, "image" | "note" | "quote" | "wholePage">;
+export type RemarkContext = Pick<RemarkRecord, "image" | "note" | "quote" | "wholePage" | "column" | "inkHighlights">;
 
 /**
  * Remember a remark's ink and what the reader made of it, for learning from
@@ -142,19 +148,51 @@ export function rememberRemark(
 		known.readScore = scored.score;
 		known.readBy = scored.by;
 		known.at = at.toISOString();
-		Object.assign(known, context);
+		Object.assign(known, roundContext(context));
 	} else {
 		store.remarks[key] = {
 			strokes: round(strokes),
 			transcript: read,
 			read,
 			at: at.toISOString(),
-			...context,
+			...roundContext(context),
 			...(scored.score === undefined ? {} : { score: scored.score, readScore: scored.score }),
 			...(scored.by === undefined ? {} : { by: scored.by, readBy: scored.by }),
 		};
 	}
 	prune(store);
+}
+
+function roundContext(context: RemarkContext): RemarkContext {
+	return context.inkHighlights === undefined
+		? context
+		: { ...context, inkHighlights: context.inkHighlights.map((h) => ({ rgb: h.rgb, strokes: round(h.strokes) })) };
+}
+
+/**
+ * The owner took a remark into the note as plain text (⤵): it is verified —
+ * confirmed, and corrected when the text differs from what the note had,
+ * learning from it as a correction — and, having no callout any more, it is
+ * never placed again (withEarlierReadings leaves it out). Returns the words
+ * learned.
+ */
+export function acceptRemark(store: SampleStore, key: string, text: string, at = new Date()): number {
+	const record = store.remarks[key];
+	if (record === undefined) {
+		// Never read (OCR off, or from before): no ink to learn from, but it
+		// must still not be placed again.
+		store.remarks[key] = { strokes: [], transcript: text, at: at.toISOString(), confirmed: true, inserted: true };
+		return 0;
+	}
+	let learned = 0;
+	if (text !== record.transcript || record.confirmed !== true) {
+		learned = learnCorrection(store, record, text);
+		if (text !== record.transcript) record.corrected = true;
+	}
+	record.transcript = text;
+	record.confirmed = true;
+	record.inserted = true;
+	return learned;
 }
 
 /** Drop the oldest remarks past the limits, the never-corrected ones under their own. */
@@ -185,7 +223,9 @@ export function knownText(store: SampleStore, key: string): string | null {
  * exactly that text for a new reading (sync/twoway.ts).
  */
 export function withEarlierReadings(store: SampleStore, marks: ImportedMark[]): ImportedMark[] {
-	return marks.map((mark) => {
+	// A remark taken into the note as text is not placed again.
+	const shown = marks.filter((mark) => mark.id === undefined || store.remarks[mark.id]?.inserted !== true);
+	return shown.map((mark) => {
 		const known = mark.id === undefined ? undefined : store.remarks[mark.id];
 		if (known === undefined) return mark;
 		if (isVerified(known)) return known.confirmed === true ? { ...mark, confirmed: true } : mark;

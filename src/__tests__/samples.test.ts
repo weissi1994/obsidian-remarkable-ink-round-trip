@@ -6,6 +6,7 @@ import { DEVICE_PROFILES, INK_PENS, renderInk, toInkLines } from "../ink/inkrend
 import { buildScenePageRm, INK_AUTHOR, SceneItemSpec } from "../ink/rmwrite";
 import { Lexicon, OCR_TRUST, Point, recognize, templatesFrom } from "../ocr/recognize";
 import {
+	acceptRemark,
 	addSample,
 	corrections,
 	describeUnlearned,
@@ -321,5 +322,26 @@ describe("reading scores", () => {
 		expect(isBetterReading({ score: 0.3 }, {})).toBe(false);
 		expect(isBetterReading({}, { score: 0.6 })).toBe(true);
 		expect(isBetterReading({}, { score: 0.3 })).toBe(false);
+	});
+});
+
+describe("a remark taken in as text", () => {
+	const ID = "3f9a2c1b0d4e";
+	it("is confirmed, learned from, and never placed again", () => {
+		const store = emptyStore();
+		rememberRemark(store, ID, joinedUp("Termin morgen prüfen", "i"), "Termin morgan prufen", new Date("2026-10-19"));
+		expect(acceptRemark(store, ID, "Termin morgen prüfen")).toBe(3);
+		expect(store.remarks[ID]).toMatchObject({ confirmed: true, corrected: true, inserted: true, transcript: "Termin morgen prüfen" });
+		const marks = withEarlierReadings(store, [
+			{ kind: "note", page: 1, id: ID, transcript: "x" },
+			{ kind: "note", page: 1, id: "other0000000", transcript: "y" },
+		]);
+		expect(marks.map((m) => m.id)).toEqual(["other0000000"]);
+	});
+
+	it("is remembered even when it was never read", () => {
+		const store = emptyStore();
+		acceptRemark(store, ID, "typed by hand");
+		expect(withEarlierReadings(store, [{ kind: "note", page: 1, id: ID }])).toEqual([]);
 	});
 });

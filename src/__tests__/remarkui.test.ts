@@ -53,18 +53,21 @@ function rendered(type: string): HTMLElement {
 async function setUp(note = NOTE) {
 	const { RemarkControls } = await import("../remarkui");
 	const fake = fakeApp(note);
-	const controls = new RemarkControls(fake.app as never);
+	const inserted: string[] = [];
+	const controls = new RemarkControls(fake.app as never, async (_file, id) => {
+		inserted.push(id);
+	});
 	const ctx = (line: number) => ({ sourcePath: "N.md", getSectionInfo: () => ({ lineStart: line, lineEnd: line + 3, text: note }) });
-	return { controls, fake, ctx };
+	return { controls, fake, ctx, inserted };
 }
 
 describe("remark callout buttons", () => {
-	it("appear on a remark callout: confirm and correct", async () => {
+	it("appear on a remark callout: confirm, correct, insert as text", async () => {
 		const { controls, ctx } = await setUp();
 		const el = rendered("note");
 		await controls.process(el, ctx(2) as never);
 		const icons = Array.from(el.querySelectorAll(".remarkable-ink-remark-action")).map((b) => b.getAttribute("data-icon"));
-		expect(icons).toEqual(["check", "pencil"]);
+		expect(icons).toEqual(["check", "pencil", "arrow-down-to-line"]);
 	});
 
 	it("stay off other callouts", async () => {
@@ -88,7 +91,7 @@ describe("remark callout buttons", () => {
 		await controls.process(el, ctx(2) as never);
 		await controls.process(el, ctx(2) as never);
 		const icons = Array.from(el.querySelectorAll(".remarkable-ink-remark-action")).map((b) => b.getAttribute("data-icon"));
-		expect(icons).toEqual(["pencil"]);
+		expect(icons).toEqual(["pencil", "arrow-down-to-line"]);
 	});
 
 	it("find the remark by its image when the source line is unknown", async () => {
@@ -96,7 +99,23 @@ describe("remark callout buttons", () => {
 		const el = rendered("note");
 		el.querySelector<HTMLElement>(".callout-content")!.createSpan({ cls: "internal-embed", attr: { src: "img/a.png" } });
 		await controls.process(el, { sourcePath: "N.md", getSectionInfo: () => null } as never);
-		expect(el.querySelectorAll(".remarkable-ink-remark-action")).toHaveLength(2);
+		expect(el.querySelectorAll(".remarkable-ink-remark-action")).toHaveLength(3);
+	});
+
+	it("insert the remark as text when ⤵ is clicked", async () => {
+		const { controls, ctx, inserted } = await setUp();
+		const el = rendered("note");
+		await controls.process(el, ctx(2) as never);
+		(el.querySelector('[data-icon="arrow-down-to-line"]') as HTMLButtonElement).click();
+		await vi.waitFor(() => expect(inserted).toEqual(["aaaaaaaaaaaa"]));
+	});
+
+	it("offer no confirm or insert for a remark without text", async () => {
+		const { controls, ctx } = await setUp(NOTE.replace("> helo wrld\n", ""));
+		const el = rendered("note");
+		await controls.process(el, ctx(2) as never);
+		const icons = Array.from(el.querySelectorAll(".remarkable-ink-remark-action")).map((b) => b.getAttribute("data-icon"));
+		expect(icons).toEqual(["pencil"]);
 	});
 
 	it("write a correction into the callout, confirming it if asked", async () => {

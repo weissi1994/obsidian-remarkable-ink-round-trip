@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Insert a handwritten remark into the note as text (⤵):** a button on
+  the remark callout (and in the correction editor, and a command) puts its
+  text where the ink was written — into the table cell under it, as a line of
+  the callout it was in, as a new list item, or as a paragraph after the text
+  it follows — and removes the callout. Highlighter over the handwriting comes
+  back as `<mark>` in the tablet's colour on the words it covered. The remark
+  counts as confirmed (and corrected, if you changed it) at once and is not
+  brought back by later imports.
 - **Remarks no longer split tables, lists, callouts or code blocks:** a
   remark written next to a table row, a callout line, a list item or a line
   of code was inserted right after that line — splitting the block, and the

@@ -20,8 +20,9 @@ import type { Highlight } from "./highlights";
 import { describeDiff, diffInkPage, InkPageDiff } from "./inkdiff";
 import { readMarks } from "./marks";
 import { pageIdOfFile, parsePageOrder } from "./pagemap";
-import type { DocumentFile, DocumentScan, ImportedMark, PullDeps, StrokeRenderRequest } from "./pull";
+import type { DocumentFile, DocumentScan, ImportedMark, InkHighlight, PullDeps, StrokeRenderRequest } from "./pull";
 import { TEXT_ONLY_KINDS } from "./pull";
+import type { Stroke } from "./rmlines";
 import { parseRmScene, SceneLine } from "./rmscene";
 import { remarkId } from "./remarkid";
 
@@ -184,6 +185,51 @@ function emptyScan(allFiles: DocumentFile[], strokeFiles: DocumentFile[]): Docum
 		addedPages: 0,
 		ink: { erasedWords: 0, movedWords: 0, partialWords: 0, ownStrokes: 0, transcribed: 0 },
 	};
+}
+
+/**
+ * The table column a remark sits in: the column whose cells start at or left
+ * of the middle of the ink, among the table rows it overlaps. Undefined
+ * when it overlaps no table row. Columns are told apart by where their cell
+ * text starts (a table line's `level` is its row, not its column).
+ */
+export function tableColumnUnder(layout: PdfLayout, page: number, strokes: Stroke[]): number | undefined {
+	const device = strokeBounds(strokes);
+	if (device === null) return undefined;
+	const pdf = deviceBoundsToPdf(device, layout);
+	const tableLines = layout.lines.filter((line) => line.page === page && line.role === "table");
+	const beside = tableLines.filter((line) => pdf.maxY >= line.y - line.size * 0.3 && pdf.minY <= line.y + line.size * 0.85);
+	if (beside.length === 0) return undefined;
+	// The whole table: the run of consecutive table blocks (one per row) around it.
+	const tableBlocks = new Set(layout.lines.filter((line) => line.role === "table").map((line) => line.block));
+	let first = Math.min(...beside.map((line) => line.block));
+	let last = Math.max(...beside.map((line) => line.block));
+	while (tableBlocks.has(first - 1)) first--;
+	while (tableBlocks.has(last + 1)) last++;
+	const table = layout.lines.filter((line) => line.role === "table" && line.block >= first && line.block <= last);
+	const starts = [...new Set(table.map((line) => Math.round(line.x)))].sort((a, b) => a - b);
+	const middle = (pdf.minX + pdf.maxX) / 2;
+	let column = 0;
+	starts.forEach((x, index) => {
+		if (x <= middle + 2) column = index;
+	});
+	return column;
+}
+
+/** Highlighter strokes lying over a remark's ink, with their colour. */
+function highlightsOver(lines: SceneLine[], strokes: Stroke[]): InkHighlight[] {
+	const ink = strokeBounds(strokes);
+	if (ink === null) return [];
+	const out: InkHighlight[] = [];
+	for (const line of lines) {
+		const b = strokeBounds([line.stroke]);
+		if (b === null || b.maxX < ink.minX || b.minX > ink.maxX || b.maxY < ink.minY || b.minY > ink.maxY) continue;
+		out.push({
+			strokes: [line.stroke.points.map((p) => ({ x: p.x, y: p.y }))],
+			rgb: line.rgb ?? HIGHLIGHTER_RGB[line.stroke.color] ?? "#ffed75",
+		});
+	}
+	return out;
 }
 
 /** Render (and optionally transcribe) one piece of the owner's handwriting. */
@@ -363,11 +409,16 @@ export async function collectInkAnnotations(
 			// The owner's ink: highlighter strokes become highlights, the rest
 			// goes through the upstream mark reader unchanged.
 			const penLines = diff.userLines.filter((line) => !HIGHLIGHTER_TOOLS.has(line.stroke.tool));
+			// Highlighter over no printed words may be over the owner's own
+			// handwriting: kept for the remark it covers.
+			const overInk: SceneLine[] = [];
 			for (const line of diff.userLines.filter((line) => HIGHLIGHTER_TOOLS.has(line.stroke.tool))) {
 				const highlight = highlightOf(line, layout, page);
 				if (highlight !== null) {
 					highlights.push(highlight);
 					scan.highlightsInStrokes++;
+				} else {
+					overInk.push(line);
 				}
 			}
 			const marks = readMarks(
@@ -380,8 +431,17 @@ export async function collectInkAnnotations(
 				let picture: { id: string; path?: string; transcript?: string } | null = null;
 				if (!TEXT_ONLY_KINDS.has(mark.kind)) {
 					if (deps.renderStrokes === undefined && deps.transcribe === undefined) continue;
+					const column = mark.kind === "note" ? tableColumnUnder(layout, page, mark.strokes) : undefined;
+					const inkHighlights = mark.kind === "note" ? highlightsOver(overInk, mark.strokes) : [];
 					picture = await pictureOf(
-						{ deviceDocId: entry.deviceDocId, strokes: mark.strokes, page, remark: position + 1 },
+						{
+							deviceDocId: entry.deviceDocId,
+							strokes: mark.strokes,
+							page,
+							remark: position + 1,
+							...(column === undefined ? {} : { column }),
+							...(inkHighlights.length === 0 ? {} : { inkHighlights }),
+						},
 						mark.quote,
 						deps,
 						scan,

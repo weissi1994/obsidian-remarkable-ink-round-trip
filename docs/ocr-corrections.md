@@ -101,6 +101,35 @@ Tests: `remarkui.test.ts` runs in happy-dom against
 `src/__tests__/helpers/obsidian.ts`, a stand-in for the types-only
 `obsidian` package (aliased in `vitest.config.ts`).
 
+## Insert as text — `src/incoming/remarkinsert.ts`
+
+⤵ (button, editor, command) → `main.ts` `insertRemark`:
+
+1. Text = the callout's text in the note now. `highlightedText` adds
+   highlighter: at import, highlighter strokes that cover no printed words but
+   overlap a remark are kept with it (`inkpull.ts` `highlightsOver` →
+   `record.inkHighlights`, separate from the pen strokes, so id and OCR are
+   unaffected). Ink words (`splitWords`) are paired with text words as in
+   `learnCorrection`; a word counts as highlighted when a swipe covers half its
+   width. Runs of same-colour words become `<mark style="background: rgb">`,
+   the markup `sourceprojection.ts` gives imported highlights. No pairing →
+   ≥ 80 % highlighted marks the whole text, else no highlight (`placed:false`,
+   notice).
+2. `insertRemarkText(note, id, text, {quote, column})` removes the callout,
+   finds the anchor line — nearest line above holding the quote's first words
+   (`record.quote`) — and places the text by the anchor's block: table row →
+   cell `column` (from `tableColumnUnder` at import: the column whose cell text
+   starts left of the ink's middle, among the table rows it overlaps; a table
+   line's `level` is its row), `<br>` for line breaks, `\|` escaped; quote /
+   callout → a line after the anchor with the same `>` prefix; list item → new
+   sibling item (numbered +1, task → plain); code fence / paragraph →
+   paragraph after the block; anchor not found → paragraph where the callout
+   was.
+3. `acceptRemark`: confirmed (+ corrected and learned from if changed),
+   `inserted: true` — `withEarlierReadings` then drops the remark from every
+   later import, so the callout never comes back. A remark with no record
+   (OCR off) gets a stub record for that.
+
 ## Sample store — `src/ocr/samples.ts`
 
 Stored in the vault's shared sync state (`ocr/samples.json` via

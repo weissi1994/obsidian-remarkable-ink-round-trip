@@ -137,6 +137,16 @@ export interface StrokeRenderRequest {
 	remark: number;
 	/** Ink fork: a whole page the owner added, not a margin remark (OCR prompt). */
 	wholePage?: boolean;
+	/** Ink fork: the table column under the remark, when it sits on a table row (0-based). */
+	column?: number;
+	/** Ink fork: highlighter drawn over the remark's own handwriting. */
+	inkHighlights?: InkHighlight[];
+}
+
+/** Highlighter strokes over handwriting, device units, with the colour they carry. */
+export interface InkHighlight {
+	strokes: { x: number; y: number }[][];
+	rgb: string;
 }
 
 export interface PullDeps {

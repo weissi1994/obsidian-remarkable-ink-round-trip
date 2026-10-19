@@ -1,7 +1,8 @@
 /**
- * Confirm or correct a handwritten remark's reading right in the note (ink
- * fork): two buttons in the callout's title, and an editor showing the ink
- * beside its text.
+ * Confirm, correct or take in a handwritten remark's reading right in the
+ * note (ink fork): buttons in the callout's title, and an editor showing the
+ * ink beside its text. Taking it in (⤵, remarkinsert.ts) replaces the
+ * callout with plain text where the ink was written.
  *
  * Both only edit the note — ✓ in the title, or the callout's text lines —
  * exactly as typing would (incoming/remarkid.ts). The next sync finds the
@@ -27,7 +28,11 @@ interface RemarkInNote {
 }
 
 export class RemarkControls {
-	constructor(private readonly app: App) {}
+	constructor(
+		private readonly app: App,
+		/** Take the remark into the note as plain text (main.ts: store, highlights, learning). */
+		private readonly insert: (file: TFile, id: string) => Promise<void>,
+	) {}
 
 	/** Markdown post-processor: buttons on every remark callout rendered from a note. */
 	readonly process = async (el: HTMLElement, ctx: MarkdownPostProcessorContext): Promise<void> => {
@@ -84,6 +89,9 @@ export class RemarkControls {
 			this.button(actions, "check", "Confirm this reading — it is right", () => void this.confirm(remark.file, remark.id));
 		}
 		this.button(actions, "pencil", "Correct this reading", () => this.openEditor(remark.file, remark.id));
+		if (remark.text !== "") {
+			this.button(actions, "arrow-down-to-line", "Insert into the note as text, where it was written", () => void this.insert(remark.file, remark.id));
+		}
 	}
 
 	private button(parent: HTMLElement, icon: string, label: string, onClick: () => void): void {
@@ -110,6 +118,12 @@ export class RemarkControls {
 			const remark = this.lookUp(note, file, id);
 			if (remark !== null) new RemarkEditor(this.app, remark, this).open();
 		});
+	}
+
+	/** Take the remark into the note as text (after saving any edit). */
+	async insertAsText(file: TFile, id: string, text?: string): Promise<void> {
+		if (text !== undefined) await this.correct(file, id, text, false);
+		await this.insert(file, id);
 	}
 
 	/** Write corrected text into the remark's callout, optionally confirming it. */
@@ -161,6 +175,9 @@ class RemarkEditor extends Modal {
 		if (!this.remark.confirmed) {
 			new ButtonComponent(buttons).setButtonText("Save").onClick(() => void this.save(input.value, false));
 		}
+		new ButtonComponent(buttons).setButtonText("Insert as text").onClick(() => {
+			void this.controls.insertAsText(this.remark.file, this.remark.id, input.value).then(() => this.close());
+		});
 		new ButtonComponent(buttons).setButtonText("Cancel").onClick(() => this.close());
 		window.setTimeout(() => input.focus(), 0);
 	}
