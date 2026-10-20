@@ -439,8 +439,11 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	return { markdown: markdown.trimEnd(), placed, unplaced };
 }
 
-/** A markdown task line: bullet, then a checkbox marker. */
-const TASK_LINE_RE = /^\s*[-*+]\s+\[( |x|X)\]/;
+/**
+ * A markdown task line: bullet, then a checkbox marker — also inside a quote
+ * or callout (`> - [ ] task`, `> > - [ ] task`).
+ */
+const TASK_LINE_RE = /^((?:\s*>\s?)*\s*[-*+]\s+)\[( |x|X)\]/;
 
 /**
  * Rewrite task markers in the annotated copy (GP_E5_S12): `[ ]` becomes
@@ -453,7 +456,7 @@ function applyTaskStates(markdown: string, done: Set<number>, cancelled: Set<num
 	const lines = markdown.split("\n");
 	const apply = (index: number, state: string) => {
 		if (index >= lines.length) return;
-		lines[index] = lines[index].replace(/^(\s*[-*+]\s+)\[( |x|X)\]/, `$1[${state}]`);
+		lines[index] = lines[index].replace(TASK_LINE_RE, `$1[${state}]`);
 	};
 	for (const index of done) if (!cancelled.has(index)) apply(index, "x");
 	for (const index of cancelled) apply(index, "-");

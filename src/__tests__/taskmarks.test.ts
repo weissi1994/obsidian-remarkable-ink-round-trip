@@ -467,6 +467,53 @@ describe("task states in the annotated copy (GP_E5_S12)", () => {
 	});
 });
 
+describe("task states inside quotes and callouts (#22)", () => {
+	const QUOTED = [
+		"Boodschappen.",
+		"",
+		"> [!todo] Lijst",
+		"> - [ ] buy milk today",
+		"> - [ ] bake fresh bread",
+		"",
+		"> > - [ ] nested quoted errand",
+	].join("\n");
+	let quoted: PdfLayout;
+	beforeAll(async () => {
+		quoted = (await renderPdf(parseBlocks(QUOTED), { title: "Lijst", docId: "q" })).layout;
+	});
+	const idsOf = (phrase: string) => {
+		const line = quoted.lines.find((candidate) => candidate.text.includes(phrase));
+		if (line === undefined) throw new Error(`phrase not laid out: ${phrase}`);
+		return line.words.filter((word) => /\p{L}/u.test(word.text)).map((word) => word.id);
+	};
+	const project = (marks: ImportedMark[]) =>
+		projectOntoSource({ source: QUOTED, layout: quoted, marks, highlights: [] });
+
+	it("rewrites a ticked task in a callout to [x]", () => {
+		const result = project([{ kind: "checkbox", words: idsOf("buy milk today") }]);
+		expect(result?.markdown).toContain("> - [x] buy milk today");
+		expect(result?.markdown).toContain("> - [ ] bake fresh bread");
+	});
+
+	it("rewrites a stripe-cancelled task in a callout to [-]", () => {
+		const result = project([{ kind: "checkbox-cancel", words: idsOf("buy milk today") }]);
+		expect(result?.markdown).toContain("> - [-] buy milk today");
+	});
+
+	it("cancels a struck task in a callout instead of striking its words", () => {
+		const result = project([{ kind: "strikethrough", words: idsOf("bake fresh bread") }]);
+		expect(result?.markdown).toContain("> - [-] bake fresh bread");
+		expect(result?.markdown).not.toContain("~~");
+	});
+
+	it("rewrites a task in a nested quote", () => {
+		const ticked = project([{ kind: "checkbox", words: idsOf("nested quoted errand") }]);
+		expect(ticked?.markdown).toContain("> > - [x] nested quoted errand");
+		const struck = project([{ kind: "strikethrough", words: idsOf("nested quoted errand") }]);
+		expect(struck?.markdown).toContain("> > - [-] nested quoted errand");
+	});
+});
+
 describe("ticks on a Paper Pro page (GP_E5_S12, devicecheck 2026-08-20)", () => {
 	// The field log that cracked it: every tick sat exactly on its box on the
 	// tablet, yet imported 15% down-and-left of it — the Paper Pro writes ink

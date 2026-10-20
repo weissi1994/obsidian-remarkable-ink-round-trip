@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Ticks, strikes and remarks inside quotes and callouts come back into the
+  note:** a tick or a stripe on a task in a callout (`> - [ ] task`, also in a
+  nested quote) marks it done or cancelled, like a task outside one. A remark
+  written in a table cell inside a callout goes into that cell instead of
+  breaking the table, and one written against a list item in a callout becomes
+  a new item of that list.
 - **Handwriting sheets have a layer of their own to write on:** the boxes,
   guides and labels sit on a "Sheet" layer, and the page opens on an empty
   "Your handwriting" layer above it. The tablet's eraser and lasso only touch
