@@ -11,6 +11,7 @@
 import {
 	App,
 	ButtonComponent,
+	Platform,
 	PluginSettingTab,
 	type SettingDefinition,
 	type SettingDefinitionItem,
@@ -182,9 +183,28 @@ export class RoundTripSettingTab extends PluginSettingTab {
 		];
 	}
 
-	/** Ink fork: the vision-endpoint "Test connection" button. */
+	/** Ink fork: the vision-endpoint "Test connection" and one-click Ollama setup buttons. */
 	private ocrActions(): SettingDefinition[] {
 		return [
+			{
+				name: "Set up local reading for me",
+				desc:
+					"Desktop only: finds Ollama on this computer, downloads the handwriting model if " +
+					"needed (you confirm first), and points the plugin at it.",
+				visible: () => Platform.isDesktopApp,
+				action: (el: HTMLElement) => {
+					new ButtonComponent(el).setButtonText("Set up").onClick(async () => {
+						try {
+							await this.plugin.setUpLocalOllama(() => this.update());
+						} catch (error) {
+							notify(
+								error instanceof TransportError ? error.message : String(error),
+								15000,
+							);
+						}
+					});
+				},
+			},
 			{
 				name: "Test connection",
 				desc:

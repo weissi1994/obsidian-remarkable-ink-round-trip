@@ -8,6 +8,12 @@
   the note and its callout are unchanged — and it goes once the remark is
   confirmed (✓) or inserted as text. **Show unconfirmed remarks on the text**
   under Handwriting turns it off.
+- **One-click local reading (desktop):** *Settings → Reading handwriting (OCR)
+  → Set up local reading for me* finds Ollama on this computer, downloads the
+  handwriting model if it is missing — after you confirm, with progress and a
+  Cancel — points the OCR settings at it and runs *Test connection*. If Ollama
+  is not running it links to the installer. The manual endpoint settings stay
+  for everything else.
 - **Tables, lists, task boxes, code and nested quotes inside quotes and
   callouts** are typeset as such, set in by the quote's bar: a table gets its
   grid, a task a box to tick, code its band, and a callout's title a line of
