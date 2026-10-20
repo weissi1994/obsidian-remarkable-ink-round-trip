@@ -137,6 +137,10 @@ export function withImageBlocks(
 	const hasDrawings = drawings !== undefined && Object.keys(drawings).length > 0;
 	if (!hasImages && !hasDrawings) return blocks;
 	return blocks.map((block) => {
+		// A picture or remark inside a quote or callout is one of its blocks.
+		if (block.type === "quote" && block.blocks !== undefined) {
+			return { ...block, blocks: withImageBlocks(block.blocks, images, drawings) };
+		}
 		if (block.type === "code" && drawings !== undefined) {
 			const key = diagramKey(block.lines.join("\n"));
 			const drawing = drawings[key];

@@ -45,7 +45,7 @@ const resolver =
 
 function render(markdown: string, images: Record<string, InkStrokes> = {}) {
 	// Parsed as a send parses it (sync/send.ts).
-	return renderInk(parseBlocks(markdown, { html: true, quotePictures: true }), "Remarks", LAYOUT, { ...OPTIONS, images });
+	return renderInk(parseBlocks(markdown, { html: true, quotePictures: true, nestedQuotes: true }), "Remarks", LAYOUT, { ...OPTIONS, images });
 }
 
 /** A scribbled word just under a row, in device units, written the way the tablet stores it. */

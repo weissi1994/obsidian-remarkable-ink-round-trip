@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Tables, lists, task boxes, code and nested quotes inside quotes and
+  callouts** are typeset as such, set in by the quote's bar: a table gets its
+  grid, a task a box to tick, code its band, and a callout's title a line of
+  its own. Before, everything in a quote ran together into one italic
+  paragraph of pipes and markers. Notebooks already on the tablet keep their
+  look until their note changes and is sent again.
 - **Handwriting sheets have a layer of their own to write on:** the boxes,
   guides and labels sit on a "Sheet" layer, and the page opens on an empty
   "Your handwriting" layer above it. The tablet's eraser and lasso only touch

@@ -111,6 +111,8 @@ export interface InkSnapshot {
 	inline?: true;
 	/** Pictures inside quotes and callouts were drawn as pictures; absent = left as text. */
 	quotePictures?: true;
+	/** The content of quotes and callouts was typeset as blocks — tables, lists, code; absent = one italic run. */
+	nestedQuotes?: true;
 	/** The title the notebook was written with (its first line). */
 	title?: string;
 	/**
