@@ -34,6 +34,11 @@ export interface HandwritingCapture {
 	profile: DeviceProfile;
 	/** Letters learned at capture time, so the built-in reader can be replayed. */
 	hand: HandLibrary | null;
+	/**
+	 * The vision endpoint's model, when it read the sheet. Its name only:
+	 * never the endpoint's address or key — the file goes to a forge issue.
+	 */
+	endpoint?: { model: string };
 	items: CaptureItem[];
 }
 
@@ -54,6 +59,8 @@ export interface CaptureReading {
 	text: string;
 	confidence?: number;
 	accepted: boolean;
+	/** How long the reader took on this line, wall clock, in milliseconds. */
+	ms?: number;
 }
 
 export interface CaptureItem {
@@ -64,6 +71,8 @@ export interface CaptureItem {
 	box: SheetBox;
 	strokes: CaptureStroke[];
 	readings: Partial<Record<ReaderName, CaptureReading | null>>;
+	/** Why a reader failed on this item: its reading is null. */
+	errors?: Partial<Record<ReaderName, string>>;
 }
 
 export const CAPTURE_READERS: ReaderName[] = ["builtin", "writepad", "endpoint"];
@@ -177,6 +186,8 @@ export interface ReaderSummary {
 	accepted: number;
 	/** Items it was asked about but failed on (an endpoint error). */
 	failed: number;
+	/** Mean read time in milliseconds over the readings that have one; NaN when none do. */
+	meanMs: number;
 }
 
 /** Per reader that read anything, how well it did. */
@@ -187,6 +198,8 @@ export function summarize(capture: HandwritingCapture): ReaderSummary[] {
 		let total = 0;
 		let accepted = 0;
 		let failed = 0;
+		let timed = 0;
+		let totalMs = 0;
 		for (const item of capture.items) {
 			if (!(reader in item.readings)) continue;
 			const reading = item.readings[reader];
@@ -197,9 +210,20 @@ export function summarize(capture: HandwritingCapture): ReaderSummary[] {
 			items++;
 			total += itemCer(reading.text, item.prompt);
 			if (reading.accepted) accepted++;
+			if (reading.ms !== undefined) {
+				timed++;
+				totalMs += reading.ms;
+			}
 		}
 		if (items + failed === 0) continue;
-		out.push({ reader, items, meanCer: items === 0 ? NaN : total / items, accepted, failed });
+		out.push({
+			reader,
+			items,
+			meanCer: items === 0 ? NaN : total / items,
+			accepted,
+			failed,
+			meanMs: timed === 0 ? NaN : totalMs / timed,
+		});
 	}
 	return out;
 }
@@ -211,6 +235,11 @@ function cell(text: string): string {
 
 function percent(value: number): string {
 	return Number.isNaN(value) ? "—" : `${(value * 100).toFixed(1)}%`;
+}
+
+function duration(ms: number): string {
+	if (Number.isNaN(ms)) return "—";
+	return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
 /**
@@ -234,12 +263,18 @@ export function captureMarkdown(capture: HandwritingCapture, imageNames: Map<str
 	if (summary.length === 0) {
 		lines.push("No reader read anything.", "");
 	} else {
-		lines.push("| Reader | Lines read | Mean CER | Used | Failed |", "| --- | --- | --- | --- | --- |");
+		lines.push(
+			"| Reader | Lines read | Mean CER | Mean time | Used | Failed |",
+			"| --- | --- | --- | --- | --- | --- |",
+		);
 		for (const s of summary) {
-			lines.push(`| ${READER_LABELS[s.reader]} | ${s.items} | ${percent(s.meanCer)} | ${s.accepted} | ${s.failed} |`);
+			lines.push(
+				`| ${READER_LABELS[s.reader]} | ${s.items} | ${percent(s.meanCer)} | ${duration(s.meanMs)} | ${s.accepted} | ${s.failed} |`,
+			);
 		}
 		lines.push("");
 	}
+	if (capture.endpoint !== undefined) lines.push(`Endpoint model: ${cell(capture.endpoint.model)}`, "");
 	lines.push("## Readings", "");
 	const header = ["#", "Prompt", ...readers.flatMap((r) => [READER_LABELS[r], "CER"])];
 	lines.push(`| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`);
@@ -256,6 +291,13 @@ export function captureMarkdown(capture: HandwritingCapture, imageNames: Map<str
 		}
 		lines.push(`| ${row.join(" | ")} |`);
 	}
+	const errors = capture.items.flatMap((item) =>
+		readers.flatMap((reader) => {
+			const error = item.errors?.[reader];
+			return error === undefined ? [] : [`- ${item.id}, ${READER_LABELS[reader]}: ${cell(error)}`];
+		}),
+	);
+	if (errors.length > 0) lines.push("", "## Errors", "", ...errors);
 	lines.push("", "## Ink", "");
 	for (const item of capture.items) {
 		lines.push(`**${item.id}** — ${cell(item.prompt)}`, "");
@@ -272,6 +314,35 @@ export function captureStamp(date: Date): string {
 		`${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}-` +
 		`${two(date.getHours())}${two(date.getMinutes())}${two(date.getSeconds())}`
 	);
+}
+
+/**
+ * A reader's error as a capture keeps it: without the endpoint's address,
+ * host or key — a transport error names them ("Could not reach the OCR
+ * endpoint at http://…"), and the file goes to a forge issue. `secrets` are
+ * the endpoint setting and the API key.
+ */
+export function captureError(message: string, secrets: string[]): string {
+	const hidden = new Set<string>();
+	for (const secret of secrets) {
+		const value = secret.trim();
+		if (value === "") continue;
+		hidden.add(value);
+		try {
+			const url = new URL(value);
+			hidden.add(url.origin);
+			hidden.add(url.host);
+			hidden.add(url.hostname);
+		} catch {
+			// Not a URL: an API key, hidden as it is.
+		}
+	}
+	let out = message;
+	// Longest first, so a host does not leave its URL's scheme behind.
+	for (const value of [...hidden].sort((x, y) => y.length - x.length)) {
+		if (value !== "") out = out.split(value).join("[endpoint]");
+	}
+	return out.replace(/\bhttps?:\/\/[^\s"'<>)]+/gi, "[endpoint]");
 }
 
 /** Read a capture file, or say why it is not one. */

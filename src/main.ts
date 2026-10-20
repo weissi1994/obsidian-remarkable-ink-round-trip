@@ -88,6 +88,7 @@ import {
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
 import {
 	CAPTURE_FORMAT,
+	captureError,
 	captureMarkdown,
 	captureStamp,
 	itemPoints,
@@ -2205,29 +2206,51 @@ export default class RoundTripPlugin extends Plugin {
 				const strokes = itemPoints(item);
 				// Read as an import would today, the vault's words included, and
 				// kept whether trusted or not: the misreadings are the point.
+				let start = performance.now();
 				const letters = recognize(strokes, templates, lexicon, words);
 				item.readings.builtin = {
 					text: letters?.text ?? "",
 					confidence: letters?.confidence,
 					accepted: builtinTrusted(letters),
+					ms: performance.now() - start,
 				};
 				if (writePad !== null) {
 					// read() drops a reading too few of whose words the vault knows;
 					// then the reading without the vault's words, as not used.
+					start = performance.now();
 					const gated = writePad.read(strokes, lexicon);
 					const cursive = gated ?? writePad.read(strokes);
 					item.readings.writepad = {
 						text: cursive?.text ?? "",
 						confidence: cursive?.confidence,
 						accepted: gated !== null && gated.confidence >= WRITEPAD_TRUST,
+						ms: performance.now() - start,
 					};
 				}
 				const png = await this.strokesToPng(item.strokes.map(unflattenStroke));
 				if (this.settings.ocrMode === "endpoint") {
 					// No worked examples: they are the owner's corrections, and
 					// would make this a different reader than the one measured.
-					const text = png === null ? null : await this.ink.ocr(obsidianHttp, png, undefined, false, []).catch(() => null);
-					item.readings.endpoint = text === null ? null : { text, accepted: text.trim() !== "" };
+					if (png === null) {
+						item.readings.endpoint = null;
+						item.errors = { ...item.errors, endpoint: "The line could not be drawn as a picture." };
+					} else {
+						start = performance.now();
+						try {
+							const text = await this.ink.ocr(obsidianHttp, png, undefined, false, []);
+							// A null answer is NO_TEXT: a reading of nothing, not a failure.
+							item.readings.endpoint = {
+								text: text ?? "",
+								accepted: text !== null && text.trim() !== "",
+								ms: performance.now() - start,
+							};
+						} catch (error) {
+							item.readings.endpoint = null;
+							const message = toTransportError(error).message;
+							const secrets = [this.settings.ocrEndpoint, this.settings.ocrApiKey];
+							item.errors = { ...item.errors, endpoint: captureError(message, secrets) };
+						}
+					}
 				}
 				if (png !== null) {
 					const path = `${folder}/${item.id}.png`;
@@ -2243,6 +2266,8 @@ export default class RoundTripPlugin extends Plugin {
 				sheet: { kind: "test", version: pending.version },
 				profile: pending.profile,
 				hand: this.settings.handVersion === "" ? null : await this.ink.ensureHand(this.settings.handVersion),
+				// The model's name only: no address or key in a file meant for a forge issue.
+				...(this.settings.ocrMode === "endpoint" ? { endpoint: { model: this.settings.ocrModel } } : {}),
 				items,
 			};
 			const jsonName = `handwriting-test-${stamp}.json`;
