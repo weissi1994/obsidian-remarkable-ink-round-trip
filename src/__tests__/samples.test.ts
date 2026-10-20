@@ -178,6 +178,40 @@ describe("diversity-preserving sample retention", () => {
 		addSample(store, WORD, []);
 		expect(store.words).toEqual({});
 	});
+
+	// Letters are kept with the same diversity-preserving cull as words (the
+	// generalised keepDiverse over the $P cloud proxy), so an owner who forms a
+	// letter two clearly different ways keeps a cover for both — not just the
+	// most recent one. Driven through the real learnCorrection → learnLetters
+	// path with a single-letter word, so each correction is one letter sample.
+	const CH = "n";
+	const record = (strokes: Point[][]) => ({ strokes, transcript: "", at: "" });
+	// A straight vertical stick, with a tiny per-sample wobble: all near-identical.
+	const stick = (seed: number): Point[][] => [
+		Array.from({ length: 24 }, (_, i) => ({ x: seed * 0.001, y: i }))
+	];
+	// A square loop: a clearly 2-D shape, far from the stick in cloud distance.
+	const loop = (): Point[][] => [[
+		...Array.from({ length: 12 }, (_, i) => ({ x: i, y: 0 })),
+		...Array.from({ length: 12 }, (_, i) => ({ x: 12, y: i })),
+		...Array.from({ length: 12 }, (_, i) => ({ x: 12 - i, y: 12 })),
+		...Array.from({ length: 12 }, (_, i) => ({ x: 0, y: 12 - i })),
+	]];
+
+	it("keeps a distinct letter shape fed early over later near-duplicates", () => {
+		const store = emptyStore();
+		// The distinct shape first (so a newest-wins .slice would drop it)…
+		expect(learnCorrection(store, record(loop()), CH)).toBe(1);
+		const distinct = store.letters![CH][0];
+		expect(distinct).toBeDefined();
+		// …then well over a capful of near-duplicate sticks.
+		for (let i = 0; i < 10; i++) expect(learnCorrection(store, record(stick(i)), CH)).toBe(1);
+
+		// Red gate on main: `.slice(-PER_LETTER)` keeps only the newest sticks, so
+		// the early distinct loop is gone and this fails. keepDiverse keeps it:
+		// the loop is the least redundant sample, so it is never the one dropped.
+		expect(store.letters![CH]).toContain(distinct);
+	});
 });
 
 describe("word sheet", () => {
