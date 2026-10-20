@@ -2425,7 +2425,7 @@ const obsidianHttp: HttpClient = async (request) => {
  * requestUrl buffers the whole response, so it cannot report any. Desktop
  * only, and Node is reached lazily through `window.require` — never a bundled
  * `require("http")` that would break mobile (N7). No `Origin` header goes out
- * this way, so the pull works before OLLAMA_ORIGINS is set. Null where there
+ * this way, as with requestUrl. Null where there
  * is no Node (mobile, or a desktop that hides it): the pull then falls back
  * to requestUrl without progress.
  */

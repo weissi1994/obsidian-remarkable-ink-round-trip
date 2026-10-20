@@ -32,8 +32,6 @@ const DOWNLOAD_URL = "https://ollama.com/download";
 const LOCAL_ENDPOINT = `${OLLAMA_LOCAL}/v1`;
 const LMSTUDIO_ENDPOINT = `${LMSTUDIO_LOCAL}/v1`;
 /** Where to look when Test connection fails against Ollama: step 2 is OLLAMA_ORIGINS. */
-const OLLAMA_GUIDE = "See the setup guide: docs/ocr-endpoint-setup.md → step 2.";
-const LMSTUDIO_GUIDE = "See the setup guide: docs/ocr-endpoint-setup.md → LM Studio equivalent.";
 /** Download sizes worth telling the owner before they agree to one. */
 const MODEL_SIZES: Record<string, string> = { "qwen2.5vl:7b": "about 6 GB" };
 /** About two progress updates a second: Ollama reports far more often. */
@@ -61,7 +59,7 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 		if (studio.running) {
 			const choice = await new LmStudioModal(host.app, studio.models, studio.needsApiKey).choice();
 			if (choice.kind === "use") {
-				await applyAndTest(host, LMSTUDIO_ENDPOINT, choice.model, refresh, LMSTUDIO_GUIDE);
+				await applyAndTest(host, LMSTUDIO_ENDPOINT, choice.model, refresh);
 				return;
 			}
 			if (choice.kind === "retry") {
@@ -93,14 +91,13 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 
 /**
  * Point the OCR settings at a local server's `endpoint` and `model`, then run
- * Test connection; `guide` follows a failed test's message.
+ * Test connection.
  */
 export async function applyAndTest(
 	host: OllamaSetupHost,
 	endpoint: string,
 	model: string,
 	refresh: () => void,
-	guide: string = OLLAMA_GUIDE,
 ): Promise<void> {
 	const settings = host.settings();
 	settings.ocrEndpoint = endpoint;
@@ -114,7 +111,12 @@ export async function applyAndTest(
 		await host.testOcrConnection();
 		notify(`Local reading is set up — ${model} at ${endpoint}.`);
 	} catch (error) {
-		notify(error instanceof TransportError ? `${error.message} ${guide}` : String(error), 15000);
+		notify(
+			error instanceof TransportError
+				? `${error.message} See the setup guide: docs/ocr-endpoint-setup.md → Troubleshooting.`
+				: String(error),
+			15000,
+		);
 	}
 }
 

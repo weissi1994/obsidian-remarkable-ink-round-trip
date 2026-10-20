@@ -31,6 +31,9 @@ describe("ocr error mapping", () => {
 		await expect(
 			transcribe(fixed({ status: 403, text: "forbidden origin" }), { endpoint: "http://localhost:11434/v1", model: "m" }, { png }),
 		).rejects.toThrow(/OLLAMA_ORIGINS/);
+		await expect(
+			transcribe(fixed({ status: 403, text: "forbidden origin" }), { endpoint: "http://localhost:11434/v1", model: "m" }, { png }),
+		).rejects.toThrow(/update Ollama/i);
 	});
 
 	it("403 with an API key keeps the API-key message", async () => {
@@ -77,6 +80,9 @@ describe("listModels", () => {
 		await expect(
 			listModels(fixed({ status: 403 }), { endpoint: "http://localhost:11434/v1", model: "m" }),
 		).rejects.toThrow(/OLLAMA_ORIGINS/);
+		await expect(
+			listModels(fixed({ status: 403 }), { endpoint: "http://localhost:11434/v1", model: "m" }),
+		).rejects.toThrow(/update Ollama/i);
 	});
 });
 
