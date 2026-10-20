@@ -199,6 +199,26 @@ describe("preprocess", () => {
 		expect(result.markdown).toContain("> Inhoud");
 	});
 
+	it("flattens nested callouts, keeping their quote depth", () => {
+		const result = preprocess("> [!note] Outer\n> text\n> > [!tip] Inner\n> > more");
+		expect(result.markdown).toContain("> **Outer**");
+		expect(result.markdown).toContain("> > **Inner**");
+		expect(result.markdown).toContain("> > more");
+		expect(result.markdown).not.toContain("[!tip]");
+	});
+
+	it("titles an untitled nested callout with its type", () => {
+		expect(preprocess("> > [!warning]\n> > x").markdown).toContain("> > **Warning**");
+		expect(preprocess(">> [!tip]").markdown).toContain("> > **Tip**");
+	});
+
+	it("leaves callout syntax inside code fences alone", () => {
+		const md = "```markdown\n> [!note] X\n> > [!tip] Y\n```\n\n> [!tip] Z";
+		const out = preprocess(md).markdown;
+		expect(out).toContain("```markdown\n> [!note] X\n> > [!tip] Y\n```");
+		expect(out).toContain("> **Z**");
+	});
+
 	it("removes Obsidian comments", () => {
 		const result = preprocess("Zichtbaar %%verborgen%% blijft");
 		expect(result.markdown).toBe("Zichtbaar  blijft\n");

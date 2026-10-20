@@ -210,34 +210,40 @@ export function insertRemarkText(note: string, id: string, text: string, target:
 		return lines.join("\n");
 	}
 	const line = lines[anchor];
+	// A line of a callout or quote: the table and list logic below runs on the
+	// line without its `>` prefix, and every line it writes gets it back.
+	const prefix = /^(\s*(?:>\s?)+)/.exec(line)?.[1] ?? "";
+	const body = line.slice(prefix.length);
+	const unquoted = (at: number) => (lines[at].startsWith(prefix) ? lines[at].slice(prefix.length) : "");
 
 	const fence = fenceEnd(lines, anchor);
 	if (fence !== null) {
 		paragraph(fence);
-	} else if (TABLE_ROW.test(line) && !TABLE_RULE.test(line)) {
+	} else if (TABLE_ROW.test(body) && !TABLE_RULE.test(body)) {
 		// Into the cell under the ink.
-		const cells = cellsOf(line);
+		const cells = cellsOf(body);
 		const column = Math.min(Math.max(target.column ?? cells.length - 1, 0), cells.length - 1);
 		const value = textLines.map((l) => l.replace(/(?<!\\)\|/g, "\\|")).join("<br>");
 		const current = cells[column].trim();
 		cells[column] = ` ${current === "" ? value : `${current} ${value}`} `;
-		const indent = /^\s*/.exec(line)![0];
-		lines[anchor] = `${indent}|${cells.join("|")}|`;
-	} else if (/^\s*>/.test(line)) {
-		// A line of the callout or quote it was written in, right after that line.
-		const prefix = /^(\s*(?:>\s?)+)/.exec(line)![1];
-		lines.splice(anchor + 1, 0, ...textLines.map((l) => `${prefix}${l}`));
-	} else if (LIST_ITEM.test(line)) {
+		const indent = /^\s*/.exec(body)![0];
+		lines[anchor] = `${prefix}${indent}|${cells.join("|")}|`;
+	} else if (LIST_ITEM.test(body)) {
 		// A new item after the one it was written against (and that item's continuation).
-		const [, indent, marker, gap] = LIST_ITEM.exec(line)!;
+		const [, indent, marker, gap] = LIST_ITEM.exec(body)!;
 		let end = anchor;
-		while (end + 1 < lines.length && /^\s+\S/.test(lines[end + 1]) && /^\s*/.exec(lines[end + 1])![0].length > indent.length && !LIST_ITEM.test(lines[end + 1].slice(indent.length))) {
+		while (end + 1 < lines.length) {
+			const following = unquoted(end + 1);
+			if (!/^\s+\S/.test(following) || /^\s*/.exec(following)![0].length <= indent.length || LIST_ITEM.test(following.slice(indent.length))) break;
 			end++;
 		}
 		const ordered = /^\d+/.exec(marker);
 		const next = ordered === null ? marker : `${Number(ordered[0]) + 1}${marker.slice(ordered[0].length)}`;
 		const pad = " ".repeat(next.length + gap.length);
-		lines.splice(end + 1, 0, `${indent}${next}${gap}${textLines[0]}`, ...textLines.slice(1).map((l) => `${indent}${pad}${l}`));
+		lines.splice(end + 1, 0, `${prefix}${indent}${next}${gap}${textLines[0]}`, ...textLines.slice(1).map((l) => `${prefix}${indent}${pad}${l}`));
+	} else if (prefix !== "") {
+		// A line of the callout or quote it was written in, right after that line.
+		lines.splice(anchor + 1, 0, ...textLines.map((l) => `${prefix}${l}`));
 	} else {
 		paragraph(paragraphEnd(lines, anchor));
 	}
