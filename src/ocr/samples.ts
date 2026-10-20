@@ -41,8 +41,20 @@ export { remarkText };
  * the old cap of 3 stays valid and needs no migration.
  */
 export const PER_WORD = 10;
-/** Samples kept per letter shape; the oldest goes first. */
-const PER_LETTER = 3;
+/**
+ * Samples kept per letter shape; over this the most *redundant* goes first
+ * (same diversity-preserving cull as `PER_WORD`, see `keepDiverse`), so the
+ * kept set spans how the owner forms a letter rather than collapsing onto
+ * their most recent stroke of it. Set to TEMPLATE_CAP (`recognize.ts`), the
+ * most learned templates the reader scores per character: at this value every
+ * retained letter sample is actually used at read time — none is silently
+ * dropped by `capPerChar` (it keeps the owner's lower-weight learned letters
+ * ahead of the bundled fonts) — so the store cap and the read cap line up.
+ * Read work stays bounded by TEMPLATE_CAP whatever the store holds, and the
+ * format is unchanged (`letters: Record<string, Point[][][]>`), so a store
+ * written with the old cap of 3 stays valid and needs no migration.
+ */
+const PER_LETTER = 6;
 /** Letter ink is stored in cap units; coordinates are rounded to this many places. */
 const LETTER_PLACES = 1000;
 /** Remarks remembered for learning that were never corrected, newest kept. */
@@ -185,23 +197,25 @@ const round = (strokes: Point[][]) =>
 export function addSample(store: SampleStore, word: string, strokes: Point[][]): void {
 	if (word === "" || strokes.length === 0) return;
 	const kept = [...(store.words[word] ?? []), round(strokes)];
-	store.words[word] = kept.length <= PER_WORD ? kept : keepDiverse(kept);
+	store.words[word] = kept.length <= PER_WORD ? kept : keepDiverse(kept, PER_WORD);
 }
 
 /**
- * Cut a word's samples down to PER_WORD by dropping the most redundant one at
- * a time — the sample whose closest neighbour (by the cheap $P cloud distance)
- * is nearest, i.e. the one another kept sample already covers. The kept set
- * then spans the owner's variation rather than collapsing onto the newest way
- * of writing the word. Survivors stay in their original (newest-last) order,
- * and a tie — a pair of near-duplicates equally close to each other — drops
- * the *older* one, so recency still breaks even cases.
+ * Cut a sample set down to `cap` by dropping the most redundant one at a time
+ * — the sample whose closest neighbour (by the cheap $P cloud distance) is
+ * nearest, i.e. the one another kept sample already covers. The kept set then
+ * spans the owner's variation rather than collapsing onto the newest way of
+ * writing it. Survivors stay in their original (newest-last) order, and a tie
+ * — a pair of near-duplicates equally close to each other — drops the *older*
+ * one, so recency still breaks even cases. Used for both word samples (cap
+ * `PER_WORD`) and per-letter samples (cap `PER_LETTER`); both are the same
+ * stroke-cloud representation, so the $P proxy fits either.
  */
-function keepDiverse(samples: Point[][][]): Point[][][] {
+function keepDiverse(samples: Point[][][], cap: number): Point[][][] {
 	const clouds = samples.map((strokes) => cloudOf(strokes));
 	const between = clouds.map((a) => clouds.map((b) => matchDistance(a, b)));
 	const live = samples.map((_, i) => i); // indices still kept, oldest-first
-	while (live.length > PER_WORD) {
+	while (live.length > cap) {
 		let dropAt = 0;
 		let mostRedundant = Infinity;
 		for (let a = 0; a < live.length; a++) {
@@ -254,7 +268,8 @@ function learnLetters(store: SampleStore, word: string, strokes: Point[][]): voi
 		const norm = ink.map((stroke) =>
 			stroke.map((p) => ({ x: place((p.x - wordBox.minX) / cap), y: place((p.y - baseline) / cap) })),
 		);
-		kept[chars[i]] = [...(kept[chars[i]] ?? []), norm].slice(-PER_LETTER);
+		const samples = [...(kept[chars[i]] ?? []), norm];
+		kept[chars[i]] = samples.length <= PER_LETTER ? samples : keepDiverse(samples, PER_LETTER);
 	}
 }
 
