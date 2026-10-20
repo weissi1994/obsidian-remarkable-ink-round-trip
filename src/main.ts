@@ -86,6 +86,9 @@ import {
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
 import type { OcrExample, OcrConnection } from "./transport/ocr";
 import { checkConnection } from "./transport/ocr";
+import type { NdjsonClient } from "./transport/ollama";
+import { nodeNdjson } from "./transport/nodestream";
+import { setUpLocalOllama } from "./ollamasetup";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -1953,6 +1956,25 @@ export default class RoundTripPlugin extends Plugin {
 		});
 	}
 
+	/**
+	 * "Set up local reading for me" (#26): find a local Ollama, pull the model
+	 * with the owner's consent, point the OCR settings at it, test. Desktop
+	 * only — the settings tab hides the action elsewhere.
+	 */
+	setUpLocalOllama(refresh: () => void): Promise<void> {
+		return setUpLocalOllama(
+			{
+				app: this.app,
+				settings: () => this.settings,
+				saveSettings: () => this.saveSettings(),
+				testOcrConnection: () => this.testOcrConnection(),
+				http: obsidianHttp,
+				stream: desktopNdjson(),
+			},
+			refresh,
+		);
+	}
+
 	private async transcribeStrokes(
 		request: StrokeRenderRequest & { quote?: string },
 	): Promise<{ text: string; by?: ReaderName; score?: number } | null> {
@@ -2378,3 +2400,18 @@ const obsidianHttp: HttpClient = async (request) => {
 		arrayBuffer: response.arrayBuffer,
 	};
 };
+
+/**
+ * Streaming NDJSON over Node http(s), for the Ollama pull's progress (#26):
+ * requestUrl buffers the whole response, so it cannot report any. Desktop
+ * only, and Node is reached lazily through `window.require` — never a bundled
+ * `require("http")` that would break mobile (N7). No `Origin` header goes out
+ * this way, so the pull works before OLLAMA_ORIGINS is set. Null where there
+ * is no Node (mobile, or a desktop that hides it): the pull then falls back
+ * to requestUrl without progress.
+ */
+function desktopNdjson(): NdjsonClient | null {
+	if (!Platform.isDesktopApp) return null;
+	const load = (window as unknown as { require?: (module: string) => unknown }).require;
+	return typeof load === "function" ? nodeNdjson(load) : null;
+}

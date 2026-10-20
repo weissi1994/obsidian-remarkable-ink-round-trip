@@ -12,6 +12,26 @@ server (Ollama or LM Studio) the ink never leaves your machine: it is an HTTP
 call to a server on your own computer, not a cloud API. You point the plugin at
 an OpenAI-compatible endpoint and name the model; the plugin does the rest.
 
+## One-click setup (desktop)
+
+On desktop, *Settings → Reading handwriting (OCR) → Set up local reading for
+me* does step 1 and step 3 below for you:
+
+- it looks for Ollama on this computer (`http://localhost:11434`); if it is not
+  running, it links to [ollama.com/download](https://ollama.com/download) —
+  install or start Ollama, then press the button again;
+- if the model (*Model*, or `qwen2.5vl:7b` when empty) is missing, it asks
+  before downloading it (about 6 GB for the default) and shows the progress.
+  Cancel stops the download; Ollama keeps what it already has and resumes from
+  there next time;
+- it sets *Reading handwriting* to the endpoint, the endpoint to
+  `http://localhost:11434/v1` and the model, then runs *Test connection*.
+
+It does not set `OLLAMA_ORIGINS` — if *Test connection* then reports that the
+endpoint refused the request's origin, do step 2 and press *Test connection*
+again. The manual steps below remain the fallback, and the way to use another
+server, a remote machine, LM Studio or a hosted API.
+
 ## Ollama, step by step
 
 1. **Install Ollama** from [ollama.com](https://ollama.com/download), then pull
