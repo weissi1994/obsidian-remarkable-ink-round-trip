@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **No `OLLAMA_ORIGINS` needed:** the setup guide no longer asks you to set
+  it; Ollama 0.1.42+ accepts the plugin's requests as they are.
 - **Unconfirmed remarks show on the text:** a remark you have not confirmed
   yet is also drawn half-transparent over the note, roughly where you wrote it
   beside the printed line, in reading view and in the editor. Only a picture —
