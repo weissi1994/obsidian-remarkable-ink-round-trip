@@ -32,10 +32,10 @@ describe("WritePad", () => {
 	it("reads joined-up writing better than the letter reader", () => {
 		const sentence = "Check this again tomorrow";
 		const strokes = write(sentence, "allure");
-		const letters = recognize(strokes, templatesFrom([{ glyphs: builtinFont("readability").glyphs, weight: 1 }]))!;
+		const letters = recognize(strokes, templatesFrom([{ glyphs: builtinFont("readability").glyphs, weight: 1 }]));
 		const result = engine.read(strokes)!;
 		expect(result.text.split(" ")[0]).toBe("Check");
-		expect(cer(result.text, sentence)).toBeLessThan(cer(letters.text, sentence));
+		expect(cer(result.text, sentence)).toBeLessThan(cer(letters?.text ?? "", sentence));
 	});
 
 	it("learns the vault's words, Latin-1 only", () => {

@@ -1,10 +1,14 @@
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
 import { describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
 import { builtinFont, HandFont } from "../ink/glyphs";
 import { DEVICE_PROFILES, INK_PENS, renderInk } from "../ink/inkrender";
 import { TEST_SHEET_PROMPTS } from "../ink/handsheet";
-import { builtinTrusted, Lexicon, OCR_TRUST, recognize, templatesFrom } from "../ocr/recognize";
-import { CURSIVE_SAMPLES, LEAK_SAMPLE, PRINT_SAMPLES } from "./fixtures/handwriting";
+import { builtinTrusted, Lexicon, OCR_TRUST, recognize, splitWords, templatesFrom } from "../ocr/recognize";
+import { itemPoints, parseCapture, replayTemplates } from "../ocr/testcapture";
+import { WordReader } from "../ocr/words";
+import { CURSIVE_SAMPLES, PRINT_SAMPLES } from "./fixtures/handwriting";
 
 /** A sentence "handwritten" in a bundled font, as device strokes. */
 function write(text: string, font: string, jitter: number) {
@@ -58,36 +62,18 @@ describe("built-in handwriting recognition", () => {
 		expect(corrected.text).toBe(sentence);
 	});
 
-	it("tells joined-up writing it cannot read by a low confidence", () => {
-		const result = recognize(write("Check this again tomorrow", "allure", 0.5), templates("readability", "hershey-sans"));
-		expect(result!.confidence).toBeLessThan(OCR_TRUST);
-	});
-
-	// Red gate for the hershey-script leak (#4, work item 2). On OCR_TRUST=0.65
-	// this exact case read "C%% @w mm %mmm" at confidence 0.669 — junk that
-	// cleared the old threshold. The reader must now fail safe to the image:
-	// confidence below OCR_TRUST, and never the correct text.
-	it("fails safe on the cursive case that leaked junk above the old threshold", () => {
-		const t = templates("readability", "hershey-sans");
-		const result = recognize(write(LEAK_SAMPLE.text, LEAK_SAMPLE.font, LEAK_SAMPLE.jitter), t)!;
-		expect(result.confidence).toBeLessThan(OCR_TRUST);
-		expect(result.text).not.toBe(LEAK_SAMPLE.text);
-	});
-
-	// Calibration against the whole labelled set, not a single point: every
-	// print sample must stay trusted (above OCR_TRUST) and every cursive sample
-	// must fall through (below OCR_TRUST, and not the correct text). This is
-	// what fixes OCR_TRUST in the measured gap between the two classes.
-	it("separates print from cursive across the labelled fixture set", () => {
+	// Calibration against the whole labelled set: every print sample stays
+	// trusted, and joined-up writing is declined rather than read as junk
+	// (hershey-script "Check this again tomorrow" once leaked "C%% @w mm %mmm").
+	it("reads print and declines joined-up writing across the labelled fixture set", () => {
 		const t = templates("readability", "hershey-sans");
 		for (const sample of PRINT_SAMPLES) {
 			const result = recognize(write(sample.text, sample.font, sample.jitter), t)!;
 			expect(result.confidence, `print "${sample.text}" (${sample.font})`).toBeGreaterThan(OCR_TRUST);
 		}
 		for (const sample of CURSIVE_SAMPLES) {
-			const result = recognize(write(sample.text, sample.font, sample.jitter), t)!;
-			expect(result.confidence, `cursive "${sample.text}" (${sample.font})`).toBeLessThan(OCR_TRUST);
-			expect(result.text, `cursive "${sample.text}" (${sample.font})`).not.toBe(sample.text);
+			const result = recognize(write(sample.text, sample.font, sample.jitter), t);
+			expect(result, `cursive "${sample.text}" (${sample.font}) read "${result?.text}"`).toBeNull();
 		}
 	}, 20000); // renders + recognises the whole set — well over the 5s default
 
@@ -126,6 +112,40 @@ describe("built-in handwriting recognition", () => {
 	it("returns nothing for no strokes", () => {
 		expect(recognize([], templates("readability"))).toBeNull();
 	});
+});
+
+// The owner's fast joined-up hand, as filled in on a real test sheet.
+describe("the owner's joined-up hand (test sheet 2026-10-21-004942)", () => {
+	const capture = parseCapture(
+		readFileSync(
+			fileURLToPath(
+				new URL(
+					"../../handwriting-samples/test-sheets/2026-10-21-004942/handwriting-test-2026-10-21-004942.json",
+					import.meta.url,
+				),
+			),
+			"utf8",
+		),
+	);
+
+	// Word cuts are what corrections teach whole words from (learnCorrection).
+	it("cuts lines of plain words into their words", () => {
+		const plain = capture.items.filter((item) => /^[\p{L} ]+$/u.test(item.prompt));
+		expect(plain.length).toBeGreaterThan(5);
+		for (const item of plain) {
+			expect(splitWords(itemPoints(item)).flat(), item.prompt).toHaveLength(item.prompt.split(" ").length);
+		}
+	});
+
+	it("trusts no reading of it, even with every right word in the vault", () => {
+		const templates = replayTemplates(capture.hand);
+		const lexicon = Lexicon.fromText(capture.items.map((item) => item.prompt));
+		const words = new WordReader([builtinFont("allure"), builtinFont("hershey-script")], builtinFont("readability"));
+		for (const item of capture.items) {
+			const result = recognize(itemPoints(item), templates, lexicon, words);
+			expect(builtinTrusted(result), `${item.prompt} read "${result?.text}"`).toBe(false);
+		}
+	}, 20000);
 });
 
 describe("Lexicon", () => {

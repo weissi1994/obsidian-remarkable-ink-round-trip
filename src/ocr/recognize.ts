@@ -11,8 +11,9 @@
  * are then corrected against a word list taken from the vault, which is why
  * any language the owner writes in works without a dictionary.
  *
- * Built for separate print letters; joined-up writing comes back with a low
- * confidence and is then left to the image.
+ * Built for separate print letters. A word of joined-up letters has nothing
+ * to cut into letters: it is read whole from a trusted match (words.ts) or
+ * not at all, and then the remark is left to WritePad or the image.
  */
 
 import type { Glyph } from "../ink/glyphs";
@@ -493,6 +494,8 @@ function segment(word: Group[], line: { baseline: number; cap: number }, templat
  * scored 0.669 and returned junk ("C%% @w mm %mmm"). A per-letter-cost ceiling
  * would NOT have caught that case (its per-letter cost is low, ≈0.20, because
  * symbol glyphs match cheaply), so the threshold is the right guard here.
+ * Wide joined-up words no longer reach this threshold (JOINED_WIDTH declines
+ * them); it still guards print misreads and short joined words.
  */
 export const OCR_TRUST = 0.78;
 
@@ -509,7 +512,9 @@ export const OCR_TRUST = 0.78;
  * 0.21 (highest: "later → done ✓, not now ✗" ≈ 0.21, "Frage: ja oder nein?
  * (siehe #14)" ≈ 0.19). 0.3 sits in that gap. Unlike a known-word gate it needs
  * no vault words and keeps print that is mostly numbers ("Termin am 14.03. um
- * 9:30 Uhr").
+ * 9:30 Uhr"). Wide joined-up words are now declined before letter matching
+ * (JOINED_WIDTH); this still catches a short joined word narrow enough to
+ * pass for a letter.
  */
 export const OCR_MAX_SYMBOLS = 0.3;
 
@@ -533,7 +538,33 @@ export function builtinTrusted(r: Recognition | null): boolean {
 
 interface LineWords {
 	line: { baseline: number; cap: number };
+	xHeight: number;
 	words: Group[][];
+}
+
+/** Height of a line's main body, roughly its x-height: the middle 60% of its ink. */
+function xHeightOf(strokes: Point[][]): number {
+	const ys = strokes.flatMap((stroke) => stroke.map((p) => p.y)).sort((a, b) => a - b);
+	return ys[Math.floor(ys.length * 0.8)] - ys[Math.floor(ys.length * 0.2)] || 1;
+}
+
+/**
+ * A cluster wider than this many x-heights is joined-up letters, not one
+ * letter: print letters top out near 1.7 (W, M), joined-up words in the
+ * bundled script fonts start at 2.0 and in the owner's hand at 3.
+ */
+const JOINED_WIDTH = 1.8;
+
+/**
+ * In a line of joined-up writing nearly every gap is a space, so the space
+ * cannot be told from the median gap as in print. In x-heights: the owner's
+ * spaces measured 0.71 and up, gaps inside a word 0.58 and below
+ * (test sheet 2026-10-21-004942).
+ */
+const JOINED_SPACE = 0.65;
+
+function isJoined(group: Group, xHeight: number): boolean {
+	return group.box.maxX - group.box.minX > JOINED_WIDTH * xHeight;
 }
 
 /** Strokes (device units, y down) → lines of words of letter clusters. */
@@ -551,15 +582,18 @@ function layoutOf(strokes: Point[][]): LineWords[] {
 		const typical = median(tops) || 1;
 		const cap =
 			tallest > typical * 1.2 ? Math.max(tops[Math.floor(tops.length * 0.8)], typical * 1.2) : typical / 0.7;
+		const xHeight = xHeightOf(lineStrokes);
 		const gaps: number[] = [];
 		for (let i = 1; i < groups.length; i++) gaps.push(groups[i].box.minX - groups[i - 1].box.maxX);
-		const space = Math.max(cap * 0.45, median(gaps) * 2.2);
+		const space = groups.some((g) => isJoined(g, xHeight))
+			? JOINED_SPACE * xHeight
+			: Math.max(cap * 0.45, median(gaps) * 2.2);
 		const words: Group[][] = [[]];
 		for (const [i, group] of groups.entries()) {
 			if (i > 0 && gaps[i - 1] > space) words.push([]);
 			words[words.length - 1].push(group);
 		}
-		out.push({ line: { baseline, cap }, words: words.filter((word) => word.length > 0) });
+		out.push({ line: { baseline, cap }, xHeight, words: words.filter((word) => word.length > 0) });
 	}
 	return out;
 }
@@ -671,6 +705,8 @@ const UNSURE = 0.3;
 /**
  * Read strokes (device units, y down) as text. `lexicon` corrects whole
  * words; `words` reads joined-up words whole — the owner's own samples first.
+ * Null when there is nothing to read, or a joined-up word has no trusted
+ * whole-word match: letter shapes cannot read it, so no guess is made.
  */
 export function recognize(
 	strokes: Point[][],
@@ -684,9 +720,18 @@ export function recognize(
 	const lines: string[] = [];
 	let cost = 0;
 	let letters = 0;
-	for (const { line, words: wordGroups } of layoutOf(usable)) {
+	for (const { line, xHeight, words: wordGroups } of layoutOf(usable)) {
 		const out: string[] = [];
 		for (const groups of wordGroups) {
+			if (groups.some((g) => isJoined(g, xHeight))) {
+				const whole = words?.read(groups.flatMap((g) => g.strokes), lexicon) ?? null;
+				if (whole === null || !whole.trusted) return null;
+				const wordLetters = [...whole.word].length;
+				out.push(whole.word);
+				cost += whole.cost * wordLetters;
+				letters += wordLetters;
+				continue;
+			}
 			const letterCandidates = segment(groups, line, capped);
 			if (letterCandidates.length === 0) continue;
 			const corrected = correct(letterCandidates, lexicon);

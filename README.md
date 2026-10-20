@@ -147,11 +147,13 @@ Remarks come back as an image of your ink and — when they can be read — as t
 (*Settings → Reading handwriting → Read handwriting with*):
 
 - **Built-in** (default): reads the pen strokes themselves, inside the plugin — no
-  model, no download, nothing sent anywhere, mobile included. Letters are matched
-  against your handwriting sheet (or print letters without one), words against
-  the words in your vault, so German, English and your own names and jargon are
-  covered without a dictionary. **Joined-up writing** is read word by word
-  against words you wrote before. It learns them two ways:
+  model, no download, nothing sent anywhere, mobile included. It reads
+  **separate print letters**: they are matched against your handwriting sheet
+  (or print letters without one), words against the words in your vault, so
+  German, English and your own names and jargon are covered without a
+  dictionary. A **joined-up word** has no letters to cut apart; the built-in
+  reader only reads it whole, if it matches a word you wrote before. It learns
+  those two ways:
   - **From corrections:** fix the text of a remark in the note — or type what it
     says under one that came back as an image only — and the next sync learns
     those words from that ink (see [Correcting what was read](#correcting-what-was-read)).
@@ -159,7 +161,7 @@ Remarks come back as an image of your ink and — when they can be read — as t
     each everyday German and English word once the way you usually write, then
     **Learn my joined-up words from the sheet**.
 
-  What the letter reader is unsure of goes to
+  Any other joined-up writing, and print it is unsure of, goes to
   [WritePad](https://github.com/phatware/WritePad-Handwriting-Recognition-Engine),
   a handwriting engine made for joined-up writing that is built into the plugin
   (WebAssembly, with its English and German dictionaries). It reads the remark in
@@ -167,7 +169,9 @@ Remarks come back as an image of your ink and — when they can be read — as t
   keeps the language that reads best.
 
   A reading it is unsure of stays image only rather than come back as a wrong
-  guess.
+  guess. **If you write joined-up, the vision model endpoint reads it far
+  better** — on one tester's hand about 10% of characters wrong, against about
+  30% for WritePad.
 - **Vision model endpoint**: any OpenAI-compatible vision model — local (Ollama,
   LM Studio) or hosted. Only the cropped remark images are sent there, never the
   note — plus, as worked examples, your latest corrected remarks (*Worked

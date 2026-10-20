@@ -110,7 +110,7 @@ export interface RoundTripSettings {
 	ocrApiKey: string;
 	/** Keep the ink image next to its transcript. */
 	ocrKeepImage: boolean;
-	/** Built-in OCR: also try the WritePad cursive reader when the letter reader is unsure. */
+	/** Built-in OCR: hand joined-up writing and unsure remarks to the WritePad cursive reader. */
 	ocrUseWritePad: boolean;
 	/** Vision endpoint: how many of the owner's corrections go along as worked examples. */
 	ocrExamples: number;

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Built-in reading no longer guesses at joined-up writing:** a joined-up
+  word has no separate letters, so the letter reader matched each whole word
+  as one symbol (`mmmmmmm` for "Ask about the budget and the timeline"). It
+  now recognises joined-up words by their width and reads them only whole, as
+  a word you wrote before; otherwise the remark goes straight to WritePad (or
+  stays an image). Lines of joined-up writing are also cut into their words
+  correctly now, so correcting such a remark teaches its words — before, a
+  whole line counted as one word and taught nothing.
+
 - **Handwriting test sheet (#14):** **Send handwriting test sheet to
   reMarkable** sends 18 short German and English lines to copy by hand.
   **Save handwriting test sheet to the vault** reads them with today's readers,

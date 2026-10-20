@@ -408,9 +408,10 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 			"text. Built-in reads your pen strokes right here, matching them against " +
 			"your handwriting sheet (or print letters without one) and the words in " +
 			"your vault, so German, English and your own vocabulary work; nothing leaves " +
-			"the device. It reads separate print letters well and leaves joined-up " +
-			"writing it is unsure of as image only. A vision endpoint is the " +
-			"alternative for that: an OpenAI-compatible model you choose, local (Ollama, " +
+			"the device. It reads separate print letters; joined-up writing it hands to " +
+			"WritePad (below) unless it is a word you taught it, and what neither can read " +
+			"stays image only. For a joined-up hand a vision endpoint reads best: " +
+			"an OpenAI-compatible model you choose, local (Ollama, " +
 			"LM Studio) or hosted; only the cropped remark images are sent there. " +
 			"First-time endpoint setup (Ollama/LM Studio): see docs/ocr-endpoint-setup.md.",
 		items: [
@@ -462,9 +463,9 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				key: "ocrUseWritePad",
 				name: "Read joined-up writing too",
 				desc:
-					"When built-in is unsure of a remark, also try the cursive reader (WritePad) " +
-					"made for joined-up writing. Turn it off if it produces junk rather than leaving " +
-					"hard-to-read ink as an image.",
+					"Built-in reads print letters only: joined-up writing, and remarks it is unsure of, " +
+					"go to this cursive reader (WritePad). Turn it off if it produces junk rather than " +
+					"leaving hard-to-read ink as an image.",
 				control: { type: "toggle" },
 				visibleWhen: { key: "ocrMode", equals: "builtin" },
 			},

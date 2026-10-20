@@ -1,6 +1,7 @@
 /**
- * Labelled handwriting samples for calibrating the $P letter reader's trust
- * threshold (`OCR_TRUST` in src/ocr/recognize.ts).
+ * Labelled handwriting samples: print the $P letter reader must read with
+ * trust (`OCR_TRUST` in src/ocr/recognize.ts), joined-up writing it must
+ * decline (`JOINED_WIDTH`).
  *
  * Strokes are generated deterministically from the bundled fonts by the
  * `write(text, font, jitter)` helper in recognize.test.ts (seeded on the
@@ -11,14 +12,13 @@
  * `kind` is the ground truth the reader must respect:
  *  - "print"   — separate print letters the reader should read confidently
  *                (confidence must stay ABOVE OCR_TRUST).
- *  - "cursive" — joined-up writing the segmenter mis-cuts into junk; the
- *                reader must fail safe to the image (confidence BELOW
- *                OCR_TRUST) instead of leaking garbage text.
+ *  - "cursive" — joined-up writing letter shapes cannot read; the reader must
+ *                decline it (null) instead of leaking garbage text.
  *
  * The confidences in the comments are the values observed on this code at the
  * time of calibration (vitest, Node 24, jitter 0.5). They are deterministic
  * for a given seed, so they double as a regression baseline: the set's print
- * minimum (~0.83) and cursive maximum (~0.74) are what fix OCR_TRUST ≈ 0.78.
+ * minimum (~0.83) bounds how high OCR_TRUST may go.
  */
 
 export type HandwritingKind = "print" | "cursive";
@@ -30,7 +30,7 @@ export interface HandwritingSample {
 	font: string;
 	/** Jitter passed to the `write` helper. */
 	jitter: number;
-	/** Ground truth: print should read confidently, cursive should fail safe. */
+	/** Ground truth: print should read confidently, cursive should be declined. */
 	kind: HandwritingKind;
 }
 
@@ -51,25 +51,18 @@ export const PRINT_SAMPLES: HandwritingSample[] = [
 ];
 
 /**
- * Cursive: joined-up writing the segmenter mis-cuts. These must read with
- * confidence BELOW OCR_TRUST and must NOT return the correct text — the junk
- * (`"C%% @w mm %mmm"` etc.) is what the old 0.65 threshold leaked. Highest
- * observed is the hershey-script "we should talk soon" case at ~0.74, which is
- * what bounds how low OCR_TRUST may safely go. Note hershey-script leaks
- * markedly higher than allure, so a single allure point (the old test) never
- * exercised the real tail.
+ * Cursive: joined-up writing. Before joined-up words were declined, the
+ * segmenter mis-cut these into junk (`"C%% @w mm %mmm"`) that read at up to
+ * ~0.74 confidence; hershey-script leaked markedly higher than allure.
  */
 export const CURSIVE_SAMPLES: HandwritingSample[] = [
-	{ text: "Check this again tomorrow", font: "hershey-script", jitter: 0.5, kind: "cursive" }, // ~0.669 (the documented leak @0.65)
-	{ text: "Please review the draft", font: "hershey-script", jitter: 0.5, kind: "cursive" }, // ~0.615
-	{ text: "send this to the team", font: "hershey-script", jitter: 0.5, kind: "cursive" }, // ~0.725
-	{ text: "we should talk soon", font: "hershey-script", jitter: 0.5, kind: "cursive" }, // ~0.739 (set max)
-	{ text: "the quick brown fox jumps", font: "allure", jitter: 0.5, kind: "cursive" }, // ~0.527
-	{ text: "meeting is on Monday", font: "allure", jitter: 0.5, kind: "cursive" }, // ~0.200
+	{ text: "Check this again tomorrow", font: "hershey-script", jitter: 0.5, kind: "cursive" },
+	{ text: "Please review the draft", font: "hershey-script", jitter: 0.5, kind: "cursive" },
+	{ text: "send this to the team", font: "hershey-script", jitter: 0.5, kind: "cursive" },
+	{ text: "we should talk soon", font: "hershey-script", jitter: 0.5, kind: "cursive" },
+	{ text: "the quick brown fox jumps", font: "allure", jitter: 0.5, kind: "cursive" },
+	{ text: "meeting is on Monday", font: "allure", jitter: 0.5, kind: "cursive" },
 ];
 
 /** The whole labelled set, both classes. */
 export const HANDWRITING_SAMPLES: HandwritingSample[] = [...PRINT_SAMPLES, ...CURSIVE_SAMPLES];
-
-/** The specific sample that leaked junk above the old OCR_TRUST=0.65 (the red-gate case). */
-export const LEAK_SAMPLE: HandwritingSample = CURSIVE_SAMPLES[0];
