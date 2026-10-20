@@ -54,6 +54,8 @@ function boxProps(box: OverlayBox, left: number, top: number): Record<string, st
 export class RemarkOverlays {
 	/** Strokes records by image path, kept while the image is unchanged. */
 	private readonly inks = new Map<string, { mtime: number; ink: Promise<InkStrokes | null> }>();
+	/** The overlays last worked out per note, with the text they were worked out from. */
+	private readonly notes = new Map<string, { note: string; placed: Promise<Placed[]> }>();
 	/** Rendered reading-view sections that may carry overlays. */
 	private readonly sections = new Set<OverlaySection>();
 	/** The editor extension, filled while overlays are on (registerEditorExtension keeps the array). */
@@ -68,6 +70,7 @@ export class RemarkOverlays {
 
 	/** Follow the setting: the editor extension on or off, every rendered overlay redone. */
 	sync(): void {
+		this.notes.clear();
 		const on = this.host.enabled();
 		if (on !== this.extension.length > 0) {
 			this.extension.length = 0;
@@ -85,12 +88,26 @@ export class RemarkOverlays {
 
 	/** A note changed on disk: redo its sections (a ✓ elsewhere in the note does not re-render them). */
 	changed(file: TFile): void {
-		for (const section of this.sections) if (section.file.path === file.path) section.refresh();
+		if (file.extension !== "md") {
+			// A remark's image drawn again: its ink (and where it sits) may be new.
+			if (!this.inks.has(file.path)) return;
+			this.notes.clear();
+		}
+		for (const section of this.sections) if (file.extension !== "md" || section.file.path === file.path) section.refresh();
 	}
 
 	/** The overlays of a note, as source lines and offsets; [] when off or when it has no remarks. */
-	async placed(file: TFile, note: string): Promise<Placed[]> {
-		if (!this.host.enabled()) return [];
+	placed(file: TFile, note: string): Promise<Placed[]> {
+		if (!this.host.enabled() || !note.includes("^ink-")) return Promise.resolve([]);
+		// Every rendered section asks; the note is worked out once per version.
+		const kept = this.notes.get(file.path);
+		if (kept !== undefined && kept.note === note) return kept.placed;
+		const placed = this.place(file, note);
+		this.notes.set(file.path, { note, placed });
+		return placed;
+	}
+
+	private async place(file: TFile, note: string): Promise<Placed[]> {
 		const remarks = pendingRemarks(note);
 		if (remarks.length === 0) return [];
 		const lines = note.split("\n");
@@ -122,7 +139,7 @@ export class RemarkOverlays {
 		const file = this.app.vault.getFileByPath(ctx.sourcePath);
 		if (file === null) return;
 		const note = await this.app.vault.cachedRead(file);
-		if (pendingRemarks(note).length === 0) return;
+		if ((await this.placed(file, note)).length === 0) return;
 		ctx.addChild(new OverlaySection(el, ctx, file, this));
 	};
 
@@ -321,8 +338,10 @@ class OverlaySection extends MarkdownRenderChild {
 
 	private layout(): void {
 		this.clear();
-		if (this.placed.length === 0 || !this.containerEl.isConnected) return;
 		const el = this.containerEl;
+		if (this.placed.length === 0 || !el.isConnected) return;
+		// A widget in the editor (its layer draws there) or a PDF export: no overlay.
+		if (el.closest(".markdown-source-view, .print") !== null) return;
 		const column = el.getBoundingClientRect();
 		if (column.width <= 0) return;
 		const view = el.closest(".markdown-preview-view") ?? el.parentElement;

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Unconfirmed remarks show on the text:** a remark you have not confirmed
+  yet is also drawn half-transparent over the note, roughly where you wrote it
+  beside the printed line, in reading view and in the editor. Only a picture —
+  the note and its callout are unchanged — and it goes once the remark is
+  confirmed (✓) or inserted as text. **Show unconfirmed remarks on the text**
+  under Handwriting turns it off.
 - **Ticks, strikes and remarks inside quotes and callouts come back into the
   note:** a tick or a stripe on a task in a callout (`> - [ ] task`, also in a
   nested quote) marks it done or cancelled, like a task outside one. A remark

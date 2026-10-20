@@ -206,6 +206,12 @@ Each remark callout has two buttons in its title:
   printed text gets. If the text and the ink can't be matched word by word,
   a remark highlighted almost entirely is marked as a whole; otherwise the
   highlighting is left out and a notice says so.
+- **Faded ink on the text**: until you ✓ Confirm it or Insert it as text, a
+  remark's ink is also drawn half-transparent over the note, roughly where you
+  wrote it beside the printed line — in reading view and in the editor. It is
+  only a picture (the note is unchanged, the text under it stays selectable)
+  and disappears once the remark is confirmed or inserted. Turn it off with
+  **Show unconfirmed remarks on the text** under Handwriting.
 
 The same as commands: **Confirm handwriting reading at cursor**, **Correct
 handwriting reading at cursor**, **Insert handwriting reading as text at
