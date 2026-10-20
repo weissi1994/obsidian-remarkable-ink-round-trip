@@ -67,7 +67,7 @@ import { highlightedText, insertRemarkText } from "./incoming/remarkinsert";
 import { RemarkControls } from "./remarkui";
 import { RemarkOverlays } from "./remarkoverlayui";
 import { resolveLayoutOptions } from "./convert/pdf";
-import { Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
+import { builtinTrusted, Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
 import {
@@ -1772,7 +1772,7 @@ export default class RoundTripPlugin extends Plugin {
 		// How sure each reader was, above its own cut-off: decides whether this
 		// reading may later replace one the note already shows.
 		let scored: { score?: number; by?: ReaderName } = {};
-		if (result !== null && result.confidence >= OCR_TRUST) {
+		if (result !== null && builtinTrusted(result)) {
 			text = result.text;
 			scored = { score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
 		} else if (this.settings.ocrUseWritePad) {
@@ -2206,7 +2206,7 @@ export default class RoundTripPlugin extends Plugin {
 				item.readings.builtin = {
 					text: letters?.text ?? "",
 					confidence: letters?.confidence,
-					accepted: letters !== null && letters.confidence >= OCR_TRUST,
+					accepted: builtinTrusted(letters),
 				};
 				if (writePad !== null) {
 					// read() drops a reading too few of whose words the vault knows;
