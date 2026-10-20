@@ -9,6 +9,7 @@ import {
 	acceptRemark,
 	addSample,
 	corrections,
+	PER_WORD,
 	describeUnlearned,
 	emptyStore,
 	isBetterReading,
@@ -78,10 +79,19 @@ describe("learning from a correction", () => {
 		expect(Object.keys(store.words).sort()).toEqual(["Termin", "morgen", "prüfen"]);
 	});
 
-	it("keeps three samples per word, newest last", () => {
+	it("keeps up to PER_WORD samples; among same-shape samples the newest last", () => {
+		expect(PER_WORD).toBeGreaterThanOrEqual(8);
+		expect(PER_WORD).toBeLessThanOrEqual(12);
 		const store = emptyStore();
-		for (let i = 0; i < 5; i++) addSample(store, "Termin", [[{ x: i, y: i }]]);
-		expect(store.words.Termin.map((s) => s[0][0].x)).toEqual([2, 3, 4]);
+		const total = PER_WORD + 4;
+		// All these samples are the same (degenerate) shape, so they are equally
+		// redundant; the tie is broken by age, so the newest PER_WORD survive in
+		// order — newest-last is preserved for callers that rely on recency.
+		for (let i = 0; i < total; i++) addSample(store, "Termin", [[{ x: i, y: i }]]);
+		expect(store.words.Termin.length).toBe(PER_WORD);
+		expect(store.words.Termin.map((s) => s[0][0].x)).toEqual(
+			Array.from({ length: PER_WORD }, (_, k) => total - PER_WORD + k),
+		);
 	});
 
 	it("reads joined-up words once the owner has corrected them", () => {
@@ -113,6 +123,60 @@ describe("learning from a correction", () => {
 		const reader = new WordReader([builtinFont("hershey-script")], builtinFont("readability"), {});
 		const match = reader.read(joinedUp("morgen", "x"), lexicon);
 		expect(match?.trusted ?? false).toBe(false);
+	});
+});
+
+describe("diversity-preserving sample retention", () => {
+	// Two clearly different ways of writing the same word: the owner's everyday
+	// hand (allure) and an occasional, differently-joined one (hershey-script).
+	const WORD = "Besprechung";
+	const diversityLexicon = Lexicon.fromText(["Bitte prüfen Besprechung tomorrow quick brown die Woche ist voll"]);
+	const everyday = (seed: string) => joinedUp(WORD, seed, "allure");
+	const occasional = (seed: string) => joinedUp(WORD, seed, "hershey-script");
+	// A WordReader over the owner's samples alone — no fonts — so what it reads
+	// depends only on which samples the store kept.
+	const readerOver = (store: ReturnType<typeof emptyStore>) =>
+		new WordReader([], builtinFont("readability"), store.words);
+
+	it("keeps an earlier, distinct style instead of newest-wins near-duplicates", () => {
+		const store = emptyStore();
+		// Oldest: the one cover for the occasional style…
+		addSample(store, WORD, occasional("occ-kept"));
+		// …then more than a capful of near-duplicates of the everyday style, so
+		// a newest-wins policy would push the occasional sample out entirely.
+		for (let i = 0; i < PER_WORD + 5; i++) addSample(store, WORD, everyday(`every-${i}`));
+
+		expect(store.words[WORD].length).toBe(PER_WORD);
+		// A held-out remark in the occasional style: recognised in the owner's
+		// own hand only because that style's sample was kept. Under newest-wins
+		// retention the occasional sample is gone and this read is untrusted.
+		const held = readerOver(store).read(occasional("occ-held"), diversityLexicon);
+		expect(held?.word).toBe(WORD);
+		expect(held?.trusted).toBe(true);
+	});
+
+	it("drops a redundant near-duplicate, not a distinct sample, when over cap", () => {
+		const store = emptyStore();
+		// A full store: one distinct occasional-style sample and a capful minus
+		// one of everyday near-duplicates.
+		addSample(store, WORD, occasional("occ-kept"));
+		for (let i = 0; i < PER_WORD - 1; i++) addSample(store, WORD, everyday(`every-${i}`));
+		expect(store.words[WORD].length).toBe(PER_WORD);
+
+		// Adding yet another everyday near-duplicate pushes the word over cap:
+		// the redundant everyday sample goes, the lone occasional one stays.
+		addSample(store, WORD, everyday("every-extra"));
+		expect(store.words[WORD].length).toBe(PER_WORD);
+		const held = readerOver(store).read(occasional("occ-held"), diversityLexicon);
+		expect(held?.word).toBe(WORD);
+		expect(held?.trusted).toBe(true);
+	});
+
+	it("still ignores an empty word or empty strokes", () => {
+		const store = emptyStore();
+		addSample(store, "", everyday("x"));
+		addSample(store, WORD, []);
+		expect(store.words).toEqual({});
 	});
 });
 
