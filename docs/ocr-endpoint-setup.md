@@ -43,10 +43,9 @@ me* does step 1 and step 3 below for you:
 - it sets *Reading handwriting* to the endpoint, the endpoint to
   `http://localhost:11434/v1` and the model, then runs *Test connection*.
 
-It does not set `OLLAMA_ORIGINS` — if *Test connection* then reports that the
-endpoint refused the request's origin, do step 2 and press *Test connection*
-again. The manual steps below remain the fallback, and the way to use another
-server, a remote machine, LM Studio or a hosted API.
+No origin or CORS setting is needed. The manual steps below remain the
+fallback, and the way to use another server, a remote machine, LM Studio or a
+hosted API.
 
 ## Ollama, step by step
 
@@ -57,41 +56,41 @@ server, a remote machine, LM Studio or a hosted API.
    ollama pull qwen2.5vl:7b
    ```
 
-2. **The one gotcha — origin/CORS.** A local Ollama rejects requests whose
-   `Origin` header is Obsidian's `app://obsidian.md` unless you allow it. The
-   request fails silently from the plugin's side, so this is the first thing to
-   get right. Set `OLLAMA_ORIGINS` in Ollama's environment and restart Ollama:
+2. **No origin setting needed.** The plugin's requests carry no `Origin`
+   header, and Ollama 0.1.42 and later accept Obsidian's `app://` origin by
+   default, so there is nothing to set. If *Test connection* reports that the
+   endpoint refused the request, update Ollama first.
 
-   - `OLLAMA_ORIGINS=app://obsidian.md` allows just Obsidian.
-   - `OLLAMA_ORIGINS=*` allows any origin (simpler, less strict).
-
-   Set it where Ollama can see it, then restart the server:
-
-   - **macOS** (Ollama runs as a launch agent):
-
-     ```
-     launchctl setenv OLLAMA_ORIGINS "app://obsidian.md"
-     ```
-
-     Then quit and reopen the Ollama app so it picks up the value.
-
-   - **Linux** (systemd service):
-
-     ```
-     systemctl edit ollama.service
-     ```
-
-     Add, under `[Service]`:
-
-     ```
-     Environment="OLLAMA_ORIGINS=app://obsidian.md"
-     ```
-
-     Then `systemctl daemon-reload && systemctl restart ollama`.
-
-   - **Windows:** set `OLLAMA_ORIGINS` through *Edit the system environment
-     variables* (Start → search for it → *Environment Variables…*), add it as a
-     new user or system variable, then quit and restart Ollama.
+   > **Only if you run an Ollama older than 0.1.42 and cannot update it:** set
+   > `OLLAMA_ORIGINS` in Ollama's environment and restart Ollama.
+   > `OLLAMA_ORIGINS=app://obsidian.md` allows just Obsidian;
+   > `OLLAMA_ORIGINS=*` allows any origin (simpler, less strict).
+   >
+   > - **macOS** (Ollama runs as a launch agent):
+   >
+   >   ```
+   >   launchctl setenv OLLAMA_ORIGINS "app://obsidian.md"
+   >   ```
+   >
+   >   Then quit and reopen the Ollama app so it picks up the value.
+   >
+   > - **Linux** (systemd service):
+   >
+   >   ```
+   >   systemctl edit ollama.service
+   >   ```
+   >
+   >   Add, under `[Service]`:
+   >
+   >   ```
+   >   Environment="OLLAMA_ORIGINS=app://obsidian.md"
+   >   ```
+   >
+   >   Then `systemctl daemon-reload && systemctl restart ollama`.
+   >
+   > - **Windows:** set `OLLAMA_ORIGINS` through *Edit the system environment
+   >   variables* (Start → search for it → *Environment Variables…*), add it as
+   >   a new user or system variable, then quit and restart Ollama.
 
    You only need `OLLAMA_HOST` if the server must listen on a non-default
    address — for example Ollama running on another machine on your LAN. For a
@@ -127,14 +126,14 @@ server, a remote machine, LM Studio or a hosted API.
 3. In the plugin, set the endpoint to that address, the model to the id LM
    Studio shows for the loaded model, and leave the API key empty.
 
-LM Studio does not need an origin allowlist the way Ollama does — there is no
-`OLLAMA_ORIGINS` equivalent to set.
+Neither LM Studio nor a current Ollama needs an origin allowlist for the
+plugin — there is nothing to set.
 
 ## Troubleshooting
 
 | Symptom | Likely cause → fix |
 |---|---|
 | Connection refused | Server not running, or wrong port. Start Ollama / LM Studio and check the endpoint host and port match the running server. |
-| 403 / forbidden | Origin not allowed. Set `OLLAMA_ORIGINS=app://obsidian.md` (or `*`) and restart Ollama — see *The one gotcha* above. |
+| 403 / forbidden | Ollama older than 0.1.42 → update it (or set `OLLAMA_ORIGINS` as in step 2's note). With an API key set → the key was refused. Otherwise a proxy or the server's own access rules refused the request. |
 | 404 on `/v1/chat/completions` | The endpoint is missing the `/v1` suffix, or it is not an OpenAI-compatible route. Use `http://localhost:11434/v1` (Ollama) or `http://localhost:1234/v1` (LM Studio). |
 | Model not found | The model is not pulled, or the tag is wrong. Run `ollama pull qwen2.5vl:7b` and confirm the Model field matches the tag exactly. |

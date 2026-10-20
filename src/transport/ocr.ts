@@ -193,12 +193,15 @@ function mapStatus(response: HttpResponse, config: OcrConfig, route: string): Tr
 	if (status >= 200 && status < 300) return null;
 	const snippet = bodySnippet(response.text);
 	const raw = `(HTTP ${status}${snippet === "" ? "" : `: ${snippet}`})`;
-	// A local server (no API key) answering 403 is almost always the Ollama
-	// origin/CORS allowlist, not a bad key.
+	// A local server (no API key) answering 403 is not a bad key. Our requests
+	// carry no Origin header and Ollama 0.1.42+ allows app:// anyway, so it is
+	// an older Ollama's origin allowlist, or a proxy in front of the server.
 	if (status === 403 && !hasApiKey(config)) {
 		return new TransportError(
-			`The endpoint refused the request's origin (app://obsidian.md). For Ollama, set ` +
-				`OLLAMA_ORIGINS=app://obsidian.md (or *) and restart it. See docs/ocr-endpoint-setup.md. ${raw}`,
+			`The local endpoint refused the request. Ollama 0.1.42 and later accept the plugin's ` +
+				`requests as they are, so update Ollama. On an older Ollama, set ` +
+				`OLLAMA_ORIGINS=app://obsidian.md (or *) and restart it. ` +
+				`See docs/ocr-endpoint-setup.md → Troubleshooting. ${raw}`,
 			status,
 		);
 	}
