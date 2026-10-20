@@ -427,8 +427,23 @@ function segment(word: Group[], line: { baseline: number; cap: number }, templat
 	return best[word.length].letters;
 }
 
-/** Below this the image alone is the safer answer. */
-export const OCR_TRUST = 0.65;
+/**
+ * Below this the image alone is the safer answer.
+ *
+ * Calibrated against the labelled fixture set in
+ * src/__tests__/fixtures/handwriting.ts (deterministic renders of print vs
+ * cursive bundled fonts, jitter 0.5). The two classes separate with a clean
+ * gap: legitimate print reads at 0.83–0.98 (minimum: hershey-sans "update the
+ * spreadsheet now" ≈ 0.831), while mis-segmented cursive tops out at ≈ 0.739
+ * (hershey-script "we should talk soon"). 0.78 sits in that gap with headroom
+ * on both sides (~0.05 below the print floor, ~0.04 above the cursive ceiling).
+ *
+ * The old value of 0.65 leaked: hershey-script "Check this again tomorrow"
+ * scored 0.669 and returned junk ("C%% @w mm %mmm"). A per-letter-cost ceiling
+ * would NOT have caught that case (its per-letter cost is low, ≈0.20, because
+ * symbol glyphs match cheaply), so the threshold is the right guard here.
+ */
+export const OCR_TRUST = 0.78;
 
 export interface Recognition {
 	text: string;

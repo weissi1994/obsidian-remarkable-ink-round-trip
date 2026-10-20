@@ -3,6 +3,7 @@ import { parseBlocks } from "../convert/mdblocks";
 import { builtinFont, HandFont } from "../ink/glyphs";
 import { DEVICE_PROFILES, INK_PENS, renderInk } from "../ink/inkrender";
 import { Lexicon, OCR_TRUST, recognize, templatesFrom } from "../ocr/recognize";
+import { CURSIVE_SAMPLES, LEAK_SAMPLE, PRINT_SAMPLES } from "./fixtures/handwriting";
 
 /** A sentence "handwritten" in a bundled font, as device strokes. */
 function write(text: string, font: string, jitter: number) {
@@ -60,6 +61,34 @@ describe("built-in handwriting recognition", () => {
 		const result = recognize(write("Check this again tomorrow", "allure", 0.5), templates("readability", "hershey-sans"));
 		expect(result!.confidence).toBeLessThan(OCR_TRUST);
 	});
+
+	// Red gate for the hershey-script leak (#4, work item 2). On OCR_TRUST=0.65
+	// this exact case read "C%% @w mm %mmm" at confidence 0.669 — junk that
+	// cleared the old threshold. The reader must now fail safe to the image:
+	// confidence below OCR_TRUST, and never the correct text.
+	it("fails safe on the cursive case that leaked junk above the old threshold", () => {
+		const t = templates("readability", "hershey-sans");
+		const result = recognize(write(LEAK_SAMPLE.text, LEAK_SAMPLE.font, LEAK_SAMPLE.jitter), t)!;
+		expect(result.confidence).toBeLessThan(OCR_TRUST);
+		expect(result.text).not.toBe(LEAK_SAMPLE.text);
+	});
+
+	// Calibration against the whole labelled set, not a single point: every
+	// print sample must stay trusted (above OCR_TRUST) and every cursive sample
+	// must fall through (below OCR_TRUST, and not the correct text). This is
+	// what fixes OCR_TRUST in the measured gap between the two classes.
+	it("separates print from cursive across the labelled fixture set", () => {
+		const t = templates("readability", "hershey-sans");
+		for (const sample of PRINT_SAMPLES) {
+			const result = recognize(write(sample.text, sample.font, sample.jitter), t)!;
+			expect(result.confidence, `print "${sample.text}" (${sample.font})`).toBeGreaterThan(OCR_TRUST);
+		}
+		for (const sample of CURSIVE_SAMPLES) {
+			const result = recognize(write(sample.text, sample.font, sample.jitter), t)!;
+			expect(result.confidence, `cursive "${sample.text}" (${sample.font})`).toBeLessThan(OCR_TRUST);
+			expect(result.text, `cursive "${sample.text}" (${sample.font})`).not.toBe(sample.text);
+		}
+	}, 20000); // renders + recognises the whole set — well over the 5s default
 
 	it("keeps lines apart", () => {
 		const one = write("first line", "readability", 0.3);
