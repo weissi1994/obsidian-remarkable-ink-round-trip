@@ -8,9 +8,14 @@
  *   words with the remark's ink words;
  * - from the word sheet, where each box is one word written joined-up.
  *
- * Each word keeps up to three samples, newest last. The whole-word reader
- * (words.ts) checks them before anything else, so a word the owner wrote
- * once is recognised in their own hand from then on.
+ * Each word keeps up to PER_WORD samples, newest last. When a word is over
+ * that cap the most *redundant* sample is dropped — the one closest in shape
+ * to another kept sample — rather than the oldest, so the kept set spans the
+ * owner's variation (slant, join, a differently-formed letter) instead of
+ * collapsing onto whichever way they happened to write it most recently. The
+ * whole-word reader (words.ts) checks these samples before anything else, so a
+ * word the owner wrote once is recognised in their own hand from then on, and
+ * the more of their *range* the store keeps, the more remarks it recalls.
  *
  * The text the note has for a remark is the owner's from the moment they
  * change it: a later reading of the same ink never replaces it, here or in
@@ -21,12 +26,21 @@
 
 import type { ImportedMark } from "../incoming/pull";
 import { findRemark, remarkText, type RemarkRef } from "../incoming/remarkid";
-import { splitLineInto, splitWords, type Point } from "./recognize";
+import { cloudOf, matchDistance, splitLineInto, splitWords, type Point } from "./recognize";
 
 export { remarkText };
 
-/** Samples kept per word; the oldest goes first. */
-const PER_WORD = 3;
+/**
+ * Samples kept per word; over this the most redundant goes first (see
+ * `addSample`). Raised from 3: the #5 spike showed accumulated samples help
+ * recall, and read-time work stays in budget because the scaling MR (!15)
+ * bounds how many samples the reader actually scores per word — the two are
+ * complementary (!15 caps the read, this grows the store without keeping
+ * junk). 10 sits mid-range of the 8–12 the budget allows. The format is
+ * unchanged (`words: Record<string, Point[][][]>`), so a store written with
+ * the old cap of 3 stays valid and needs no migration.
+ */
+export const PER_WORD = 10;
 /** Remarks remembered for learning that were never corrected, newest kept. */
 const REMARKS_KEPT = 500;
 /** Corrected or confirmed remarks kept (worked examples, training export), newest kept. */
@@ -118,7 +132,40 @@ const round = (strokes: Point[][]) =>
 
 export function addSample(store: SampleStore, word: string, strokes: Point[][]): void {
 	if (word === "" || strokes.length === 0) return;
-	store.words[word] = [...(store.words[word] ?? []), round(strokes)].slice(-PER_WORD);
+	const kept = [...(store.words[word] ?? []), round(strokes)];
+	store.words[word] = kept.length <= PER_WORD ? kept : keepDiverse(kept);
+}
+
+/**
+ * Cut a word's samples down to PER_WORD by dropping the most redundant one at
+ * a time — the sample whose closest neighbour (by the cheap $P cloud distance)
+ * is nearest, i.e. the one another kept sample already covers. The kept set
+ * then spans the owner's variation rather than collapsing onto the newest way
+ * of writing the word. Survivors stay in their original (newest-last) order,
+ * and a tie — a pair of near-duplicates equally close to each other — drops
+ * the *older* one, so recency still breaks even cases.
+ */
+function keepDiverse(samples: Point[][][]): Point[][][] {
+	const clouds = samples.map((strokes) => cloudOf(strokes));
+	const between = clouds.map((a) => clouds.map((b) => matchDistance(a, b)));
+	const live = samples.map((_, i) => i); // indices still kept, oldest-first
+	while (live.length > PER_WORD) {
+		let dropAt = 0;
+		let mostRedundant = Infinity;
+		for (let a = 0; a < live.length; a++) {
+			let nearest = Infinity;
+			for (let b = 0; b < live.length; b++) {
+				if (a !== b) nearest = Math.min(nearest, between[live[a]][live[b]]);
+			}
+			// Strictly-less keeps the first (oldest) of a tie as the one to drop.
+			if (nearest < mostRedundant) {
+				mostRedundant = nearest;
+				dropAt = a;
+			}
+		}
+		live.splice(dropAt, 1);
+	}
+	return live.map((i) => samples[i]);
 }
 
 /** Where a remark is found in its note: keys from before ids are image paths. */
