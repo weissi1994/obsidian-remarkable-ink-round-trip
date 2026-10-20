@@ -84,7 +84,8 @@ import {
 	withEarlierReadings,
 } from "./ocr/samples";
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
-import type { OcrExample } from "./transport/ocr";
+import type { OcrExample, OcrConnection } from "./transport/ocr";
+import { checkConnection } from "./transport/ocr";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -1923,6 +1924,21 @@ export default class RoundTripPlugin extends Plugin {
 	 * owner's latest corrections as worked examples. A remark read before
 	 * keeps the note's text, the owner's once corrected.
 	 */
+	/**
+	 * Test connection: ping the chosen vision endpoint, confirm it serves the
+	 * configured model, and send a tiny probe image — surfacing the exact
+	 * misconfiguration that the silent import-time fallback would hide. Throws a
+	 * TransportError with an actionable message; the settings action reports it.
+	 */
+	testOcrConnection(): Promise<OcrConnection> {
+		const s = this.settings;
+		return checkConnection(obsidianHttp, {
+			endpoint: s.ocrEndpoint,
+			model: s.ocrModel,
+			apiKey: s.ocrApiKey,
+		});
+	}
+
 	private async transcribeStrokes(
 		request: StrokeRenderRequest & { quote?: string },
 	): Promise<string | null> {
