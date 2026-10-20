@@ -106,8 +106,12 @@ export interface RoundTripSettings {
 	ocrApiKey: string;
 	/** Keep the ink image next to its transcript. */
 	ocrKeepImage: boolean;
+	/** Built-in OCR: also try the WritePad cursive reader when the letter reader is unsure. */
+	ocrUseWritePad: boolean;
 	/** Vision endpoint: how many of the owner's corrections go along as worked examples. */
 	ocrExamples: number;
+	/** Show which reader produced each remark and how confident it was, in the import report. */
+	ocrDiagnostics: boolean;
 	/** docId ↔ device document mapping (round-trip foundation, F5). */
 	mappings: MappingTable;
 }
@@ -161,7 +165,9 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	ocrModel: "qwen2.5vl:7b",
 	ocrApiKey: "",
 	ocrKeepImage: true,
+	ocrUseWritePad: true,
 	ocrExamples: 3,
+	ocrDiagnostics: false,
 	mappings: {},
 };
 

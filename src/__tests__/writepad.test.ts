@@ -6,7 +6,7 @@ import { Lexicon, recognize, templatesFrom } from "../ocr/recognize";
 import { choose, WritePad } from "../ocr/writepad";
 
 /** A text "handwritten" in a bundled font, as device strokes. */
-function write(text: string, font: string) {
+function write(text: string, font: string, jitter = 0.5) {
 	const source = builtinFont(font);
 	const face = new HandFont(source, source);
 	const fonts = { body: face, bold: face, italic: face, mono: face };
@@ -14,7 +14,7 @@ function write(text: string, font: string) {
 		profile: DEVICE_PROFILES.rm2,
 		fonts,
 		pen: INK_PENS.medium,
-		jitter: 0.5,
+		jitter,
 		seed: text,
 	});
 	const ids = new Set(r.layout.lines.filter((l) => l.role !== "title").flatMap((l) => l.words.map((w) => w.id)));
@@ -60,6 +60,27 @@ describe("WritePad", () => {
 
 	it("has nothing to say about no strokes", () => {
 		expect(engine.read([])).toBeNull();
+	});
+
+	// WritePad's confidence does not rank reads by correctness: this junk read
+	// scores 0.72 (above WRITEPAD_TRUST=0.7), so a threshold alone would accept
+	// it. Only 3 of its 5 words are vault-known, so the quality gate rejects it.
+	it("rejects a high-scoring read that is mostly junk words", () => {
+		const strokes = write("the quick brown fox jumps", "allure", 0.5);
+		const lexicon = Lexicon.fromText(["the quick brown fox jumps"]);
+		// Reads as "the quick brown po,frjunql5" at confidence 0.72 on today's code.
+		expect(engine.read(strokes, lexicon)).toBeNull();
+	});
+
+	// The mirror image: a read whose words the vault all knows must survive the
+	// gate — otherwise it would be silently rejecting everything.
+	it("keeps a read whose words the vault knows", () => {
+		const sentence = "meeting is on Monday";
+		const strokes = write(sentence, "allure", 0.5);
+		const lexicon = Lexicon.fromText([sentence]);
+		const result = engine.read(strokes, lexicon);
+		expect(result).not.toBeNull();
+		expect(cer(result!.text, sentence)).toBeLessThan(0.2);
 	});
 });
 

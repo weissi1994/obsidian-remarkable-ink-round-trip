@@ -84,7 +84,8 @@ import {
 	withEarlierReadings,
 } from "./ocr/samples";
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
-import type { OcrExample } from "./transport/ocr";
+import type { OcrExample, OcrConnection } from "./transport/ocr";
+import { checkConnection } from "./transport/ocr";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -796,12 +797,13 @@ export default class RoundTripPlugin extends Plugin {
 					wholePage: true,
 				};
 				const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
-				const text =
+				const read =
 					this.settings.ocrMode === "builtin"
 						? await this.recognizeLocally(request)
 						: this.settings.ocrMode === "endpoint"
 							? await this.transcribeStrokes(request).catch(() => null)
 							: null;
+				const text = read?.text ?? null;
 				written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
 			}
 			const docId = generateDocId();
@@ -1358,6 +1360,7 @@ export default class RoundTripPlugin extends Plugin {
 					startedAt,
 					pluginVersion: this.manifest.version,
 					handwritingEnabled: this.settings.importHandwriting,
+					ocrDiagnostics: this.settings.ocrDiagnostics,
 				})}\n\n--- details ---\n${log.join("\n")}`;
 				await this.deliverReport(report, !quiet);
 			}
@@ -1685,13 +1688,15 @@ export default class RoundTripPlugin extends Plugin {
 	 * Read one remark on this device, from its strokes (ocr/recognize.ts).
 	 * Unsure readings come back null: the image is the better answer then.
 	 */
-	private async recognizeLocally(request: StrokeRenderRequest & { quote?: string }): Promise<string | null> {
+	private async recognizeLocally(
+		request: StrokeRenderRequest & { quote?: string },
+	): Promise<{ text: string; by?: ReaderName; score?: number } | null> {
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
 		// Read before: the note's text for it — the owner's, once corrected — stands.
 		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
 		if (known !== null) {
 			await this.rememberReading(request, known, {});
-			return known;
+			return { text: known };
 		}
 		const lexicon = await this.vaultLexicon();
 		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
@@ -1702,7 +1707,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (result !== null && result.confidence >= OCR_TRUST) {
 			text = result.text;
 			scored = { score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
-		} else {
+		} else if (this.settings.ocrUseWritePad) {
 			// Joined-up writing, most likely: WritePad was made for it.
 			const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
 			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) {
@@ -1711,7 +1716,7 @@ export default class RoundTripPlugin extends Plugin {
 			}
 		}
 		await this.rememberReading(request, text, scored);
-		return text;
+		return text === null ? null : { text, ...scored };
 	}
 
 	/**
@@ -1923,13 +1928,28 @@ export default class RoundTripPlugin extends Plugin {
 	 * owner's latest corrections as worked examples. A remark read before
 	 * keeps the note's text, the owner's once corrected.
 	 */
+	/**
+	 * Test connection: ping the chosen vision endpoint, confirm it serves the
+	 * configured model, and send a tiny probe image — surfacing the exact
+	 * misconfiguration that the silent import-time fallback would hide. Throws a
+	 * TransportError with an actionable message; the settings action reports it.
+	 */
+	testOcrConnection(): Promise<OcrConnection> {
+		const s = this.settings;
+		return checkConnection(obsidianHttp, {
+			endpoint: s.ocrEndpoint,
+			model: s.ocrModel,
+			apiKey: s.ocrApiKey,
+		});
+	}
+
 	private async transcribeStrokes(
 		request: StrokeRenderRequest & { quote?: string },
-	): Promise<string | null> {
+	): Promise<{ text: string; by?: ReaderName; score?: number } | null> {
 		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
 		if (known !== null) {
 			await this.rememberReading(request, known, {});
-			return known;
+			return { text: known };
 		}
 		const png = await this.strokesToPng(request.strokes);
 		if (png === null) return null;
@@ -1937,7 +1957,7 @@ export default class RoundTripPlugin extends Plugin {
 		// No confidence from a chat endpoint: its readings fill empty callouts
 		// but never replace text the note already shows.
 		await this.rememberReading(request, text, { by: "endpoint" });
-		return text;
+		return text === null ? null : { text, by: "endpoint" };
 	}
 
 	/** Worked examples, rendered once per run: the latest corrections, oldest first. */
