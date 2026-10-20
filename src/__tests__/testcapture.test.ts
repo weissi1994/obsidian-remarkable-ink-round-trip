@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
 import { builtinFont, HandFont } from "../ink/glyphs";
@@ -17,6 +18,7 @@ import { OCR_TRUST, Point, recognize } from "../ocr/recognize";
 import type { ReaderName } from "../ocr/samples";
 import {
 	CAPTURE_FORMAT,
+	captureError,
 	captureItems,
 	captureMarkdown,
 	captureStamp,
@@ -255,6 +257,83 @@ describe("handwriting test capture", () => {
 		const note = captureMarkdown(capture, new Map());
 		expect(note).toContain("Frage: ja \\| nein? (siehe \\#14)");
 		expect(note).toContain("a b \\[\\[x\\]\\]");
+	});
+
+	it("keeps read times, the endpoint's model and errors through JSON and in the note", () => {
+		const { capture } = syntheticCapture();
+		capture.items = capture.items.slice(0, 3);
+		capture.endpoint = { model: "qwen2.5vl:7b" };
+		capture.items[0].readings = {
+			builtin: { text: capture.items[0].prompt, accepted: true, confidence: 0.9, ms: 40 },
+			writepad: { text: "x", accepted: false, confidence: 0.3, ms: 100 },
+			endpoint: { text: capture.items[0].prompt, accepted: true, ms: 2000 },
+		};
+		capture.items[1].readings = {
+			builtin: { text: "y", accepted: false, confidence: 0.1, ms: 60 },
+			writepad: { text: capture.items[1].prompt, accepted: true, confidence: 0.8, ms: 300 },
+			endpoint: null,
+		};
+		capture.items[1].errors = { endpoint: "The endpoint timed out | after 60 s" };
+		// NO_TEXT is an answer, not a failure.
+		capture.items[2].readings = { endpoint: { text: "", accepted: false, ms: 1000 } };
+
+		const parsed = parseCapture(JSON.stringify(capture));
+		expect(parsed).toEqual(capture);
+		expect(parsed.endpoint).toEqual({ model: "qwen2.5vl:7b" });
+		expect(parsed.items[0].readings.endpoint?.ms).toBe(2000);
+		expect(parsed.items[1].errors?.endpoint).toBe("The endpoint timed out | after 60 s");
+
+		const summary = summarize(parsed);
+		expect(summary.map((s) => s.meanMs)).toEqual([50, 200, 1500]);
+		expect(summary[2]).toMatchObject({ items: 2, failed: 1 });
+
+		const note = captureMarkdown(parsed, new Map());
+		expect(note).toContain("| Reader | Lines read | Mean CER | Mean time | Used | Failed |");
+		expect(note).toContain("| Built-in | 2 | ");
+		expect(note).toMatch(/\| Built-in \| 2 \| [^|]+ \| 50 ms \| 1 \| 0 \|/);
+		expect(note).toMatch(/\| Endpoint \| 2 \| [^|]+ \| 1\.5 s \| 1 \| 1 \|/);
+		expect(note).toContain("Endpoint model: qwen2.5vl:7b");
+		expect(note).toContain("*failed*");
+		// The message once, below the readings, escaped.
+		expect(note.split("The endpoint timed out").length).toBe(2);
+		expect(note.indexOf("The endpoint timed out")).toBeGreaterThan(note.indexOf("## Readings"));
+		expect(note.indexOf("The endpoint timed out")).toBeLessThan(note.indexOf("## Ink"));
+		expect(note).toContain("p1-02");
+		expect(note).toContain("The endpoint timed out \\| after 60 s");
+		// Never the endpoint's address.
+		expect(JSON.stringify(parsed)).not.toMatch(/https?:|localhost|11434/);
+	});
+
+	it("still reads a capture saved before times, models and errors were kept", () => {
+		const dir = join(__dirname, "..", "..", "handwriting-samples", "test-sheets", "2026-10-21-004942");
+		const capture = parseCapture(readFileSync(join(dir, "handwriting-test-2026-10-21-004942.json"), "utf8"));
+		expect(capture.endpoint).toBeUndefined();
+		expect(capture.items).toHaveLength(18);
+		expect(capture.items.every((item) => item.errors === undefined)).toBe(true);
+		const summary = summarize(capture);
+		expect(summary.map((s) => s.reader)).toEqual(["builtin", "writepad", "endpoint"]);
+		for (const s of summary) expect(Number.isNaN(s.meanMs)).toBe(true);
+		const note = captureMarkdown(capture, new Map());
+		const rows = note.split("\n").filter((line) => /^\| (Built-in|WritePad|Endpoint) \| \d/.test(line));
+		expect(rows).toHaveLength(3);
+		for (const row of rows) expect(row.split(" | ")[3]).toBe("—");
+		expect(note).not.toContain("Endpoint model:");
+	});
+
+	it("keeps no endpoint address, host or key in an error", () => {
+		const secrets = ["http://192.168.1.20:11434/v1", "sk-secret"];
+		expect(
+			captureError(
+				"Could not reach the OCR endpoint at http://192.168.1.20:11434/v1 — is the server running? (connect ECONNREFUSED 192.168.1.20:11434)",
+				secrets,
+			),
+		).toBe("Could not reach the OCR endpoint at [endpoint] — is the server running? (connect ECONNREFUSED [endpoint])");
+		expect(captureError("getaddrinfo ENOTFOUND 192.168.1.20 sk-secret", secrets)).toBe("getaddrinfo ENOTFOUND [endpoint] [endpoint]");
+		expect(captureError("redirected to https://other.example/x", secrets)).toBe("redirected to [endpoint]");
+		// The model's name and the rest of the message stay.
+		expect(captureError('The OCR endpoint has no /chat/completions route, or the model "qwen2.5vl:7b" is unknown.', ["", ""])).toBe(
+			'The OCR endpoint has no /chat/completions route, or the model "qwen2.5vl:7b" is unknown.',
+		);
 	});
 
 	it("stamps folders by local time", () => {
