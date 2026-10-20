@@ -1,12 +1,12 @@
 import { createHash } from "crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { createRequire } from "module";
 import type { AddressInfo } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { nodeDownload, type DownloadProgress } from "../transport/nodedownload";
+import { nodeDownload, nodePrepareDir, type DownloadProgress } from "../transport/nodedownload";
 
 /** Node's own require, standing in for Obsidian desktop's `window.require`. */
 const load = createRequire(import.meta.url);
@@ -232,5 +232,17 @@ describe("nodeDownload (the desktop installer download)", () => {
 		await new Promise<void>((done) => stopped.close(() => done()));
 		await expect(nodeDownload(load)(`${base}/file`, join(dir, "x"), EXPECT, () => {})).rejects.toThrow();
 		expect(readdirSync(dir)).toEqual([]);
+	});
+});
+
+describe("nodePrepareDir (the installer download folder)", () => {
+	it("creates the folder, clears stale .part files, and keeps finished installers", async () => {
+		const target = join(dir, "remarkable-ink-ollama");
+		await nodePrepareDir(load)(target);
+		expect(readdirSync(target)).toEqual([]);
+		writeFileSync(join(target, "Ollama.dmg"), "done");
+		writeFileSync(join(target, "OllamaSetup.exe.part"), "half");
+		await nodePrepareDir(load)(target);
+		expect(readdirSync(target)).toEqual(["Ollama.dmg"]);
 	});
 });
