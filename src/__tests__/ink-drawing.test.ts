@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { parseBlocks } from "../convert/mdblocks";
+import { type Block, parseBlocks } from "../convert/mdblocks";
 import { builtinFont, HandFont } from "../ink/glyphs";
 import { inkOptionsFor } from "../ink/inkfonts";
 import {
@@ -14,7 +14,7 @@ import {
 	rectPoints,
 } from "../ink/inkdrawing";
 import { mermaidBlocks, withInkTheme } from "../ink/mermaidtheme";
-import { DEVICE_PROFILES, inkPagesToRm, renderInk } from "../ink/inkrender";
+import { DEVICE_PROFILES, inkPagesToRm, renderInk, withImageBlocks } from "../ink/inkrender";
 import { PEN_COLOR } from "../ink/rmwrite";
 import type { InkSnapshot } from "../id/mapping";
 import { diffInkPage } from "../incoming/inkdiff";
@@ -82,6 +82,52 @@ describe("Mermaid sources", () => {
 		expect(found).toEqual([SOURCES.flowchart]);
 		const code = parseBlocks(md).filter((b) => b.type === "code");
 		expect(code[0].type === "code" && diagramKey(code[0].lines.join("\n"))).toBe(diagramKey(found[0]));
+	});
+
+	// Every code block the nested-quote parse finds, at any quote depth.
+	const nestedCode = (blocks: Block[]): string[] =>
+		blocks.flatMap((b) =>
+			b.type === "code" ? [b.lines.join("\n")] : b.type === "quote" ? nestedCode(b.blocks ?? []) : [],
+		);
+	const quoted = (prefix: string, source: string) =>
+		source
+			.split("\n")
+			.map((line) => `${prefix}${line}`)
+			.join("\n");
+
+	it("finds a diagram inside a callout as the nested-quote parse sees it", () => {
+		const md = `> **Note**\n> \`\`\`mermaid\n${quoted("> ", SOURCES.flowchart)}\n> \`\`\``;
+		const found = mermaidBlocks(md);
+		expect(found).toEqual([SOURCES.flowchart]);
+		expect(nestedCode(parseBlocks(md, { nestedQuotes: true })).map(diagramKey)).toEqual([diagramKey(found[0])]);
+	});
+
+	it("finds a diagram in a quote inside a quote, keeping its indentation", () => {
+		const source = `${SOURCES.flowchart}\n  a --> b`;
+		const md = `> outer\n> > \`\`\`mermaid\n${quoted("> > ", SOURCES.flowchart)}\n> >   a --> b\n> > \`\`\`\n> after`;
+		const found = mermaidBlocks(md);
+		expect(found).toEqual([source]);
+		expect(found[0].endsWith("\n  a --> b")).toBe(true);
+		expect(nestedCode(parseBlocks(md, { nestedQuotes: true })).map(diagramKey)).toEqual([diagramKey(source)]);
+	});
+
+	it("ends an unclosed quoted diagram with its quote, and still finds the next", () => {
+		const md = `> \`\`\`mermaid\n> flowchart LR\n>   a --> b\n\nPlain text\n\n\`\`\`mermaid\n${SOURCES.pie}\n\`\`\``;
+		const found = mermaidBlocks(md);
+		expect(found).toEqual(["flowchart LR\n  a --> b", SOURCES.pie]);
+		expect(nestedCode(parseBlocks(md, { nestedQuotes: true })).map(diagramKey)).toEqual(found.map(diagramKey));
+	});
+
+	it("swaps a quoted diagram for its drawing", () => {
+		const md = `> **Note**\n> \`\`\`mermaid\n${quoted("> ", SOURCES.flowchart)}\n> \`\`\``;
+		const [source] = mermaidBlocks(md);
+		const blocks = withImageBlocks(parseBlocks(md, { nestedQuotes: true }), undefined, {
+			[diagramKey(source)]: FLOWCHART,
+		});
+		const quote = blocks.find((b) => b.type === "quote");
+		const inner = quote?.type === "quote" ? (quote.blocks ?? []) : [];
+		expect(inner.some((b) => b.type === "inkimage")).toBe(true);
+		expect(inner.some((b) => b.type === "code")).toBe(false);
 	});
 
 	it("puts the pen theme first, but after a front matter block", () => {
