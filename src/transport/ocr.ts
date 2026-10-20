@@ -266,11 +266,12 @@ export async function listModels(http: HttpClient, config: OcrConfig): Promise<s
 }
 
 /**
- * A 1×1 PNG, sent through the real transcribe path so Test connection exercises
- * the same request the import does — auth, route, body shape and all.
+ * A blank 64×64 PNG, sent through the real transcribe path so Test connection
+ * exercises the same request the import does — auth, route, body shape and
+ * all. Big enough for a vision model's patch grid (Qwen2.5-VL reads 28 px).
  */
 const PROBE_PNG_BASE64 =
-	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAAAAACPAi4CAAAAKUlEQVR42u3MQREAAAwCIPuX1hD77SAA6VEEAoFAIBAIBAKBQCAQfA8Gpwvw4qrwDDIAAAAASUVORK5CYII=";
 
 function pngFromBase64(b64: string): ArrayBuffer {
 	const binary = atob(b64);

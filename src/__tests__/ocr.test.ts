@@ -1,3 +1,4 @@
+import { crc32, inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import type { HttpClient, HttpRequest } from "../transport/http";
 import { checkConnection, listModels, transcribe } from "../transport/ocr";
@@ -106,6 +107,38 @@ describe("checkConnection", () => {
 			"http://localhost:11434/v1/models",
 			"http://localhost:11434/v1/chat/completions",
 		]);
+	});
+
+	it("probes with a well-formed PNG a vision model can read", async () => {
+		// A corrupt probe made Ollama answer 400 to Test connection while
+		// imports, sending real renders, read fine.
+		const { http, seen } = router({
+			"/models": { status: 200, text: modelsBody("qwen2.5vl:7b") },
+			"/chat/completions": { status: 200, text: answer("NO_TEXT") },
+		});
+		await checkConnection(http, { endpoint: "http://localhost:11434/v1", model: "qwen2.5vl:7b" });
+		const body = JSON.parse(seen[1].body as string) as {
+			messages: { content: { image_url?: { url: string } }[] }[];
+		};
+		const url = body.messages[0].content[1].image_url?.url ?? "";
+		const probe = Buffer.from(url.replace(/^data:image\/png;base64,/, ""), "base64");
+		expect(probe.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+		const chunks: string[] = [];
+		const idat: Buffer[] = [];
+		for (let at = 8; at < probe.length; ) {
+			const length = probe.readUInt32BE(at);
+			const typeAndData = probe.subarray(at + 4, at + 8 + length);
+			expect(probe.readUInt32BE(at + 8 + length)).toBe(crc32(typeAndData));
+			chunks.push(typeAndData.subarray(0, 4).toString("ascii"));
+			if (chunks[chunks.length - 1] === "IDAT") idat.push(typeAndData.subarray(4));
+			at += 12 + length;
+		}
+		expect(chunks[0]).toBe("IHDR");
+		expect(chunks[chunks.length - 1]).toBe("IEND");
+		const [width, height] = [probe.readUInt32BE(16), probe.readUInt32BE(20)];
+		// Qwen2.5-VL reads 28 px patches; anything smaller risks a refusal.
+		expect(Math.min(width, height)).toBeGreaterThanOrEqual(28);
+		expect(inflateSync(Buffer.concat(idat)).length).toBeGreaterThan(0);
 	});
 
 	it("a NO_TEXT probe still counts as a successful connection (null probe)", async () => {
