@@ -196,7 +196,7 @@ describe("handwriting test capture", () => {
 		// Ids are page and row; the row numbering counts the skipped box.
 		expect(capture.items[0].id).toBe("p1-01");
 		expect(capture.items[3].id).toBe("p1-05");
-		expect(capture.items.at(-1)!.id).toBe("p3-06");
+		expect(capture.items[capture.items.length - 1].id).toBe("p3-06");
 		// The pen data comes through: pressure as written.
 		const first = unflattenStroke(capture.items[0].strokes[0]);
 		expect(first.points.slice(0, 3).map((p) => p.pressure)).toEqual([120, 121, 122]);
@@ -309,7 +309,8 @@ describe.skipIf(!process.env.HANDWRITING_CAPTURE)("replay a handwriting capture"
 			const t = totals.get(reader)!;
 			return `${READER_LABELS[reader].padEnd(8)}  ${String(t.replayedN).padStart(5)}  ${pct(t.captured / t.capturedN)}  ${pct(t.replayed / t.replayedN)}`;
 		});
-		console.log(
+		// Straight to the terminal: the table is the point of this run.
+		process.stdout.write(
 			[
 				`Handwriting capture ${capture.createdAt} (plugin ${capture.pluginVersion}, test sheet v${capture.sheet.version}, ${capture.items.length} items, hand ${capture.hand === null ? "none" : capture.hand.version})`,
 				"Captured: as the plugin read it, with the vault's words. Replayed: today's readers, no vault words.",
@@ -319,6 +320,7 @@ describe.skipIf(!process.env.HANDWRITING_CAPTURE)("replay a handwriting capture"
 				"",
 				"item    reader    captured  replayed  replayed text",
 				...rows,
+				"",
 			].join("\n"),
 		);
 	});
