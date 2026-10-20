@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dropLeadingTitleHeading, parseBlocks, stripInline } from "../convert/mdblocks";
+import { preprocess } from "../preprocess/preprocess";
 
 describe("stripInline", () => {
 	it("strips bold, italic, highlight, strike, code and links", () => {
@@ -134,6 +135,21 @@ describe("dropLeadingTitleHeading (GP_E6_S6)", () => {
 });
 
 describe("blocks inside quotes and callouts (#22)", () => {
+	it("gives a nested callout its title line inside the inner quote", () => {
+		const { markdown } = preprocess("> [!note] Outer\n> text\n> > [!tip] Inner\n> > more");
+		const [quote] = parseBlocks(markdown, { html: true, quotePictures: true, nestedQuotes: true });
+		expect(quote.type === "quote" ? quote.blocks?.map((b) => b.type) : undefined).toEqual([
+			"paragraph",
+			"paragraph",
+			"quote",
+		]);
+		const inner = quote.type === "quote" ? quote.blocks?.[2] : undefined;
+		expect(inner?.type === "quote" ? inner.blocks : undefined).toEqual([
+			{ type: "paragraph", text: "Inner", style: "bold", inline: { bold: [0] } },
+			{ type: "paragraph", text: "more" },
+		]);
+	});
+
 	// What flattenCallouts makes of a "> [!note]" callout holding everything.
 	const CALLOUT = [
 		"> **Note**",
