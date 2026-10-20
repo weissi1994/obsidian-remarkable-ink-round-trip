@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **One-click local reading (desktop):** *Settings → Reading handwriting (OCR)
+  → Set up local reading for me* finds Ollama on this computer, downloads the
+  handwriting model if it is missing — after you confirm, with progress and a
+  Cancel — points the OCR settings at it and runs *Test connection*. If Ollama
+  is not running it links to the installer. The manual endpoint settings stay
+  for everything else.
 - **Ticks, strikes and remarks inside quotes and callouts come back into the
   note:** a tick or a stripe on a task in a callout (`> - [ ] task`, also in a
   nested quote) marks it done or cancelled, like a task outside one. A remark
