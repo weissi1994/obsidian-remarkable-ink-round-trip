@@ -18,7 +18,7 @@ describe("migrate: sample store version ladder", () => {
 			words: { und: [[[{ x: 0, y: 0 }, { x: 10, y: 10 }]]] },
 			remarks: { r1: { ...remark } },
 		};
-		const before = JSON.parse(JSON.stringify(fixture));
+		const before = JSON.parse(JSON.stringify(fixture)) as typeof fixture;
 
 		const out = migrate(fixture);
 

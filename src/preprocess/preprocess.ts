@@ -64,6 +64,9 @@ const EMBED_RE = /!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
 const WIKILINK_RE = /(?<!!)\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g;
 const MD_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 const CALLOUT_HEAD_RE = /^>\s*\[!([a-zA-Z-]+)\][+-]?\s*(.*)$/;
+// A callout head at any quote depth, for flattening: "> > [!tip] Inner".
+// Remark detection keeps to CALLOUT_HEAD_RE, as remarks are always top-level.
+const NESTED_CALLOUT_HEAD_RE = /^(\s*)((?:>\s*)+)\[!([a-zA-Z-]+)\][+-]?\s*(.*)$/;
 
 const IMAGE_EXTENSIONS = new Set([
 	"png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif",
@@ -319,17 +322,23 @@ function remarksInPlace(markdown: string, resolveEmbed: EmbedResolver): string {
 	return out.join("\n");
 }
 
-/** Flatten a callout block to a blockquote with a bold title line. */
+/**
+ * Flatten a callout block to a blockquote with a bold title line, at any
+ * quote depth. Lines inside code fences are left as written.
+ */
 function flattenCallouts(markdown: string): string {
 	const lines = markdown.split("\n");
 	const out: string[] = [];
+	let fenced = false;
 	for (const line of lines) {
-		const head = line.match(CALLOUT_HEAD_RE);
+		if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+		const head = fenced ? null : line.match(NESTED_CALLOUT_HEAD_RE);
 		if (head) {
-			const type = head[1].toLowerCase();
-			const title = head[2].trim();
+			const depth = (head[2].match(/>/g) ?? []).length;
+			const type = head[3].toLowerCase();
+			const title = head[4].trim();
 			const label = title !== "" ? title : type.charAt(0).toUpperCase() + type.slice(1);
-			out.push(`> **${label}**`);
+			out.push(`${head[1]}${"> ".repeat(depth)}**${label}**`);
 		} else {
 			out.push(line);
 		}
