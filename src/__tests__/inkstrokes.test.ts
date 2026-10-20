@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
 import { inkOptionsFor } from "../ink/inkfonts";
 import { inkStrokesOf, type Picture } from "../ink/inkimage";
-import { DEVICE_PROFILES, inkPagesToRm, renderInk } from "../ink/inkrender";
+import { DEVICE_PROFILES, inkPagesToRm, renderInk, withImageBlocks } from "../ink/inkrender";
 import { PEN, PEN_COLOR } from "../ink/rmwrite";
-import type { InkSnapshot } from "../id/mapping";
+import type { InkSnapshot, MappingEntry } from "../id/mapping";
+import { InkEdge, type InkHost } from "../inkedge";
 import { diffInkPage } from "../incoming/inkdiff";
 import { parseRmScene } from "../incoming/rmscene";
 import { preprocess } from "../preprocess/preprocess";
@@ -89,5 +90,39 @@ describe("the owner's ink, sent back as itself", () => {
 		const diff = diffInkPage(r.pages[0], parseRmScene(page));
 		expect(diff.userStrokes).toEqual([]);
 		expect(diff.trustworthy).toBe(true);
+	});
+});
+
+describe("pictures and replay inside quotes that hold blocks (#22)", () => {
+	const ink = inkStrokesOf(REMARK, DEVICE_PROFILES.paperpro.dpi)!;
+
+	it("turns a picture inside a nested quote into a picture block", () => {
+		const blocks = parseBlocks("> outer\n> > inner\n> > *[image: dev-p01-1.png]*", { quotePictures: true, nestedQuotes: true });
+		const [outer] = withImageBlocks(blocks, { "dev-p01-1.png": ink });
+		if (outer.type !== "quote") throw new Error("expected a quote");
+		const nested = outer.blocks?.[1];
+		if (nested?.type !== "quote") throw new Error("expected a nested quote");
+		expect(nested.blocks?.map((b) => b.type)).toEqual(["paragraph", "inkimage"]);
+	});
+
+	/** An edge whose kept send is `markdown`, replaying `ink`. */
+	async function replay(markdown: string, ink: InkSnapshot) {
+		const sent = { title: "Quotes", markdown };
+		const host = { manifest: { dir: "x" }, settings: {}, state: { readSent: () => Promise.resolve(sent) } } as unknown as InkHost;
+		const entry = { docId: "doc-1", ink, pdfLayout: { typo: 10 } } as unknown as MappingEntry;
+		return (await new InkEdge(host).loadInk(entry))!.layout;
+	}
+
+	const QUOTED_TABLE = "> **Note**\n> | A | B |\n> | --- | --- |\n> | 1 | 2 |\n";
+
+	it("replays a send made before it with the flat quote", async () => {
+		const layout = await replay(QUOTED_TABLE, SNAPSHOT);
+		expect(layout.lines.some((l) => l.role === "table")).toBe(false);
+		expect(layout.lines.filter((l) => l.role === "quote").map((l) => l.text).join(" ")).toContain("| A | B |");
+	});
+
+	it("replays a send made with it with the quote's table", async () => {
+		const layout = await replay(QUOTED_TABLE, { ...SNAPSHOT, nestedQuotes: true });
+		expect(layout.lines.filter((l) => l.role === "table").map((l) => l.text)).toEqual(["A", "B", "1", "2"]);
 	});
 });

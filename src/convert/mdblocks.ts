@@ -31,7 +31,12 @@ export type Block =
 	| { type: "heading"; level: number; text: string; inline?: InlineStyles }
 	| { type: "paragraph"; text: string; style?: "bold" | "italic"; inline?: InlineStyles }
 	| { type: "list"; items: ListItem[] }
-	| { type: "quote"; lines: string[]; inline?: InlineStyles }
+	/**
+	 * `blocks`: the quote's content parsed as blocks of its own — tables,
+	 * lists, code, nested quotes (ParseOptions.nestedQuotes). Absent on the
+	 * flat quote older sends replay, whose `lines` are drawn as one run.
+	 */
+	| { type: "quote"; lines: string[]; inline?: InlineStyles; blocks?: Block[] }
 	| { type: "code"; lines: string[]; lang?: string }
 	/** `inline`: each cell's styling, row by row — only when any cell has some. */
 	| { type: "table"; rows: string[][]; inline?: (InlineStyles | null)[][] }
@@ -136,10 +141,41 @@ export interface ParseOptions {
 	 * made before it.
 	 */
 	quotePictures?: boolean;
+	/**
+	 * The content of a quote or callout is parsed as blocks — a table, list,
+	 * code fence or nested quote inside it is typeset as such instead of
+	 * running into one italic paragraph (#22). Off for sends made before it.
+	 */
+	nestedQuotes?: boolean;
 }
 
 /** A picture's placeholder line, as preprocessing leaves it (`*[image: name]*`). */
 const PICTURE_LINE_RE = /^\*?\[image: [^\]]+\]\*?$/;
+/** A callout's title as flattenCallouts leaves it: one bold span. */
+const LABEL_LINE_RE = /^\*\*[^*]+\*\*$/;
+
+/**
+ * A quote's lines with one quote level stripped, ready to parse as blocks.
+ * The callout title on the first line and a picture on its own line stand
+ * apart from the text around them — a title is no part of the first
+ * sentence, and a remark's ink must stay a block of its own — so each gets
+ * a blank line around it, except inside a code fence.
+ */
+function quoteInner(lines: string[]): string {
+	const out: string[] = [];
+	let fenced = false;
+	lines.forEach((line, index) => {
+		const inner = line.replace(/^\s*>\s?/, "");
+		const trimmed = inner.trim();
+		if (FENCE_RE.test(trimmed)) fenced = !fenced;
+		else if (!fenced && (PICTURE_LINE_RE.test(trimmed) || (index === 0 && LABEL_LINE_RE.test(trimmed)))) {
+			out.push("", inner, "");
+			return;
+		}
+		out.push(inner);
+	});
+	return out.join("\n");
+}
 
 type StyleKind = "code" | "bold" | "italic" | "strike" | "underline" | "highlight";
 
@@ -413,6 +449,18 @@ export function parseBlocks(markdown: string, options: ParseOptions = {}): Block
 		if (HR_RE.test(line.trim()) && paragraph.length === 0) {
 			flushAll();
 			blocks.push({ type: "hr" });
+			continue;
+		}
+
+		if (line.trimStart().startsWith(">") && options.nestedQuotes === true) {
+			flushAll();
+			const run: string[] = [];
+			while (i < lines.length && lines[i].trimStart().startsWith(">")) run.push(lines[i++]);
+			i--;
+			// `lines` as the flat quote has them, so a reader of the text
+			// sees the same words; the drawing goes by `blocks`.
+			const flat = run.map((raw) => stripInlineStyles(raw.replace(/^\s*>\s?/, ""), options).text);
+			blocks.push({ type: "quote", lines: flat, blocks: parseBlocks(quoteInner(run), options) });
 			continue;
 		}
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Tables, lists, task boxes, code and nested quotes inside quotes and
+  callouts** are typeset as such, set in by the quote's bar: a table gets its
+  grid, a task a box to tick, code its band, and a callout's title a line of
+  its own. Before, everything in a quote ran together into one italic
+  paragraph of pipes and markers. Notebooks already on the tablet keep their
+  look until their note changes and is sent again.
 - **Ticks, strikes and remarks inside quotes and callouts come back into the
   note:** a tick or a stripe on a task in a callout (`> - [ ] task`, also in a
   nested quote) marks it done or cancelled, like a task outside one. A remark
