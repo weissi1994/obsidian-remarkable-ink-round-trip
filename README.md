@@ -171,7 +171,8 @@ Remarks come back as an image of your ink and — when they can be read — as t
 - **Vision model endpoint**: any OpenAI-compatible vision model — local (Ollama,
   LM Studio) or hosted. Only the cropped remark images are sent there, never the
   note — plus, as worked examples, your latest corrected remarks (*Worked
-  examples from your corrections*, 3 by default, 0 for none).
+  examples from your corrections*, 3 by default, 0 for none). First time? See the
+  [endpoint setup guide](docs/ocr-endpoint-setup.md).
 - **Off**: images only.
 
 ### Correcting what was read
