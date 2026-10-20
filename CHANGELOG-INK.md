@@ -33,6 +33,11 @@
   Cancel — points the OCR settings at it and runs *Test connection*. If Ollama
   is not running it links to the installer. The manual endpoint settings stay
   for everything else.
+- **One-click setup finds LM Studio too:** when Ollama is not running but LM
+  Studio's server is, *Set up local reading for me* offers LM Studio and the
+  vision models already downloaded there (loaded ones first), points the OCR
+  settings at the one you pick and runs *Test connection*. It downloads
+  nothing; with no vision model yet it says where to get one in LM Studio.
 - **Tables, lists, task boxes, code and nested quotes inside quotes and
   callouts** are typeset as such, set in by the quote's bar: a table gets its
   grid, a task a box to tick, code its band, and a callout's title a line of

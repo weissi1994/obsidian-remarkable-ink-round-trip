@@ -201,7 +201,8 @@ export class RoundTripSettingTab extends PluginSettingTab {
 				name: "Set up local reading for me",
 				desc:
 					"Desktop only: finds Ollama on this computer, downloads the handwriting model if " +
-					"needed (you confirm first), and points the plugin at it.",
+					"needed (you confirm first), and points the plugin at it. Without Ollama, it also " +
+					"finds LM Studio's server and offers a vision model already downloaded there.",
 				visible: () => Platform.isDesktopApp,
 				action: (el: HTMLElement) => {
 					new ButtonComponent(el).setButtonText("Set up").onClick(async () => {
