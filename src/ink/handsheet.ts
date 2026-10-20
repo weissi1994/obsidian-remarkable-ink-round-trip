@@ -13,6 +13,7 @@
  */
 
 import { diffInkPage } from "../incoming/inkdiff";
+import type { Stroke } from "../incoming/rmlines";
 import { parseRmScene } from "../incoming/rmscene";
 import { Glyph, GlyphSource, HandFont, builtinFont, CAP_RATIO } from "./glyphs";
 import type { DeviceProfile, GeneratedStroke, InkPen } from "./inkrender";
@@ -58,10 +59,42 @@ export const WORD_SHEET_WORDS = [
 	"today", "tomorrow", "because", "maybe", "should", "next",
 ];
 
-export type SheetKind = "letters" | "words";
+/**
+ * The handwriting test sheet (#14): sentences to copy once, read back without
+ * learning from them, so the readers can be measured on the owner's own hand
+ * (ocr/testcapture.ts). Bump and keep the old prompts like SHEET_VERSION: a
+ * test sheet waiting on the tablet is read back with the prompts it was sent
+ * with.
+ */
+export const TEST_SHEET_VERSION = 1;
+
+export const TEST_SHEET_PROMPTS: Record<number, string[]> = {
+	1: [
+		"Franz jagt im komplett verwahrlosten Taxi quer durch Bayern",
+		"The quick brown fox jumps over the lazy dog",
+		"Zwölf Boxkämpfer jagen Viktor quer über den großen Sylter Deich",
+		"Pack my box with five dozen liquor jugs",
+		"Morgen noch prüfen, ob der Termin passt",
+		"Check this again tomorrow before the meeting",
+		"Das ist wichtig, aber nicht dringend",
+		"Maybe we should think about it next week",
+		"Bitte bis Freitag erledigen",
+		"Ask about the budget and the timeline",
+		"Termin am 14.03. um 9:30 Uhr",
+		"Call back at 4 pm, room 217",
+		"Größe: 42 cm × 18 cm, Preis 12,50 €",
+		"Frage: ja oder nein? (siehe #14)",
+		"later → done ✓, not now ✗",
+		"Obsidian, reMarkable, WritePad, Ollama, GitLab",
+		"Besprechung mit Anna und Jörg im Büro",
+		"e-mail: name@example.org",
+	],
+};
+
+export type SheetKind = "letters" | "words" | "test";
 
 export interface SheetBox {
-	/** What to write in the box: a character, or a whole word on the word sheet. */
+	/** What to write in the box: a character, a whole word on the word sheet, a sentence on the test sheet. */
 	char: string;
 	/** 1-based sheet page. */
 	page: number;
@@ -85,7 +118,7 @@ export interface PendingSheet {
 	profile: DeviceProfile;
 	version: number;
 	/** Absent for the letter sheet, which came first. */
-	kind?: "words";
+	kind?: "words" | "test";
 }
 
 const GUIDE_PEN: InkPen = { tool: 17, color: PEN_COLOR.grey, thicknessScale: 1, width: 8 };
@@ -93,18 +126,25 @@ const GUIDE_PEN: InkPen = { tool: 17, color: PEN_COLOR.grey, thicknessScale: 1, 
 /**
  * Lay out the sheet for a canvas. Deterministic for a given profile, kind
  * and version — the import rebuilds it to tell the owner's ink from ours.
+ * `version` is SHEET_VERSION for the letter and word sheets, and
+ * TEST_SHEET_VERSION for the test sheet.
  */
-export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters", version = SHEET_VERSION): Sheet {
+export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters", version?: number): Sheet {
+	const test = kind === "test";
+	version ??= test ? TEST_SHEET_VERSION : SHEET_VERSION;
 	const unit = profile.dpi / 226; // keep physical sizes across devices
 	const margin = Math.round(60 * unit);
 	const words = kind === "words";
-	const legacy = !words && version < 2;
-	const boxWidth = words
-		? Math.round(Math.max(420 * unit, (profile.width - 2 * margin) / 2 - 1))
-		: Math.round((legacy ? 132 : 190) * unit);
-	const boxHeight = Math.round(176 * unit);
+	const legacy = kind === "letters" && version < 2;
+	// The test sheet: one sentence per row, across the whole width.
+	const boxWidth = test
+		? Math.round(profile.width - 2 * margin)
+		: words
+			? Math.round(Math.max(420 * unit, (profile.width - 2 * margin) / 2 - 1))
+			: Math.round((legacy ? 132 : 190) * unit);
+	const boxHeight = Math.round((test ? 230 : 176) * unit);
 	const headerHeight = Math.round(210 * unit);
-	const cols = Math.max(words ? 1 : 3, Math.floor((profile.width - 2 * margin) / boxWidth));
+	const cols = test ? 1 : Math.max(words ? 1 : 3, Math.floor((profile.width - 2 * margin) / boxWidth));
 	const rowsPerPage = Math.max(2, Math.floor((profile.height - headerHeight - margin) / boxHeight));
 	const perPage = cols * rowsPerPage;
 	const left0 = -profile.width / 2 + (profile.width - cols * boxWidth) / 2;
@@ -112,7 +152,11 @@ export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters", 
 
 	const boxes: SheetBox[] = [];
 	const pages: GeneratedStroke[][] = [];
-	const chars = words ? WORD_SHEET_WORDS : [...(SHEET_CHARSETS[version] ?? SHEET_CHARS)];
+	const chars = test
+		? (TEST_SHEET_PROMPTS[version] ?? TEST_SHEET_PROMPTS[TEST_SHEET_VERSION])
+		: words
+			? WORD_SHEET_WORDS
+			: [...(SHEET_CHARSETS[version] ?? SHEET_CHARS)];
 	const pageCount = Math.ceil(chars.length / perPage);
 
 	for (let p = 0; p < pageCount; p++) {
@@ -146,12 +190,12 @@ export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters", 
 		// Instructions, in the plugin's own hand, wrapped to the box grid —
 		// the Move's canvas is too narrow for them on one line.
 		const textWidth = cols * boxWidth;
-		const wrap = (text: string, cap: number): string[] => {
+		const wrap = (text: string, cap: number, width = textWidth): string[] => {
 			const lines: string[] = [];
 			let current = "";
 			for (const word of text.split(" ")) {
 				const candidate = current === "" ? word : `${current} ${word}`;
-				if (current !== "" && label.widthOfTextAtSize(candidate, cap / CAP_RATIO) > textWidth) {
+				if (current !== "" && label.widthOfTextAtSize(candidate, cap / CAP_RATIO) > width) {
 					lines.push(current);
 					current = word;
 				} else {
@@ -164,14 +208,18 @@ export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters", 
 		const titleCap = 28 * unit;
 		const instructionCap = 18 * unit;
 		write(
-			`${words ? "Word sheet" : "Handwriting sheet"} ${p + 1}/${pageCount}`,
+			`${test ? "Handwriting test" : words ? "Word sheet" : "Handwriting sheet"} ${p + 1}/${pageCount}`,
 			left0,
 			margin + titleCap,
 			titleCap,
 			PEN_COLOR.black,
 		);
 		const instructions = wrap(
-			words
+			test
+				? "Copy each line once, below it, the way you normally write — joined-up " +
+						"if that is how you write. Don't correct the text to make it neater. " +
+						"Skip any you like."
+				: words
 				? "Write each word once in its box the way you usually write, joined-up " +
 						"if that is how you write, sitting on the solid line. Skip any you like."
 				: legacy
@@ -193,6 +241,49 @@ export function buildSheet(profile: DeviceProfile, kind: SheetKind = "letters", 
 			const row = Math.floor(index / cols);
 			const left = left0 + col * boxWidth;
 			const top = headerHeight + row * boxHeight;
+			if (test) {
+				// The sentence in black at the top, wrapped when long, and one
+				// writing line under it on the same guides as the other sheets.
+				const inset = 6 * unit;
+				const right = left + boxWidth - inset;
+				add([
+					{ x: left + inset, y: top + inset },
+					{ x: right, y: top + inset },
+					{ x: right, y: top + boxHeight - inset },
+					{ x: left + inset, y: top + boxHeight - inset },
+					{ x: left + inset, y: top + inset },
+				]);
+				const promptCap = 20 * unit;
+				const prompt = wrap(char, promptCap, boxWidth - inset * 6);
+				const firstLine = top + inset * 3 + promptCap;
+				prompt.forEach((line, index) => {
+					write(line, left + inset * 2.5, firstLine + index * promptCap * 1.6, promptCap, PEN_COLOR.black);
+				});
+				const below = firstLine + (prompt.length - 1) * promptCap * 1.6 + promptCap * 0.5;
+				// Writing size: about 5.5 mm capitals, ordinary handwriting.
+				const cap = Math.min(50 * unit, (top + boxHeight - inset * 4 - below) / 1.75);
+				const capLine = below + cap * 0.55;
+				const baseline = capLine + cap;
+				boxes.push({ char, page: p + 1, left, top, width: boxWidth, height: boxHeight, baseline, capLine });
+				const from = left + inset * 2;
+				const to = right - inset;
+				const dashed = (y: number, dash: number, gap: number) => {
+					for (let x = from; x + dash <= to; x += dash + gap) {
+						add([
+							{ x, y },
+							{ x: x + dash, y },
+						]);
+					}
+				};
+				dashed(capLine, 10 * unit, 10 * unit);
+				dashed(baseline - cap * 0.66, 3 * unit, 9 * unit);
+				dashed(baseline + cap * 0.38, 3 * unit, 9 * unit);
+				add([
+					{ x: from, y: baseline },
+					{ x: to, y: baseline },
+				]);
+				return;
+			}
 			if (legacy) {
 				const baseline = top + boxHeight * 0.7;
 				const capLine = baseline - boxHeight * 0.42;
@@ -406,33 +497,14 @@ export function learnHand(
 	previous: HandLibrary | null = null,
 	now: () => Date = () => new Date(),
 ): LearnResult {
-	const sheet = buildSheet(pending.profile, "letters", pending.version);
 	const found = new Map<string, number[][]>();
-	pending.pageIds.forEach((pageId, index) => {
-		const bytes = pages.get(pageId);
-		if (bytes === undefined) return;
-		const diff = diffInkPage(sheet.pages[index] ?? [], parseRmScene(bytes));
-		const boxes = sheet.boxes.filter((box) => box.page === index + 1);
-		for (const stroke of diff.userStrokes) {
-			const points = stroke.points;
-			if (points.length === 0) continue;
-			const cx = points.reduce((sum, point) => sum + point.x, 0) / points.length;
-			const cy = points.reduce((sum, point) => sum + point.y, 0) / points.length;
-			const box = boxes.find(
-				(candidate) =>
-					cx >= candidate.left &&
-					cx <= candidate.left + candidate.width &&
-					cy >= candidate.top &&
-					cy <= candidate.top + candidate.height,
-			);
-			if (box === undefined) continue;
-			const cap = box.baseline - box.capLine;
-			const flat = points.flatMap((point) => [point.x / cap, (box.baseline - point.y) / cap]);
-			const list = found.get(box.char) ?? [];
-			list.push(flat);
-			found.set(box.char, list);
-		}
-	});
+	for (const [box, strokes] of boxInk(pending, pages, "letters")) {
+		const cap = box.baseline - box.capLine;
+		found.set(
+			box.char,
+			strokes.map((stroke) => stroke.points.flatMap((point) => [point.x / cap, (box.baseline - point.y) / cap])),
+		);
+	}
 
 	const glyphs: Record<string, Glyph[]> = {};
 	if (previous !== null) {
@@ -486,24 +558,23 @@ export function learnHand(
 }
 
 /**
- * Read a filled-in word sheet: each box's ink, in device units, by the word
- * it was written for. Empty boxes are left out.
+ * The owner's ink on a filled-in sheet, by the box each stroke's centre falls
+ * in — whole strokes, pen and pressure included, in device units. Boxes come
+ * in the order their first stroke was found; empty boxes are left out.
  */
-export function learnWords(
-	pending: PendingSheet,
-	pages: Map<string, Uint8Array>,
-): Record<string, { x: number; y: number }[][]> {
-	const sheet = buildSheet(pending.profile, "words", pending.version);
-	const found: Record<string, { x: number; y: number }[][]> = {};
+export function boxInk(pending: PendingSheet, pages: Map<string, Uint8Array>, kind: SheetKind): Map<SheetBox, Stroke[]> {
+	const sheet = buildSheet(pending.profile, kind, pending.version);
+	const found = new Map<SheetBox, Stroke[]>();
 	pending.pageIds.forEach((pageId, index) => {
 		const bytes = pages.get(pageId);
 		if (bytes === undefined) return;
 		const diff = diffInkPage(sheet.pages[index] ?? [], parseRmScene(bytes));
 		const boxes = sheet.boxes.filter((box) => box.page === index + 1);
 		for (const stroke of diff.userStrokes) {
-			if (stroke.points.length === 0) continue;
-			const cx = stroke.points.reduce((sum, point) => sum + point.x, 0) / stroke.points.length;
-			const cy = stroke.points.reduce((sum, point) => sum + point.y, 0) / stroke.points.length;
+			const points = stroke.points;
+			if (points.length === 0) continue;
+			const cx = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+			const cy = points.reduce((sum, point) => sum + point.y, 0) / points.length;
 			const box = boxes.find(
 				(candidate) =>
 					cx >= candidate.left &&
@@ -512,9 +583,26 @@ export function learnWords(
 					cy <= candidate.top + candidate.height,
 			);
 			if (box === undefined) continue;
-			(found[box.char] ??= []).push(stroke.points.map((point) => ({ x: point.x, y: point.y })));
+			const list = found.get(box) ?? [];
+			list.push(stroke);
+			found.set(box, list);
 		}
 	});
+	return found;
+}
+
+/**
+ * Read a filled-in word sheet: each box's ink, in device units, by the word
+ * it was written for. Empty boxes are left out.
+ */
+export function learnWords(
+	pending: PendingSheet,
+	pages: Map<string, Uint8Array>,
+): Record<string, { x: number; y: number }[][]> {
+	const found: Record<string, { x: number; y: number }[][]> = {};
+	for (const [box, strokes] of boxInk(pending, pages, "words")) {
+		found[box.char] = strokes.map((stroke) => stroke.points.map((point) => ({ x: point.x, y: point.y })));
+	}
 	return found;
 }
 
