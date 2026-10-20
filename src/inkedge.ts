@@ -36,7 +36,7 @@ import type { Picture } from "./ink/inkimage";
 import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
-import { addSample, emptyStore, type SampleStore } from "./ocr/samples";
+import { addSample, emptyStore, migrate, type SampleStore } from "./ocr/samples";
 import type { DeviceItem } from "./sync/deviceimport";
 import type { SyncState } from "./sync/syncstate";
 import type { HttpClient } from "./transport/http";
@@ -313,10 +313,11 @@ export class InkEdge {
 
 	/** The owner's written words and remembered remarks (ocr/samples.ts). */
 	async loadSamples(): Promise<SampleStore> {
-		this.samples ??=
+		this.samples ??= migrate(
 			(await this.host.state.readSamples()) ??
-			(await this.readJson<SampleStore>(`${this.dir}/ocr/samples.json`)) ??
-			emptyStore();
+				(await this.readJson<unknown>(`${this.dir}/ocr/samples.json`)) ??
+				emptyStore(),
+		);
 		return this.samples;
 	}
 

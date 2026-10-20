@@ -114,8 +114,17 @@ export interface RemarkRecord {
 	inserted?: boolean;
 }
 
+/**
+ * The store's shape version. Bumped from 1 to 2 as the first real format
+ * transition: Direction 2 keeps adding optional fields (`letters` in !12,
+ * `joins` coming), which are backward-compatible on their own, but there was
+ * no seam for a change that isn't — `migrate` is that seam. Bump this and add
+ * a case to `migrate` for the next shape change.
+ */
+export const CURRENT_FORMAT = 2;
+
 export interface SampleStore {
-	format: 1;
+	format: typeof CURRENT_FORMAT;
 	/** Word as written → its samples, each a list of strokes (device units). */
 	words: Record<string, Point[][][]>;
 	/**
@@ -134,7 +143,40 @@ export function isVerified(record: RemarkRecord): boolean {
 }
 
 export function emptyStore(): SampleStore {
-	return { format: 1, words: {}, letters: {}, remarks: {} };
+	return { format: CURRENT_FORMAT, words: {}, letters: {}, remarks: {} };
+}
+
+/**
+ * Bring a loaded blob up to the current store shape — the single seam every
+ * read goes through (inkedge.ts `loadSamples`), so a shape change has one home.
+ * A linear version ladder: the next bump is "add a case".
+ *
+ * - Not an object (null, a number, an array) → an empty current store, so the
+ *   raw cast that used to trust the JSON can no longer hand back a non-store.
+ * - Format missing or 1 → a format-1 store: upgraded losslessly to the current
+ *   format. A format-1 store carries the same information, so the upgrade only
+ *   defaults absent required containers and sets the version; optional fields
+ *   (`letters`, future `joins`) are left exactly as they were.
+ * - Current format → returned after the same defensive container defaulting.
+ * - Unknown / newer format → defaulted and returned rather than thrown away, so
+ *   a store written by a newer plugin build survives a downgrade with its data.
+ */
+export function migrate(raw: unknown): SampleStore {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return emptyStore();
+	const store = raw as Partial<SampleStore> & Record<string, unknown>;
+	// Required containers always exist after this, whatever the source format.
+	if (typeof store.words !== "object" || store.words === null) store.words = {};
+	if (typeof store.remarks !== "object" || store.remarks === null) store.remarks = {};
+	const format: unknown = store.format;
+	if (format !== undefined && format !== 1 && format !== CURRENT_FORMAT) {
+		// Unknown or newer: keep whatever shape (and version) it has rather than
+		// wiping it, so a store from a newer build survives a downgrade.
+		return store as unknown as SampleStore;
+	}
+	// Missing/format-1 is a lossless upgrade (same information); format-2 is a
+	// no-op. Either way the version is now current.
+	store.format = CURRENT_FORMAT;
+	return store as SampleStore;
 }
 
 const round = (strokes: Point[][]) =>
