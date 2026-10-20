@@ -20,17 +20,23 @@ me* does step 1 and step 3 below for you:
 - it looks for Ollama on this computer (`http://localhost:11434`); if it is not
   running, it links to [ollama.com/download](https://ollama.com/download) —
   install or start Ollama, then press the button again;
+- if Ollama is not running but LM Studio's server is (`http://localhost:1234`),
+  it offers LM Studio instead, with the vision models already downloaded there
+  to pick from — it downloads nothing into LM Studio. With no vision model
+  there yet, it says how to get one; if the server requires an API token, it
+  says to set *API key* and the endpoint `http://localhost:1234/v1` by hand;
 - if the model (*Model*, or `qwen2.5vl:7b` when empty) is missing, it asks
   before downloading it (about 6 GB for the default) and shows the progress.
   Cancel stops the download; Ollama keeps what it already has and resumes from
   there next time;
 - it sets *Reading handwriting* to the endpoint, the endpoint to
-  `http://localhost:11434/v1` and the model, then runs *Test connection*.
+  `http://localhost:11434/v1` (or `http://localhost:1234/v1` for LM Studio) and
+  the model, then runs *Test connection*.
 
 It does not set `OLLAMA_ORIGINS` — if *Test connection* then reports that the
 endpoint refused the request's origin, do step 2 and press *Test connection*
 again. The manual steps below remain the fallback, and the way to use another
-server, a remote machine, LM Studio or a hosted API.
+server, a remote machine, LM Studio with an API token or a hosted API.
 
 ## Ollama, step by step
 

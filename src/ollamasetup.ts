@@ -5,10 +5,13 @@
  * Find Ollama on this computer, download the handwriting model if it is
  * missing — only after the owner confirms, with visible progress and a way to
  * cancel — point the OCR settings at it, then run the usual Test connection.
+ * When Ollama is not running but LM Studio's server is, offer that instead
+ * (`lmstudiosetup.ts`).
  * The transport lives in `transport/ollama.ts`; this is the dialogue around it.
  */
 
 import { App, ButtonComponent, Modal, ProgressBarComponent } from "obsidian";
+import { LmStudioModal } from "./lmstudiosetup";
 import { notify } from "./notify";
 import { DEFAULT_SETTINGS, type RoundTripSettings } from "./settingsmodel";
 import { HttpClient, TransportError } from "./transport/http";
@@ -23,9 +26,14 @@ import {
 	pullModel,
 	pullModelBuffered,
 } from "./transport/ollama";
+import { LMSTUDIO_LOCAL, detectLmStudio } from "./transport/lmstudio";
 
 const DOWNLOAD_URL = "https://ollama.com/download";
 const LOCAL_ENDPOINT = `${OLLAMA_LOCAL}/v1`;
+const LMSTUDIO_ENDPOINT = `${LMSTUDIO_LOCAL}/v1`;
+/** Where to look when Test connection fails against Ollama: step 2 is OLLAMA_ORIGINS. */
+const OLLAMA_GUIDE = "See the setup guide: docs/ocr-endpoint-setup.md → step 2.";
+const LMSTUDIO_GUIDE = "See the setup guide: docs/ocr-endpoint-setup.md → LM Studio equivalent.";
 /** Download sizes worth telling the owner before they agree to one. */
 const MODEL_SIZES: Record<string, string> = { "qwen2.5vl:7b": "about 6 GB" };
 /** About two progress updates a second: Ollama reports far more often. */
@@ -48,6 +56,20 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 	// custom remote endpoint the owner may have typed in.
 	const found = await detectOllama(host.http, OLLAMA_LOCAL);
 	if (!found.running) {
+		// No Ollama, but LM Studio's server may be up: offer it first.
+		const studio = await detectLmStudio(host.http, LMSTUDIO_LOCAL);
+		if (studio.running) {
+			const choice = await new LmStudioModal(host.app, studio.models, studio.needsApiKey).choice();
+			if (choice.kind === "use") {
+				await applyAndTest(host, LMSTUDIO_ENDPOINT, choice.model, refresh, LMSTUDIO_GUIDE);
+				return;
+			}
+			if (choice.kind === "retry") {
+				await setUpLocalOllama(host, refresh);
+				return;
+			}
+			if (choice.kind === "close") return;
+		}
 		if (await new OllamaMissingModal(host.app, found.reason).choice()) {
 			await setUpLocalOllama(host, refresh);
 		}
@@ -66,24 +88,33 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 		return;
 	}
 
+	await applyAndTest(host, LOCAL_ENDPOINT, model, refresh);
+}
+
+/**
+ * Point the OCR settings at a local server's `endpoint` and `model`, then run
+ * Test connection; `guide` follows a failed test's message.
+ */
+export async function applyAndTest(
+	host: OllamaSetupHost,
+	endpoint: string,
+	model: string,
+	refresh: () => void,
+	guide: string = OLLAMA_GUIDE,
+): Promise<void> {
 	const settings = host.settings();
-	settings.ocrEndpoint = LOCAL_ENDPOINT;
+	settings.ocrEndpoint = endpoint;
 	settings.ocrModel = model;
 	settings.ocrMode = "endpoint";
 	await host.saveSettings();
 	refresh();
 
-	notify(`Testing ${model} at ${LOCAL_ENDPOINT}…`);
+	notify(`Testing ${model} at ${endpoint}…`);
 	try {
 		await host.testOcrConnection();
-		notify(`Local reading is set up — ${model} at ${LOCAL_ENDPOINT}.`);
+		notify(`Local reading is set up — ${model} at ${endpoint}.`);
 	} catch (error) {
-		notify(
-			error instanceof TransportError
-				? `${error.message} See the setup guide: docs/ocr-endpoint-setup.md → step 2.`
-				: String(error),
-			15000,
-		);
+		notify(error instanceof TransportError ? `${error.message} ${guide}` : String(error), 15000);
 	}
 }
 
