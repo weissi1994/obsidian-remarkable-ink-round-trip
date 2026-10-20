@@ -132,3 +132,80 @@ describe("dropLeadingTitleHeading (GP_E6_S6)", () => {
 		expect(dropLeadingTitleHeading(later, "90-90 heuprotatie")).toEqual(later);
 	});
 });
+
+describe("blocks inside quotes and callouts (#22)", () => {
+	// What flattenCallouts makes of a "> [!note]" callout holding everything.
+	const CALLOUT = [
+		"> **Note**",
+		"> Intro text",
+		"> | Col A | Col B |",
+		"> | --- | --- |",
+		"> | 1 | 2 |",
+		"> - [ ] task one",
+		"> - item two",
+		"> ```",
+		"> code()",
+		"> ```",
+		"> > nested quote",
+		"> # Heading in quote",
+	].join("\n");
+
+	it("parses the quote's content as blocks of their own", () => {
+		const blocks = parseBlocks(CALLOUT, { html: true, quotePictures: true, nestedQuotes: true });
+		expect(blocks).toHaveLength(1);
+		const quote = blocks[0];
+		if (quote.type !== "quote" || quote.blocks === undefined) throw new Error("expected a quote with blocks");
+		expect(quote.blocks.map((b) => b.type)).toEqual(["paragraph", "paragraph", "table", "list", "code", "quote", "heading"]);
+		const [label, intro, table, list, code, nested, heading] = quote.blocks;
+		expect(label).toEqual({ type: "paragraph", text: "Note", style: "bold", inline: { bold: [0] } });
+		expect(intro).toEqual({ type: "paragraph", text: "Intro text" });
+		expect(table).toEqual({ type: "table", rows: [["Col A", "Col B"], ["1", "2"]] });
+		if (list.type !== "list") throw new Error("expected a list");
+		expect(list.items.map((item) => item.text)).toEqual(["[ ] task one", "item two"]);
+		expect(code).toEqual({ type: "code", lines: ["code()"] });
+		if (nested.type !== "quote") throw new Error("expected a nested quote");
+		expect(nested.blocks).toEqual([{ type: "paragraph", text: "nested quote" }]);
+		expect(heading).toEqual({ type: "heading", level: 1, text: "Heading in quote" });
+	});
+
+	it("keeps today's flat quote without the option, for sends made before it", () => {
+		expect(parseBlocks(CALLOUT, { html: true, quotePictures: true })).toEqual([
+			{
+				type: "quote",
+				lines: [
+					"Note",
+					"Intro text",
+					"| Col A | Col B |",
+					"| --- | --- |",
+					"| 1 | 2 |",
+					"- [ ] task one",
+					"- item two",
+					"`",
+					"code()",
+					"`",
+					"> nested quote",
+					"# Heading in quote",
+				],
+				inline: { bold: [0] },
+			},
+		]);
+	});
+
+	it("keeps a picture inside the quote as a paragraph of its own", () => {
+		const blocks = parseBlocks("> text\n> *[image: ink.png]*\n> \\pagebreak\n\nafter", {
+			quotePictures: true,
+			nestedQuotes: true,
+		});
+		expect(blocks.map((b) => b.type)).toEqual(["quote", "paragraph"]);
+		const quote = blocks[0];
+		if (quote.type !== "quote") throw new Error("expected a quote");
+		expect(quote.blocks?.map((b) => (b.type === "paragraph" ? b.text : b.type))).toEqual(["text", "[image: ink.png]", "pagebreak"]);
+	});
+
+	it("leaves a picture-like line inside quoted code alone", () => {
+		const blocks = parseBlocks("> ```\n> *[image: ink.png]*\n> ```", { nestedQuotes: true });
+		expect(blocks).toEqual([
+			{ type: "quote", lines: ["`", "[image: ink.png]", "`"], blocks: [{ type: "code", lines: ["*[image: ink.png]*"] }] },
+		]);
+	});
+});
