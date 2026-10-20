@@ -80,7 +80,7 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 	} catch (error) {
 		notify(
 			error instanceof TransportError
-				? `${error.message} See the setup guide: docs/ocr-endpoint-setup.md → step 2.`
+				? `${error.message} See the setup guide: docs/ocr-endpoint-setup.md → Troubleshooting.`
 				: String(error),
 			15000,
 		);
