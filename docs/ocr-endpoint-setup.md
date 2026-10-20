@@ -18,8 +18,24 @@ On desktop, *Settings → Reading handwriting (OCR) → Set up local reading for
 me* does step 1 and step 3 below for you:
 
 - it looks for Ollama on this computer (`http://localhost:11434`); if it is not
-  running, it links to [ollama.com/download](https://ollama.com/download) —
-  install or start Ollama, then press the button again;
+  running, on macOS and Windows it offers *Download and install Ollama*: after
+  you confirm (it shows the version and size — about 0.2 GB for macOS' `.dmg`,
+  1.6 GB for Windows' `OllamaSetup.exe`), it downloads Ollama's official,
+  signed installer from its GitHub release into your system's temp folder
+  (`remarkable-ink-ollama`, outside the vault), checks it against the SHA-256
+  GitHub publishes, and opens it. You finish the installation in the installer
+  (on macOS: drag Ollama to Applications, then open it); the dialogue waits for
+  Ollama to start and carries on. On Linux it shows the official command to run
+  in a terminal — it asks for your password (sudo) and installs Ollama as a
+  system service:
+
+  ```
+  curl -fsSL https://ollama.com/install.sh | sh
+  ```
+
+  If anything fails, it says why and falls back to the link to
+  [ollama.com/download](https://ollama.com/download) — install or start
+  Ollama, then press the button again;
 - if Ollama is not running but LM Studio's server is (`http://localhost:1234`),
   it offers LM Studio instead, with the vision models already downloaded there
   to pick from — it downloads nothing into LM Studio. With no vision model

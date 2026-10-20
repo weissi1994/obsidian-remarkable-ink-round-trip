@@ -17,6 +17,7 @@ export class Modal {
 	static opened: Modal[] = [];
 	contentEl = make("div");
 	title = "";
+	private shown = false;
 	constructor(public app: unknown) {}
 	setTitle(title: string): this {
 		this.title = title;
@@ -24,12 +25,25 @@ export class Modal {
 	}
 	onOpen(): void {}
 	onClose(): void {}
+	/** Like Obsidian: onOpen on open, onClose once on close. */
 	open(): void {
+		this.shown = true;
 		Modal.opened.push(this);
 		this.onOpen();
 	}
 	close(): void {
+		if (!this.shown) return;
+		this.shown = false;
 		this.onClose();
+	}
+}
+
+export class ProgressBarComponent {
+	value = 0;
+	constructor(public containerEl: HTMLElement) {}
+	setValue(value: number): this {
+		this.value = value;
+		return this;
 	}
 }
 
@@ -149,5 +163,11 @@ export function installDomHelpers(): void {
 	global.createDiv = (o: Options = {}) => (global.createEl as (tag: string, o: Options) => HTMLElement)("div", o);
 	proto.empty = function (this: HTMLElement) {
 		this.replaceChildren();
+	};
+	proto.setText = function (this: HTMLElement, text: string) {
+		this.textContent = text;
+	};
+	proto.appendText = function (this: HTMLElement, text: string) {
+		this.append(text);
 	};
 }

@@ -13,6 +13,7 @@
 import { App, ButtonComponent, Modal, ProgressBarComponent } from "obsidian";
 import { LmStudioModal } from "./lmstudiosetup";
 import { notify } from "./notify";
+import { type DesktopInstaller, installOllama } from "./ollamainstall";
 import { DEFAULT_SETTINGS, type RoundTripSettings } from "./settingsmodel";
 import { HttpClient, TransportError } from "./transport/http";
 import {
@@ -27,8 +28,11 @@ import {
 	pullModelBuffered,
 } from "./transport/ollama";
 import { LMSTUDIO_LOCAL, detectLmStudio } from "./transport/lmstudio";
+import { installerAsset } from "./transport/ollamarelease";
 
 const DOWNLOAD_URL = "https://ollama.com/download";
+/** Linux's official install: needs sudo and sets up a service, so it is the owner's to run. */
+const LINUX_INSTALL = "curl -fsSL https://ollama.com/install.sh | sh";
 const LOCAL_ENDPOINT = `${OLLAMA_LOCAL}/v1`;
 const LMSTUDIO_ENDPOINT = `${LMSTUDIO_LOCAL}/v1`;
 /** Where to look when Test connection fails against Ollama: step 2 is OLLAMA_ORIGINS. */
@@ -47,6 +51,8 @@ export interface OllamaSetupHost {
 	http: HttpClient;
 	/** A streaming client for the pull's progress; null where there is none. */
 	stream: NdjsonClient | null;
+	/** Download-and-open for Ollama's installer (#28); null where there is no Node or Electron. */
+	installer: DesktopInstaller | null;
 }
 
 export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => void): Promise<void> {
@@ -68,7 +74,13 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 			}
 			if (choice.kind === "close") return;
 		}
-		if (await new OllamaMissingModal(host.app, found.reason).choice()) {
+		const next = await new OllamaMissingModal(host.app, found.reason, host.installer).choice();
+		if (next === "install" && host.installer !== null) {
+			// "installed" carries on into the model pull; "failed" comes back
+			// here, to the link. Only a cancel stops.
+			if ((await installOllama(host.app, host.http, host.installer)) === "cancelled") return;
+			await setUpLocalOllama(host, refresh);
+		} else if (next === "retry") {
 			await setUpLocalOllama(host, refresh);
 		}
 		return;
@@ -120,20 +132,22 @@ export async function applyAndTest(
 	}
 }
 
-/** Ollama is not answering: link to the installer, or check again. */
+type MissingChoice = "install" | "retry" | "close";
+
+/** Ollama is not answering: download its installer, link to it, or check again. */
 class OllamaMissingModal extends Modal {
-	private retry = false;
-	private resolve: (retry: boolean) => void = () => {};
+	private picked: MissingChoice = "close";
+	private resolve: (choice: MissingChoice) => void = () => {};
 
 	constructor(
 		app: App,
 		private readonly reason: string,
+		private readonly installer: DesktopInstaller | null,
 	) {
 		super(app);
 	}
 
-	/** True when the owner asks to check again. */
-	choice(): Promise<boolean> {
+	choice(): Promise<MissingChoice> {
 		return new Promise((resolve) => {
 			this.resolve = resolve;
 			this.open();
@@ -149,21 +163,44 @@ class OllamaMissingModal extends Modal {
 				"(or start it), then press Set up local reading for me again.",
 		});
 		contentEl.createEl("p", { cls: "setting-item-description", text: this.reason });
+		if (this.installer?.os === "linux") {
+			contentEl.createEl("p", { text: "On Linux, install it from a terminal:" });
+			contentEl.createEl("pre").createEl("code", { text: LINUX_INSTALL });
+			contentEl.createEl("p", {
+				cls: "setting-item-description",
+				text: "It asks for your password (sudo) and installs Ollama as a system service.",
+			});
+		}
 		const buttons = contentEl.createDiv({ cls: "modal-button-container" });
+		if (this.installer !== null && installerAsset(this.installer.os) !== null) {
+			new ButtonComponent(buttons)
+				.setButtonText("Download and install Ollama")
+				.setCta()
+				.onClick(() => this.pick("install"));
+		}
+		if (this.installer?.os === "linux") {
+			new ButtonComponent(buttons).setButtonText("Copy command").onClick(() => {
+				navigator.clipboard.writeText(LINUX_INSTALL).then(
+					() => notify("Copied"),
+					() => notify("Could not copy the command; select it and copy it by hand."),
+				);
+			});
+		}
 		new ButtonComponent(buttons)
 			.setButtonText("Open ollama.com/download")
-			.setCta()
 			.onClick(() => window.open(DOWNLOAD_URL));
-		new ButtonComponent(buttons).setButtonText("Check again").onClick(() => {
-			this.retry = true;
-			this.close();
-		});
+		new ButtonComponent(buttons).setButtonText("Check again").onClick(() => this.pick("retry"));
 		new ButtonComponent(buttons).setButtonText("Close").onClick(() => this.close());
+	}
+
+	private pick(choice: MissingChoice): void {
+		this.picked = choice;
+		this.close();
 	}
 
 	onClose(): void {
 		this.contentEl.empty();
-		this.resolve(this.retry);
+		this.resolve(this.picked);
 	}
 }
 

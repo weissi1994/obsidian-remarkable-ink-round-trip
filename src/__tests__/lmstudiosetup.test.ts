@@ -129,6 +129,7 @@ describe("setUpLocalOllama with LM Studio", () => {
 			},
 			http,
 			stream: null,
+			installer: null,
 		};
 		return { setup, settings, calls, tested: () => tested };
 	}

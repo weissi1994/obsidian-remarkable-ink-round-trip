@@ -33,6 +33,12 @@
   Cancel — points the OCR settings at it and runs *Test connection*. If Ollama
   is not running it links to the installer. The manual endpoint settings stay
   for everything else.
+- **Download and install Ollama (desktop):** when *Set up local reading for me*
+  finds no Ollama, macOS and Windows get a button that downloads Ollama's
+  official installer from its GitHub release — after you confirm, with its
+  size, progress and a Cancel — checks it against the published SHA-256, opens
+  it, and carries on once Ollama is running. Linux gets the official install
+  command to copy. Any failure falls back to the ollama.com/download link.
 - **One-click setup finds LM Studio too:** when Ollama is not running but LM
   Studio's server is, *Set up local reading for me* offers LM Studio and the
   vision models already downloaded there (loaded ones first), points the OCR
