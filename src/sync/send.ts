@@ -178,7 +178,7 @@ export async function sendNote(
 		const parentId = deps.resolveParent
 			? await deps.resolveParent(note.path)
 			: undefined;
-		const blocks = parseBlocks(markdown, { html: true, quotePictures: true });
+		const blocks = parseBlocks(markdown, { html: true, quotePictures: true, nestedQuotes: true });
 		const images = (await deps.ink.loadImages?.(note)) ?? {};
 		const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
 		const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);

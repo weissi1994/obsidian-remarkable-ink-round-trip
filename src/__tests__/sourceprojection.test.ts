@@ -275,3 +275,37 @@ describe("projectOntoSource", () => {
 		).toBeNull();
 	});
 });
+
+describe("projectOntoSource inside a quote that holds blocks (#22)", () => {
+	const QUOTED = [
+		"Before the callout.",
+		"",
+		"> [!note] Plan",
+		"> Read this first.",
+		"> | Day | Task |",
+		"> | --- | --- |",
+		"> | Monday | Review notes |",
+		"> - [ ] call back",
+		"",
+		"After the callout.",
+	].join("\n");
+
+	it("marks the words of a quoted table cell where they are in the note", async () => {
+		const pre = preprocess(QUOTED, { resolveEmbed: () => ({ kind: "missing" }) });
+		const quoted = (await renderPdf(parseBlocks(pre.markdown, { html: true, quotePictures: true, nestedQuotes: true }), { title: "t", docId: "d" })).layout;
+		const words = quoted.lines.flatMap((line) => line.words);
+		const id = (text: string) => words.find((word) => word.text === text)!.id;
+		const out = projectOntoSource({
+			source: QUOTED,
+			layout: quoted,
+			marks: [
+				{ kind: "strikethrough", page: 1, words: [id("Review")] },
+				{ kind: "circle", page: 1, words: [id("back")] },
+			],
+			highlights: [],
+		})?.markdown;
+		expect(out).toContain("> | Monday | ~~Review~~ notes |");
+		expect(out).toContain("> - [ ] call **back**");
+		expect(out).toContain("> | --- | --- |");
+	});
+});
