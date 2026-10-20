@@ -243,10 +243,20 @@ async function pictureOf(
 	let transcript: string | undefined;
 	if (deps.transcribe !== undefined) {
 		try {
-			const text = await deps.transcribe({ ...request, quote });
-			if (text !== null && text.trim() !== "") {
-				transcript = text.trim();
-				if (scan.ink) scan.ink.transcribed++;
+			const read = await deps.transcribe({ ...request, quote });
+			if (read !== null && read.text.trim() !== "") {
+				transcript = read.text.trim();
+				if (scan.ink) {
+					scan.ink.transcribed++;
+					// Who read it, and how sure: averaged per reader at render time,
+					// so a tuner can tell builtin-junk from WritePad-junk.
+					if (read.by !== undefined) {
+						const readers = (scan.ink.readers ??= {});
+						const agg = (readers[read.by] ??= { count: 0, scoreSum: 0 });
+						agg.count++;
+						agg.scoreSum += read.score ?? 0;
+					}
+				}
 			}
 		} catch (error) {
 			deps.log?.(`    transcription failed: ${error instanceof Error ? error.message : String(error)}`);

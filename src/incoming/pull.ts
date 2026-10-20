@@ -16,6 +16,7 @@ import type { MarkKind } from "./marks";
 import type { Stroke } from "./rmlines";
 import type { InkRender } from "../ink/inkrender";
 import type { RemarkPlace } from "../ink/inkimage";
+import type { ReaderName } from "../ocr/samples";
 import { collectInkAnnotations } from "./inkpull";
 
 /** One file belonging to a device document. */
@@ -56,6 +57,13 @@ export interface DocumentScan {
 		partialWords: number;
 		ownStrokes: number;
 		transcribed: number;
+		/**
+		 * Which reader produced the transcribed remarks, and how sure it was —
+		 * count and summed score per reader, averaged at render time. Optional so
+		 * older scans (and runs that read nothing) stay valid. Endpoint readings
+		 * carry no score, so they contribute 0 to the sum.
+		 */
+		readers?: Partial<Record<ReaderName, { count: number; scoreSum: number }>>;
 	};
 	/** How the vault block came out: annotated copy or summary (GP_E3_S14). */
 	written?: WriteOutcome;
@@ -181,7 +189,9 @@ export interface PullDeps {
 	 * Ink fork: read handwriting as text (opt-in OCR). Absent = off. Returns
 	 * null when the endpoint saw no words.
 	 */
-	transcribe?: (request: StrokeRenderRequest & { quote?: string }) => Promise<string | null>;
+	transcribe?: (
+		request: StrokeRenderRequest & { quote?: string },
+	) => Promise<{ text: string; by?: ReaderName; score?: number } | null>;
 	/** Keep the ink image next to a transcript (default true). */
 	keepImageWithTranscript?: boolean;
 	/**

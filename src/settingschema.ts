@@ -455,6 +455,13 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				control: { type: "toggle" },
 				visibleWhen: { key: "ocrMode", in: ["builtin", "endpoint"] },
 			},
+			{
+				key: "ocrDiagnostics",
+				name: "Show reader diagnostics in the import report",
+				desc: "Show which reader produced each remark and how confident it was, in the import report.",
+				control: { type: "toggle" },
+				visibleWhen: { key: "ocrMode", in: ["builtin", "endpoint"] },
+			},
 		],
 	},
 	{
