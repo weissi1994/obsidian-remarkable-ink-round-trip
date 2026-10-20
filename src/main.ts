@@ -65,6 +65,8 @@ import { parseRmPage } from "./incoming/rmlines";
 import { confirmAllRemarks, confirmRemarkAt, findRemark, remarkAt, remarkId } from "./incoming/remarkid";
 import { highlightedText, insertRemarkText } from "./incoming/remarkinsert";
 import { RemarkControls } from "./remarkui";
+import { RemarkOverlays } from "./remarkoverlayui";
+import { resolveLayoutOptions } from "./convert/pdf";
 import { Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
@@ -153,6 +155,7 @@ export default class RoundTripPlugin extends Plugin {
 	private writepad: Promise<WritePad | null> | null = null;
 	private samplesDirty = false;
 	private syncTimer: number | null = null;
+	private remarkOverlays: RemarkOverlays | null = null;
 	/** What every copy of the vault shares (sync/syncstate.ts); set up on load. */
 	state: SyncState = new SyncState(vaultFs(this.app), DEFAULT_SETTINGS.syncStateFolder);
 	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
@@ -311,6 +314,20 @@ export default class RoundTripPlugin extends Plugin {
 		// Ink fork: confirm or correct a handwritten remark's reading in the note.
 		const remarkControls = new RemarkControls(this.app, (file, id) => this.insertRemark(file, id));
 		this.registerMarkdownPostProcessor(remarkControls.process);
+		// Ink fork: unconfirmed remarks drawn faded over the text, where they were written (#29).
+		this.remarkOverlays = new RemarkOverlays(this.app, {
+			enabled: () => this.settings.inkRemarkOverlay,
+			readInk: (imageName) => this.state.readInk(imageName),
+			layoutFor: (notePath) =>
+				resolveLayoutOptions(Object.values(this.settings.mappings).find((entry) => entry.notePath === notePath)?.pdfLayout),
+		});
+		this.registerMarkdownPostProcessor(this.remarkOverlays.process);
+		this.registerEditorExtension(this.remarkOverlays.extension);
+		this.registerEvent(
+			this.app.vault.on("modify", (file) => {
+				if (file instanceof TFile) this.remarkOverlays?.changed(file);
+			}),
+		);
 		this.addCommand({
 			id: "confirm-remark-reading",
 			name: "Confirm handwriting reading at cursor",
@@ -518,6 +535,7 @@ export default class RoundTripPlugin extends Plugin {
 	async onExternalSettingsChange(): Promise<void> {
 		await this.syncCoordinator.enqueue("pull", async () => {
 			await this.loadSettings();
+			this.remarkOverlays?.sync();
 			this.setupWatcher();
 			this.setupFetchShim();
 			this.setupSyncTimer();
@@ -527,6 +545,7 @@ export default class RoundTripPlugin extends Plugin {
 	async saveSettings(): Promise<void> {
 		await this.syncCoordinator.enqueue("pull", async () => {
 			await this.persistSettings();
+			this.remarkOverlays?.sync();
 			this.setupWatcher();
 			this.setupFetchShim();
 			this.setupSyncTimer();

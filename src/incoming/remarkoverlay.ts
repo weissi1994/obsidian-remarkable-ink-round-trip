@@ -123,3 +123,15 @@ export function findWordRun(text: string, row: string): { start: number; end: nu
 		rowWords(row),
 	).map((at) => ({ start: spans[at].start, end: spans[at].end }));
 }
+
+/**
+ * The note's line pitch over the tablet's at the column's scale, for
+ * overlayBox's `lineRatio`: 1 when either is unknown, and kept within
+ * half to twice, so an odd measurement cannot throw the ink far off.
+ */
+export function pitchRatio(notePitchPx: number, page: OverlayPage & { fontSize: number; lineHeight: number }, columnPx: number): number {
+	const columnPt = page.pageWidth - 2 * page.margin;
+	const tabletPx = page.fontSize * page.lineHeight * (columnPx / columnPt);
+	if (!(notePitchPx > 0) || !(tabletPx > 0) || !Number.isFinite(notePitchPx / tabletPx)) return 1;
+	return Math.max(0.5, Math.min(2, notePitchPx / tabletPx));
+}

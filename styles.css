@@ -78,3 +78,39 @@
 	width: 100%;
 	font-family: var(--font-text);
 }
+
+/*
+ * Ink fork: an unconfirmed remark's ink, faded over the text where it was
+ * written. Only a picture — clicks and selection go to the text under it.
+ * Multiplied, its white paper drops out; in a dark theme it is inverted and
+ * screened instead, so the ink shows light.
+ */
+.remarkable-ink-remark-overlay-host {
+	position: relative;
+}
+
+.remarkable-ink-remark-overlay-layer {
+	pointer-events: none;
+	mix-blend-mode: multiply;
+}
+
+.remarkable-ink-remark-overlay {
+	position: absolute;
+	top: var(--remarkable-ink-overlay-top);
+	left: var(--remarkable-ink-overlay-left);
+	width: var(--remarkable-ink-overlay-width);
+	max-width: none;
+	height: var(--remarkable-ink-overlay-height);
+	opacity: 0.5;
+	pointer-events: none;
+	mix-blend-mode: multiply;
+}
+
+.theme-dark .remarkable-ink-remark-overlay-layer,
+.theme-dark .remarkable-ink-remark-overlay {
+	mix-blend-mode: screen;
+}
+
+.theme-dark .remarkable-ink-remark-overlay {
+	filter: invert(1);
+}

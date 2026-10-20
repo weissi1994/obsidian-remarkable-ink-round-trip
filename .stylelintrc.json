@@ -25,6 +25,9 @@
 		"   resize handle, so they degrade to nothing. Add css-overflow here too if",
 		"   you lower the iOS floor below 16, but only while you use neither",
 		"   `overflow: clip` nor `overlay` — check before you add it.",
+		"   css-mixblendmode is ignored too: Safari's partial support lacks only",
+		"   the non-separable modes (hue, saturation, color, luminosity); the",
+		"   remark overlay uses multiply and screen, which every floor supports.",
 		"3. property-no-vendor-prefix is OFF, and that is deliberate. The rule is",
 		"   browser-blind: it flags every -webkit- prefix on principle, without",
 		"   consulting browserslist. For a plugin that runs in WKWebView its advice",
@@ -57,7 +60,8 @@
 					"css-nesting",
 					"css-cascade-layers",
 					"css3-cursors-grab",
-					"css-resize"
+					"css-resize",
+					"css-mixblendmode"
 				]
 			}
 		],

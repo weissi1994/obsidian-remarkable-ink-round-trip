@@ -92,6 +92,8 @@ export interface RoundTripSettings {
 	 * was written, or as the callout the note shows (title, text and ink).
 	 */
 	inkRemarks: "in-place" | "callout";
+	/** Unconfirmed remarks shown faded over the note's text, where they were written. */
+	inkRemarkOverlay: boolean;
 	/** Mermaid diagrams in a handwritten notebook: drawn by hand, or as code. */
 	inkDiagrams: "handwritten" | "code";
 	/** Highlighter colour behind code and quotes, and for diagram fills. */
@@ -157,6 +159,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	pendingWordSheet: null,
 	inkImages: "colour-hatch",
 	inkRemarks: "in-place",
+	inkRemarkOverlay: true,
 	inkDiagrams: "handwritten",
 	inkAccents: true,
 	erasedAs: "delete",

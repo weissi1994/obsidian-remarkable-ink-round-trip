@@ -358,6 +358,15 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				},
 			},
 			{
+				key: "inkRemarkOverlay",
+				name: "Show unconfirmed remarks on the text",
+				desc:
+					"Draws each remark you have not confirmed yet faded over the note, " +
+					"roughly where you wrote it on the page. Only a picture: the note is " +
+					"unchanged, and it goes away once the remark is confirmed or inserted as text.",
+				control: { type: "toggle" },
+			},
+			{
 				key: "inkDiagrams",
 				name: "Mermaid diagrams",
 				desc:

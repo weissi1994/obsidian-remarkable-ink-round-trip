@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InkStrokes } from "../ink/inkimage";
-import { findWordRun, overlayBox, pendingRemarks, remarkAnchor } from "../incoming/remarkoverlay";
+import { findWordRun, overlayBox, pendingRemarks, pitchRatio, remarkAnchor } from "../incoming/remarkoverlay";
 
 /*
  * An unconfirmed remark is shown faded over the note, roughly where the ink
@@ -132,5 +132,21 @@ describe("findWordRun", () => {
 	it("finds the words as rendered, markdown and punctuation aside", () => {
 		const text = "Intro. The quick brown fox, jumps!";
 		expect(findWordRun(text, "quick brown fox jumps")).toEqual([{ start: text.indexOf("quick"), end: text.indexOf("quick") + 5 }]);
+	});
+});
+
+describe("pitchRatio", () => {
+	const page = { ...PAGE, fontSize: 11, lineHeight: 1.5 };
+
+	it("compares the note's line pitch with the tablet's at the column's scale", () => {
+		const columnPx = COLUMN_PT * 2;
+		expect(pitchRatio(16.5 * 2, page, columnPx)).toBeCloseTo(1, 6);
+		expect(pitchRatio(16.5, page, columnPx)).toBeCloseTo(0.5, 6);
+	});
+
+	it("falls back to 1 without a measurement, and stays within reason", () => {
+		expect(pitchRatio(Number.NaN, page, 700)).toBe(1);
+		expect(pitchRatio(0, page, 700)).toBe(1);
+		expect(pitchRatio(1000, page, 700)).toBe(2);
 	});
 });
