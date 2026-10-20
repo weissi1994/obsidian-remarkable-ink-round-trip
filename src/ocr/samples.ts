@@ -26,21 +26,25 @@
 
 import type { ImportedMark } from "../incoming/pull";
 import { findRemark, remarkText, type RemarkRef } from "../incoming/remarkid";
-import { cloudOf, matchDistance, splitLineInto, splitWords, type Point } from "./recognize";
+import { cloudOf, cutLetters, matchDistance, splitLineInto, splitWords, type Point } from "./recognize";
 
 export { remarkText };
 
 /**
  * Samples kept per word; over this the most redundant goes first (see
  * `addSample`). Raised from 3: the #5 spike showed accumulated samples help
- * recall, and read-time work stays in budget because the scaling MR (!15)
- * bounds how many samples the reader actually scores per word — the two are
- * complementary (!15 caps the read, this grows the store without keeping
- * junk). 10 sits mid-range of the 8–12 the budget allows. The format is
- * unchanged (`words: Record<string, Point[][][]>`), so a store written with
+ * recall, and read-time work stays in budget because the scaling MR (!15, now
+ * on main) bounds how many samples the reader actually scores per word — the
+ * two are complementary (!15 caps the read, this grows the store without
+ * keeping junk). 10 sits mid-range of the 8–12 the budget allows. The format
+ * is unchanged (`words: Record<string, Point[][][]>`), so a store written with
  * the old cap of 3 stays valid and needs no migration.
  */
 export const PER_WORD = 10;
+/** Samples kept per letter shape; the oldest goes first. */
+const PER_LETTER = 3;
+/** Letter ink is stored in cap units; coordinates are rounded to this many places. */
+const LETTER_PLACES = 1000;
 /** Remarks remembered for learning that were never corrected, newest kept. */
 const REMARKS_KEPT = 500;
 /** Corrected or confirmed remarks kept (worked examples, training export), newest kept. */
@@ -114,6 +118,12 @@ export interface SampleStore {
 	format: 1;
 	/** Word as written → its samples, each a list of strokes (device units). */
 	words: Record<string, Point[][][]>;
+	/**
+	 * Letter as written → its samples, each a list of strokes in cap units with
+	 * the word baseline at y = 0 (lettersTemplates reads them). Learned only from
+	 * corrections whose ink separates cleanly into letters; absent in old stores.
+	 */
+	letters?: Record<string, Point[][][]>;
 	/** Remarks by id — or by the vault path of their image, in stores from before ids. */
 	remarks: Record<string, RemarkRecord>;
 }
@@ -124,7 +134,7 @@ export function isVerified(record: RemarkRecord): boolean {
 }
 
 export function emptyStore(): SampleStore {
-	return { format: 1, words: {}, remarks: {} };
+	return { format: 1, words: {}, letters: {}, remarks: {} };
 }
 
 const round = (strokes: Point[][]) =>
@@ -166,6 +176,44 @@ function keepDiverse(samples: Point[][][]): Point[][][] {
 		live.splice(dropAt, 1);
 	}
 	return live.map((i) => samples[i]);
+}
+
+function boxOf(strokes: Point[][]): { minX: number; maxX: number; minY: number; maxY: number } {
+	const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+	for (const p of strokes.flat()) {
+		box.minX = Math.min(box.minX, p.x);
+		box.maxX = Math.max(box.maxX, p.x);
+		box.minY = Math.min(box.minY, p.y);
+		box.maxY = Math.max(box.maxY, p.y);
+	}
+	return box;
+}
+
+/**
+ * Keep each letter of a word the owner wrote, in their own hand — but only when
+ * the word's ink separates cleanly into exactly its letters (cutLetters). Each
+ * letter's strokes are stored in cap units with the word baseline at y = 0, so
+ * lettersTemplates can read its shape and where it sits back out. Cursive ink
+ * that cannot be segmented teaches nothing here; its whole-word sample stands.
+ */
+function learnLetters(store: SampleStore, word: string, strokes: Point[][]): void {
+	const chars = [...word];
+	if (chars.length === 0) return;
+	const letters = cutLetters(strokes, chars.length);
+	if (letters === null || letters.length !== chars.length) return;
+	const wordBox = boxOf(strokes);
+	const baseline = wordBox.maxY;
+	const cap = wordBox.maxY - wordBox.minY || 1;
+	const place = (v: number) => Math.round(v * LETTER_PLACES) / LETTER_PLACES;
+	const kept = (store.letters ??= {});
+	for (let i = 0; i < chars.length; i++) {
+		const ink = letters[i].filter((stroke) => stroke.length > 0);
+		if (ink.flat().length < 2) continue;
+		const norm = ink.map((stroke) =>
+			stroke.map((p) => ({ x: place((p.x - wordBox.minX) / cap), y: place((p.y - baseline) / cap) })),
+		);
+		kept[chars[i]] = [...(kept[chars[i]] ?? []), norm].slice(-PER_LETTER);
+	}
 }
 
 /** Where a remark is found in its note: keys from before ids are image paths. */
@@ -339,7 +387,10 @@ export function learnCorrection(store: SampleStore, record: RemarkRecord, correc
 		const text = textLines.flat();
 		if (ink.length === text.length) pairs = ink.map((strokes, i) => [text[i], strokes]);
 	}
-	for (const [word, strokes] of pairs) addSample(store, word, strokes);
+	for (const [word, strokes] of pairs) {
+		addSample(store, word, strokes);
+		learnLetters(store, word, strokes);
+	}
 	return pairs.length;
 }
 
