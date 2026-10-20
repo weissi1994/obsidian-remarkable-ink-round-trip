@@ -402,7 +402,8 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 			"the device. It reads separate print letters well and leaves joined-up " +
 			"writing it is unsure of as image only. A vision endpoint is the " +
 			"alternative for that: an OpenAI-compatible model you choose, local (Ollama, " +
-			"LM Studio) or hosted; only the cropped remark images are sent there.",
+			"LM Studio) or hosted; only the cropped remark images are sent there. " +
+			"First-time endpoint setup (Ollama/LM Studio): see docs/ocr-endpoint-setup.md.",
 		items: [
 			{
 				key: "ocrMode",
