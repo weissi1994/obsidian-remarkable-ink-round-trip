@@ -108,6 +108,24 @@ export function itemIds(boxes: SheetBox[]): Map<SheetBox, string> {
 	return ids;
 }
 
+/**
+ * The written boxes of a test sheet (handsheet.ts boxInk) as capture items,
+ * in sheet order, not yet read. `boxes` is the whole sheet's, for the row
+ * numbers; boxes match by place, so either may come from its own build.
+ */
+export function captureItems(boxes: SheetBox[], ink: Map<SheetBox, Stroke[]>): CaptureItem[] {
+	const place = (box: SheetBox) => `${box.page}:${box.left}:${box.top}`;
+	const byPlace = new Map([...ink].map(([box, strokes]) => [place(box), strokes]));
+	const ids = itemIds(boxes);
+	const items: CaptureItem[] = [];
+	for (const box of boxes) {
+		const strokes = byPlace.get(place(box)) ?? [];
+		if (strokes.length === 0) continue;
+		items.push({ id: ids.get(box)!, prompt: box.char, box, strokes: strokes.map(flattenStroke), readings: {} });
+	}
+	return items;
+}
+
 /** A tablet stroke as stored: its points flattened. */
 export function flattenStroke(stroke: Stroke): CaptureStroke {
 	return {
