@@ -160,6 +160,7 @@ export class InkEdge {
 			...(s.inkAccents ? { accents: true as const } : {}),
 			inline: true,
 			quotePictures: true,
+			nestedQuotes: true,
 		};
 	}
 
@@ -230,7 +231,11 @@ export class InkEdge {
 		// The pictures exactly as quantised at send time, never re-read from disk.
 		const options = { ...found, images: sent.images, drawings: sent.drawings };
 		return renderInk(
-			parseBlocks(sent.markdown, { html: entry.ink.inline === true, quotePictures: entry.ink.quotePictures === true }),
+			parseBlocks(sent.markdown, {
+				html: entry.ink.inline === true,
+				quotePictures: entry.ink.quotePictures === true,
+				nestedQuotes: entry.ink.nestedQuotes === true,
+			}),
 			sent.title,
 			{ ...entry.pdfLayout, typo: entry.pdfLayout.typo ?? 1 },
 			options,
