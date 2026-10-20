@@ -246,7 +246,9 @@ per note, pictures stored once by their content. Sync the vault with git,
 Obsidian Sync or Syncthing and every copy knows what the others sent — none sends
 duplicates, and each can bring back what you did on the tablet. Notebooks written
 by any copy are recognised by their pages, so they are never brought in as new.
-Your pairing token and device settings stay in the plugin's own data.
+A hand learned on one copy is the hand every copy writes and reads with, a sheet
+sent from one can be read back on another, and joined-up words and corrections
+learned anywhere are merged, never overwritten. Your pairing token and device settings stay in the plugin's own data.
 
 Turn **Sync automatically from this device** off on all but one copy: two copies
 syncing at once could both send a note changed before the vault sync carried

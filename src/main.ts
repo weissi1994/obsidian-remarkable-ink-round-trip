@@ -56,7 +56,7 @@ import { EmbedContent } from "./preprocess/preprocess";
 import { DOCID_FRONTMATTER_KEY, generateDocId } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
-import { SyncState, type StateFs } from "./sync/syncstate";
+import { SyncState, type SharedHandwriting, type StateFs } from "./sync/syncstate";
 import { findNewNotebooks, importedNote, noteFileName, writtenByPlugin } from "./sync/deviceimport";
 import { parseRmScene } from "./incoming/rmscene";
 import { readNotebook } from "./transport/notebook";
@@ -484,6 +484,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
 		const shared = await this.state.loadMappings();
 		this.settings.mappings = { ...legacy, ...shared };
+		await this.adoptHandwriting();
 		if (Object.keys(legacy).some((docId) => shared[docId] === undefined)) {
 			const moved = await this.ink.migrateToState();
 			await this.state.saveMappings(this.settings.mappings);
@@ -506,6 +507,25 @@ export default class RoundTripPlugin extends Plugin {
 	/** Take in what other copies of the vault synced since (a git pull). */
 	private async refreshState(): Promise<void> {
 		this.settings.mappings = await this.state.refresh(this.settings.mappings);
+		await this.adoptHandwriting();
+	}
+
+	/**
+	 * The hand in use and the sheets waiting on the tablet are shared too, so
+	 * every copy writes and reads with the hand learned on any of them. A
+	 * vault without them yet gets this device's.
+	 */
+	private async adoptHandwriting(): Promise<void> {
+		const shared = await this.state.readHandwriting();
+		if (shared === null) {
+			if (this.settings.handVersion !== "" || this.settings.pendingSheet !== null || this.settings.pendingWordSheet !== null) {
+				await this.state.saveHandwriting(handwritingOf(this.settings));
+			}
+			return;
+		}
+		this.settings.handVersion = shared.handVersion;
+		this.settings.pendingSheet = shared.pendingSheet;
+		this.settings.pendingWordSheet = shared.pendingWordSheet;
 	}
 
 	/**
@@ -540,6 +560,7 @@ export default class RoundTripPlugin extends Plugin {
 			this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
 		}
 		await this.state.saveMappings(this.settings.mappings);
+		await this.state.saveHandwriting(handwritingOf(this.settings));
 	}
 
 	onunload(): void {
@@ -1283,6 +1304,7 @@ export default class RoundTripPlugin extends Plugin {
 		}
 
 		await this.refreshState();
+		await this.ink.refreshSamples();
 		const log: string[] = [];
 		this.inkCache.clear();
 		this.remarkImages.clear();
@@ -2348,3 +2370,11 @@ const obsidianHttp: HttpClient = async (request) => {
 		arrayBuffer: response.arrayBuffer,
 	};
 };
+
+function handwritingOf(settings: RoundTripSettings): SharedHandwriting {
+	return {
+		handVersion: settings.handVersion,
+		pendingSheet: settings.pendingSheet,
+		pendingWordSheet: settings.pendingWordSheet,
+	};
+}

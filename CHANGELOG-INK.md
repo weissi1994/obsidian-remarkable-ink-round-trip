@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Learned handwriting follows the vault:** which hand is in use and the
+  sheets waiting on the tablet now live in `reMarkable/.sync/handwriting.json`
+  too, so every copy of the vault uses the hand learned on any of them. Word
+  samples and corrections learned on different copies are merged at each sync
+  instead of one copy's overwriting the other's.
+
 - **Handwriting sheets have a layer of their own to write on:** the boxes,
   guides and labels sit on a "Sheet" layer, and the page opens on an empty
   "Your handwriting" layer above it. The tablet's eraser and lasso only touch

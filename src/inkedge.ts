@@ -36,7 +36,7 @@ import type { Picture } from "./ink/inkimage";
 import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
-import { addSample, emptyStore, type SampleStore } from "./ocr/samples";
+import { addSample, emptyStore, mergeStores, type SampleStore } from "./ocr/samples";
 import type { DeviceItem } from "./sync/deviceimport";
 import type { SyncState } from "./sync/syncstate";
 import type { HttpClient } from "./transport/http";
@@ -320,8 +320,18 @@ export class InkEdge {
 		return this.samples;
 	}
 
+	/** Take in what other copies of the vault learned since (they share the file). */
+	async refreshSamples(): Promise<void> {
+		if (this.samples === null) return;
+		const disk = await this.host.state.readSamples();
+		// In place: callers hold on to the store they loaded.
+		if (disk !== null) Object.assign(this.samples, mergeStores(disk, this.samples));
+	}
+
 	async saveSamples(): Promise<void> {
-		if (this.samples !== null) await this.host.state.writeSamples(this.samples);
+		if (this.samples === null) return;
+		await this.refreshSamples();
+		await this.host.state.writeSamples(this.samples);
 	}
 
 	/** Send a fresh word sheet and remember it as pending. */

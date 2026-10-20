@@ -113,6 +113,28 @@ export function emptyStore(): SampleStore {
 	return { format: 1, words: {}, remarks: {} };
 }
 
+/**
+ * Two copies of the store — another device's, read from the shared folder,
+ * and this one's — as one: every word's samples from both (newest kept), and
+ * per remark the owner's verified text over a reading, else the latest.
+ */
+export function mergeStores(disk: SampleStore, mine: SampleStore): SampleStore {
+	const words: Record<string, Point[][][]> = { ...disk.words };
+	for (const [word, samples] of Object.entries(mine.words)) {
+		const known = new Set((words[word] ?? []).map((sample) => JSON.stringify(sample)));
+		words[word] = [...(words[word] ?? []), ...samples.filter((sample) => !known.has(JSON.stringify(sample)))].slice(-PER_WORD);
+	}
+	const remarks: Record<string, RemarkRecord> = { ...disk.remarks };
+	for (const [key, record] of Object.entries(mine.remarks)) {
+		const other = remarks[key];
+		const rank = (r: RemarkRecord) => Number(isVerified(r));
+		if (other === undefined || rank(record) > rank(other) || (rank(record) === rank(other) && record.at >= other.at)) {
+			remarks[key] = record;
+		}
+	}
+	return { format: 1, words, remarks };
+}
+
 const round = (strokes: Point[][]) =>
 	strokes.map((stroke) => stroke.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) })));
 

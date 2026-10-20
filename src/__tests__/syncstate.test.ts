@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MappingEntry } from "../id/mapping";
+import { emptyStore, mergeStores, type RemarkRecord } from "../ocr/samples";
 import { SyncState, type StateFs } from "../sync/syncstate";
 
 function memoryFs() {
@@ -87,5 +88,42 @@ describe("shared sync state", () => {
 		const merged = await state.refresh({ a: entry("a", "d1"), b: entry("b", "d2") });
 		expect(merged.b.deviceDocId).toBe("d2");
 		expect(state.unreadable).toEqual([`${ROOT}/notes/b.json`]);
+	});
+});
+
+describe("learned handwriting shared between copies", () => {
+	const hand = { handVersion: "hand-1", pendingSheet: null, pendingWordSheet: null };
+
+	it("carries the hand in use to another copy, written only when it changed", async () => {
+		const { fs, writes } = memoryFs();
+		await new SyncState(fs, ROOT).saveHandwriting(hand);
+		const other = new SyncState(fs, ROOT);
+		expect(await other.readHandwriting()).toEqual(hand);
+		const before = writes();
+		await other.saveHandwriting(hand);
+		expect(writes()).toBe(before);
+	});
+
+	it("does not undo a newer hand from another copy with an unchanged one", async () => {
+		const { fs } = memoryFs();
+		const a = new SyncState(fs, ROOT);
+		const b = new SyncState(fs, ROOT);
+		await a.saveHandwriting(hand);
+		await b.readHandwriting();
+		await a.saveHandwriting({ ...hand, handVersion: "hand-2" });
+		await b.saveHandwriting(hand);
+		expect((await new SyncState(fs, ROOT).readHandwriting())?.handVersion).toBe("hand-2");
+	});
+
+	it("merges word samples and remarks two copies learned", () => {
+		const stroke = (x: number) => [[{ x, y: 0 }]];
+		const remark = (transcript: string, at: string, corrected = false): RemarkRecord => ({ strokes: stroke(1), transcript, at, corrected });
+		const disk = { ...emptyStore(), words: { Montag: [stroke(1)] }, remarks: { r1: remark("Mantag", "2026-10-20", false), r2: remark("fixed", "2026-10-01", true) } };
+		const mine = { ...emptyStore(), words: { Montag: [stroke(1), stroke(2)], heute: [stroke(3)] }, remarks: { r1: remark("Montag", "2026-10-01", true), r2: remark("read again", "2026-10-21") } };
+		const merged = mergeStores(disk, mine);
+		expect(merged.words.Montag).toEqual([stroke(1), stroke(2)]);
+		expect(merged.words.heute).toEqual([stroke(3)]);
+		expect(merged.remarks.r1.transcript).toBe("Montag");
+		expect(merged.remarks.r2.transcript).toBe("fixed");
 	});
 });

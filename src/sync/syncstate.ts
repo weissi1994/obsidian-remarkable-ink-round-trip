@@ -15,7 +15,7 @@
  */
 
 import type { MappingEntry, MappingTable } from "../id/mapping";
-import type { HandLibrary } from "../ink/handsheet";
+import type { HandLibrary, PendingSheet } from "../ink/handsheet";
 import type { InkDrawing } from "../ink/inkdrawing";
 import type { InkStrokes, Picture } from "../ink/inkimage";
 import type { SampleStore } from "../ocr/samples";
@@ -55,9 +55,18 @@ function hash(text: string): string {
 	return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
 }
 
+/** Which learned hand is in use, and the sheets waiting on the tablet. */
+export interface SharedHandwriting {
+	handVersion: string;
+	pendingSheet: PendingSheet | null;
+	pendingWordSheet: PendingSheet | null;
+}
+
 export class SyncState {
 	/** Each note's mapping as last written or read, to write only what changed. */
 	private readonly seen = new Map<string, string>();
+	/** handwriting.json as last written or read, likewise. */
+	private seenHandwriting: string | null = null;
 	/** Files that could not be read on the last load, for the log. */
 	unreadable: string[] = [];
 
@@ -225,6 +234,20 @@ export class SyncState {
 
 	writeHand(library: HandLibrary): Promise<void> {
 		return this.writeJson(this.path("hands", `${library.version}.json`), library);
+	}
+
+	async readHandwriting(): Promise<SharedHandwriting | null> {
+		const shared = await this.readJson<SharedHandwriting>(this.path("handwriting.json"));
+		if (shared !== null) this.seenHandwriting = JSON.stringify(shared);
+		return shared;
+	}
+
+	/** Written only when it changed here, so a copy never undoes another's newer hand. */
+	async saveHandwriting(shared: SharedHandwriting): Promise<void> {
+		const text = JSON.stringify(shared);
+		if (text === this.seenHandwriting) return;
+		await this.writeJson(this.path("handwriting.json"), shared);
+		this.seenHandwriting = text;
 	}
 
 	readSamples(): Promise<SampleStore | null> {
