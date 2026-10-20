@@ -12,10 +12,9 @@ export function setIcon(el: HTMLElement, icon: string): void {
 	el.setAttribute("data-icon", icon);
 }
 
-/** Every modal opened, newest last, so a test can drive the one on screen. */
-export const openedModals: Modal[] = [];
-
 export class Modal {
+	/** Every modal opened so far, newest last, for tests to drive. */
+	static opened: Modal[] = [];
 	contentEl = make("div");
 	title = "";
 	private shown = false;
@@ -29,7 +28,7 @@ export class Modal {
 	/** Like Obsidian: onOpen on open, onClose once on close. */
 	open(): void {
 		this.shown = true;
-		openedModals.push(this);
+		Modal.opened.push(this);
 		this.onOpen();
 	}
 	close(): void {
@@ -44,6 +43,44 @@ export class ProgressBarComponent {
 	constructor(public containerEl: HTMLElement) {}
 	setValue(value: number): this {
 		this.value = value;
+		return this;
+	}
+}
+
+/** Notices land here instead of on screen. */
+export class Notice {
+	static shown: string[] = [];
+	constructor(message: string) {
+		Notice.shown.push(message);
+	}
+	setMessage(): this {
+		return this;
+	}
+	hide(): void {}
+}
+
+export class DropdownComponent {
+	selectEl: HTMLSelectElement;
+	private changed: (value: string) => void = () => {};
+	constructor(parent: HTMLElement) {
+		this.selectEl = parent.appendChild(make("select"));
+		this.selectEl.addEventListener("change", () => this.changed(this.selectEl.value));
+	}
+	addOption(value: string, display: string): this {
+		const option = this.selectEl.appendChild(make("option"));
+		option.value = value;
+		option.textContent = display;
+		return this;
+	}
+	setValue(value: string): this {
+		this.selectEl.value = value;
+		return this;
+	}
+	getValue(): string {
+		return this.selectEl.value;
+	}
+	onChange(handler: (value: string) => void): this {
+		this.changed = handler;
 		return this;
 	}
 }
@@ -102,6 +139,9 @@ export function installDomHelpers(): void {
 	};
 	proto.createSpan = function (this: HTMLElement, o: Options = {}) {
 		return (proto.createEl as (this: HTMLElement, tag: string, o: Options) => HTMLElement).call(this, "span", o);
+	};
+	proto.appendText = function (this: HTMLElement, text: string) {
+		this.appendChild(document.createTextNode(text));
 	};
 	proto.addClass = function (this: HTMLElement, cls: string) {
 		this.classList.add(cls);

@@ -36,6 +36,7 @@ describe("the settings schema", () => {
 			"handVersion",
 			"pendingSheet",
 			"pendingWordSheet",
+			"pendingTestSheet",
 		]);
 		const described = new Set(specs.map((spec) => spec.key.split(".")[0]));
 		for (const key of Object.keys(DEFAULT_SETTINGS)) {

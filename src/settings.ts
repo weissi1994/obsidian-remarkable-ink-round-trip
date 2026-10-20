@@ -176,6 +176,17 @@ export class RoundTripSettingTab extends PluginSettingTab {
 				action: button("Learn", () => this.plugin.learnWordSheet(), true),
 			},
 			{
+				name: "Handwriting test",
+				desc:
+					"See how well your handwriting is read: copy prepared lines on a test sheet, then save " +
+					"each reader's result with your ink to the vault, to attach to an issue. Learns nothing." +
+					(s.pendingTestSheet === null ? "" : " A test sheet is waiting on the tablet."),
+				action: (el: HTMLElement) => {
+					button("Send", () => this.plugin.sendTestSheet())(el);
+					if (this.plugin.settings.pendingTestSheet !== null) button("Save", () => this.plugin.saveTestSheet(), true)(el);
+				},
+			},
+			{
 				name: "Detect page size",
 				desc: "Read the canvas size from a notebook made on your reMarkable.",
 				action: button("Detect", () => this.plugin.detectPageSize()),
@@ -190,7 +201,8 @@ export class RoundTripSettingTab extends PluginSettingTab {
 				name: "Set up local reading for me",
 				desc:
 					"Desktop only: finds Ollama on this computer, downloads the handwriting model if " +
-					"needed (you confirm first), and points the plugin at it.",
+					"needed (you confirm first), and points the plugin at it. Without Ollama, it also " +
+					"finds LM Studio's server and offers a vision model already downloaded there.",
 				visible: () => Platform.isDesktopApp,
 				action: (el: HTMLElement) => {
 					new ButtonComponent(el).setButtonText("Set up").onClick(async () => {

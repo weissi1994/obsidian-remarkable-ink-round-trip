@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
 import { builtinFont, HandFont } from "../ink/glyphs";
 import { DEVICE_PROFILES, INK_PENS, renderInk } from "../ink/inkrender";
-import { Lexicon, OCR_TRUST, recognize, templatesFrom } from "../ocr/recognize";
+import { TEST_SHEET_PROMPTS } from "../ink/handsheet";
+import { builtinTrusted, Lexicon, OCR_TRUST, recognize, templatesFrom } from "../ocr/recognize";
 import { CURSIVE_SAMPLES, LEAK_SAMPLE, PRINT_SAMPLES } from "./fixtures/handwriting";
 
 /** A sentence "handwritten" in a bundled font, as device strokes. */
@@ -89,6 +90,32 @@ describe("built-in handwriting recognition", () => {
 			expect(result.text, `cursive "${sample.text}" (${sample.font})`).not.toBe(sample.text);
 		}
 	}, 20000); // renders + recognises the whole set — well over the 5s default
+
+	// Red gate for the first real capture (test sheet 2026-10-21-001026): the
+	// owner's joined cursive was tiled with symbol glyphs and these two readings
+	// cleared OCR_TRUST, so WritePad was never asked. Confidence alone cannot
+	// tell them from print; the share of symbols can.
+	it("does not trust a reading that is mostly symbols, however confident", () => {
+		expect(builtinTrusted({ text: "/IäI→✗rl…,%«%.Jl€", confidence: 0.79 })).toBe(false);
+		expect(builtinTrusted({ text: "@:@+m«↑@&↑3]", confidence: 0.79 })).toBe(false);
+		expect(builtinTrusted({ text: "", confidence: 0.99 })).toBe(false);
+		expect(builtinTrusted(null)).toBe(false);
+	});
+
+	it("trusts every test-sheet prompt, symbols and numbers included", () => {
+		for (const prompt of Object.values(TEST_SHEET_PROMPTS).flat()) {
+			expect(builtinTrusted({ text: prompt, confidence: 0.9 }), prompt).toBe(true);
+			expect(builtinTrusted({ text: prompt, confidence: OCR_TRUST - 0.01 }), prompt).toBe(false);
+		}
+	});
+
+	it("keeps every print fixture trusted under the symbol gate", () => {
+		const t = templates("readability", "hershey-sans");
+		for (const sample of PRINT_SAMPLES) {
+			const result = recognize(write(sample.text, sample.font, sample.jitter), t);
+			expect(builtinTrusted(result), `print "${sample.text}" (${sample.font}) read "${result?.text}"`).toBe(true);
+		}
+	}, 20000);
 
 	it("keeps lines apart", () => {
 		const one = write("first line", "readability", 0.3);

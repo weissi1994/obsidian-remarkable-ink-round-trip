@@ -246,6 +246,29 @@ from then on the text is yours:
   reads — to fine-tune a vision model on your hand outside the plugin. See
   [docs/ocr-corrections.md](docs/ocr-corrections.md).
 
+### Test how well your handwriting is read
+
+To find out how well each reader reads *your* hand, or to report that it doesn't:
+
+1. Run **Send handwriting test sheet to reMarkable** (or *Send* under
+   *Settings → Handwriting → Handwriting test*). A notebook of 18 short German
+   and English lines arrives, with dates, numbers, punctuation and a few names.
+2. Copy each line once, under it, the way you normally write, joined-up if that
+   is how you write. Don't tidy it up. Skip any you like.
+3. Let it sync, then run **Save handwriting test sheet to the vault**. Every
+   line is read by today's readers (built-in, WritePad, and the vision endpoint
+   when that is your reader). This **learns nothing**: the test only measures.
+   The result lands in `<handwriting folder>/test-sheets/<date-time>/` and opens
+   as a note. It shows each line's readings with their character error rate
+   (CER), the mean CER per reader, and your ink.
+4. To report it, attach `handwriting-test-<date-time>.json` from that folder to
+   the issue. It holds the prepared lines, your ink of them, the letters learned
+   from your handwriting sheet, and the readings. It holds nothing else from
+   your vault: no notes, note names, remark texts or vault words.
+
+The sheet stays on the tablet, so you can write more lines and save again. Each
+save makes a new folder.
+
 ## Several copies of the vault
 
 What ties a note to its notebook — which notebook it is, the text it was written
@@ -255,7 +278,9 @@ per note, pictures stored once by their content. Sync the vault with git,
 Obsidian Sync or Syncthing and every copy knows what the others sent — none sends
 duplicates, and each can bring back what you did on the tablet. Notebooks written
 by any copy are recognised by their pages, so they are never brought in as new.
-Your pairing token and device settings stay in the plugin's own data.
+A hand learned on one copy is the hand every copy writes and reads with, a sheet
+sent from one can be read back on another, and joined-up words and corrections
+learned anywhere are merged, never overwritten. Your pairing token and device settings stay in the plugin's own data.
 
 Turn **Sync automatically from this device** off on all but one copy: two copies
 syncing at once could both send a note changed before the vault sync carried
@@ -273,6 +298,7 @@ their state across. The others sync when you run **Sync with reMarkable now**.
 | Check reMarkable cloud status (read-only) | Diagnose the connection |
 | Send handwriting sheet / Learn my handwriting / Add handwriting variations | Your letters |
 | Send joined-up word sheet / Learn my joined-up words | Your joined-up writing |
+| Send handwriting test sheet / Save handwriting test sheet to the vault | Measure how well your handwriting is read; learns nothing |
 | Detect reMarkable page size from my notebooks | Read the canvas from a notebook made on the tablet |
 
 ## How it works

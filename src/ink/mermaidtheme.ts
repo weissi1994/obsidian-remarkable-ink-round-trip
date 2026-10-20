@@ -92,17 +92,39 @@ export function withInkTheme(source: string): string {
 	return `${directive}\n${source}`;
 }
 
-/** Mermaid fenced blocks in markdown, as parseBlocks will see their source. */
+/** A line's quote depth and its text inside at most `max` quote levels. */
+function unquote(line: string, max = Infinity): { depth: number; inner: string } {
+	let depth = 0;
+	let inner = line;
+	while (depth < max && /^\s*>/.test(inner)) {
+		inner = inner.replace(/^\s*>\s?/, "");
+		depth++;
+	}
+	return { depth, inner };
+}
+
+/**
+ * Mermaid fenced blocks in markdown, as parseBlocks will see their source —
+ * at the top level or inside a quote or callout, at any depth, with the
+ * quote markers stripped as the nested-quote parse strips them.
+ */
 export function mermaidBlocks(markdown: string): string[] {
 	const out: string[] = [];
 	const lines = markdown.split("\n");
 	for (let i = 0; i < lines.length; i++) {
-		const open = /^\s*(```|~~~)\s*mermaid\b/.exec(lines[i]);
-		if (open === null) continue;
+		const { depth, inner } = unquote(lines[i]);
+		if (!/^\s*(```|~~~)\s*mermaid\b/.test(inner)) continue;
 		const code: string[] = [];
 		i++;
-		while (i < lines.length && !/^\s*(```|~~~)/.test(lines[i])) {
-			code.push(lines[i]);
+		while (i < lines.length) {
+			const line = unquote(lines[i], depth);
+			// The quote ended, and the fence with it; that line is the outer loop's.
+			if (line.depth < depth) {
+				i--;
+				break;
+			}
+			if (/^\s*(```|~~~)/.test(line.inner)) break;
+			code.push(line.inner);
 			i++;
 		}
 		out.push(code.join("\n"));

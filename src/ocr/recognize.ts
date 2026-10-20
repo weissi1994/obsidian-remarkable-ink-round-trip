@@ -496,10 +496,39 @@ function segment(word: Group[], line: { baseline: number; cap: number }, templat
  */
 export const OCR_TRUST = 0.78;
 
+/**
+ * Above this share of symbols a reading is junk, however confident.
+ *
+ * OCR_TRUST alone leaked on the first real capture of the owner's hand
+ * (handwriting-samples/test-sheets/2026-10-21-001026): fast joined cursive,
+ * tiled with the hand's own symbol glyphs (@ → ✗ « ↑ % € …), cleared it.
+ * "/IäI→✗rl…,%«%.Jl€" read at 0.784 and "@:@+m«↑@&↑3]" at 0.788, both above
+ * the 0.739 bundled-font cursive ceiling and too close to the ≈0.83 print
+ * floor for a higher threshold to buy any margin. Their symbol fractions are
+ * 0.59 and 0.83, while every one of the 18 test-sheet prompts scores at most
+ * 0.21 (highest: "later → done ✓, not now ✗" ≈ 0.21, "Frage: ja oder nein?
+ * (siehe #14)" ≈ 0.19). 0.3 sits in that gap. Unlike a known-word gate it needs
+ * no vault words and keeps print that is mostly numbers ("Termin am 14.03. um
+ * 9:30 Uhr").
+ */
+export const OCR_MAX_SYMBOLS = 0.3;
+
 export interface Recognition {
 	text: string;
 	/** 0–1: how well the shapes matched; low means "trust the image". */
 	confidence: number;
+}
+
+/** Share of the non-space characters that are neither letters nor digits; 1 for none. */
+function symbolFraction(text: string): number {
+	const chars = [...text.replace(/\s/gu, "")];
+	if (chars.length === 0) return 1;
+	return chars.filter((ch) => !/[\p{L}\p{N}]/u.test(ch)).length / chars.length;
+}
+
+/** Whether the built-in reading may stand, or the next reader (or the image) should take over. */
+export function builtinTrusted(r: Recognition | null): boolean {
+	return r !== null && r.confidence >= OCR_TRUST && symbolFraction(r.text) <= OCR_MAX_SYMBOLS;
 }
 
 interface LineWords {

@@ -3,6 +3,7 @@ import { parseBlocks } from "../convert/mdblocks";
 import { builtinFont, HandFont } from "../ink/glyphs";
 import { DEVICE_PROFILES, INK_PENS, renderInk } from "../ink/inkrender";
 import { Lexicon, recognize, templatesFrom } from "../ocr/recognize";
+import { cer } from "../ocr/testcapture";
 import { choose, WritePad } from "../ocr/writepad";
 
 /** A text "handwritten" in a bundled font, as device strokes. */
@@ -19,18 +20,6 @@ function write(text: string, font: string, jitter = 0.5) {
 	});
 	const ids = new Set(r.layout.lines.filter((l) => l.role !== "title").flatMap((l) => l.words.map((w) => w.id)));
 	return r.pages[0].filter((s) => s.wordId !== null && ids.has(s.wordId)).map((s) => s.points);
-}
-
-/** Character error rate: edit distance over the expected length. */
-function cer(got: string, want: string): number {
-	const d = Array.from({ length: got.length + 1 }, (_, i) => [i, ...new Array<number>(want.length).fill(0)]);
-	for (let j = 1; j <= want.length; j++) d[0][j] = j;
-	for (let i = 1; i <= got.length; i++) {
-		for (let j = 1; j <= want.length; j++) {
-			d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (got[i - 1] === want[j - 1] ? 0 : 1));
-		}
-	}
-	return d[got.length][want.length] / Math.max(1, want.length);
 }
 
 describe("WritePad", () => {

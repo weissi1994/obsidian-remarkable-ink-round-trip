@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { installDomHelpers, openedModals } from "./helpers/obsidian";
+import { Modal, installDomHelpers } from "./helpers/obsidian";
 import type { DesktopInstaller } from "../ollamainstall";
 import type { OllamaSetupHost } from "../ollamasetup";
 import type { HttpClient } from "../transport/http";
@@ -21,7 +21,7 @@ vi.mock("../notify", () => ({ notify: (message: string) => notices.push(message)
 beforeAll(() => installDomHelpers());
 beforeEach(() => {
 	notices.length = 0;
-	openedModals.length = 0;
+	Modal.opened = [];
 });
 
 const HEX = "c".repeat(64);
@@ -69,7 +69,7 @@ async function settle(): Promise<void> {
 }
 
 function top() {
-	return openedModals[openedModals.length - 1] as unknown as { contentEl: HTMLElement; title: string; close(): void };
+	return Modal.opened[Modal.opened.length - 1] as unknown as { contentEl: HTMLElement; title: string; close(): void };
 }
 
 function button(text: string): HTMLButtonElement {

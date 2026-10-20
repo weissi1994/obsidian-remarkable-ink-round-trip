@@ -56,7 +56,7 @@ import { EmbedContent } from "./preprocess/preprocess";
 import { DOCID_FRONTMATTER_KEY, generateDocId } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
-import { SyncState, type StateFs } from "./sync/syncstate";
+import { SyncState, type SharedHandwriting, type StateFs } from "./sync/syncstate";
 import { findNewNotebooks, importedNote, noteFileName, writtenByPlugin } from "./sync/deviceimport";
 import { parseRmScene } from "./incoming/rmscene";
 import { readNotebook } from "./transport/notebook";
@@ -67,7 +67,7 @@ import { highlightedText, insertRemarkText } from "./incoming/remarkinsert";
 import { RemarkControls } from "./remarkui";
 import { RemarkOverlays } from "./remarkoverlayui";
 import { resolveLayoutOptions } from "./convert/pdf";
-import { Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
+import { builtinTrusted, Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
 import {
@@ -86,6 +86,14 @@ import {
 	withEarlierReadings,
 } from "./ocr/samples";
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
+import {
+	CAPTURE_FORMAT,
+	captureMarkdown,
+	captureStamp,
+	itemPoints,
+	unflattenStroke,
+	type HandwritingCapture,
+} from "./ocr/testcapture";
 import type { OcrExample, OcrConnection } from "./transport/ocr";
 import { checkConnection } from "./transport/ocr";
 import type { NdjsonClient } from "./transport/ollama";
@@ -316,6 +324,16 @@ export default class RoundTripPlugin extends Plugin {
 			name: "Learn my joined-up words from the sheet",
 			callback: () => void this.learnWordSheet(),
 		});
+		this.addCommand({
+			id: "send-handwriting-test-sheet",
+			name: "Send handwriting test sheet to reMarkable",
+			callback: () => void this.sendTestSheet(),
+		});
+		this.addCommand({
+			id: "save-handwriting-test-sheet",
+			name: "Save handwriting test sheet to the vault",
+			callback: () => void this.saveTestSheet(),
+		});
 		// Ink fork: confirm or correct a handwritten remark's reading in the note.
 		const remarkControls = new RemarkControls(this.app, (file, id) => this.insertRemark(file, id));
 		this.registerMarkdownPostProcessor(remarkControls.process);
@@ -507,6 +525,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
 		const shared = await this.state.loadMappings();
 		this.settings.mappings = { ...legacy, ...shared };
+		await this.adoptHandwriting();
 		if (Object.keys(legacy).some((docId) => shared[docId] === undefined)) {
 			const moved = await this.ink.migrateToState();
 			await this.state.saveMappings(this.settings.mappings);
@@ -529,6 +548,31 @@ export default class RoundTripPlugin extends Plugin {
 	/** Take in what other copies of the vault synced since (a git pull). */
 	private async refreshState(): Promise<void> {
 		this.settings.mappings = await this.state.refresh(this.settings.mappings);
+		await this.adoptHandwriting();
+	}
+
+	/**
+	 * The hand in use and the sheets waiting on the tablet are shared too, so
+	 * every copy writes and reads with the hand learned on any of them. A
+	 * vault without them yet gets this device's.
+	 */
+	private async adoptHandwriting(): Promise<void> {
+		const shared = await this.state.readHandwriting();
+		if (shared === null) {
+			if (
+				this.settings.handVersion !== "" ||
+				this.settings.pendingSheet !== null ||
+				this.settings.pendingWordSheet !== null ||
+				this.settings.pendingTestSheet !== null
+			) {
+				await this.state.saveHandwriting(handwritingOf(this.settings));
+			}
+			return;
+		}
+		this.settings.handVersion = shared.handVersion;
+		this.settings.pendingSheet = shared.pendingSheet;
+		this.settings.pendingWordSheet = shared.pendingWordSheet;
+		this.settings.pendingTestSheet = shared.pendingTestSheet;
 	}
 
 	/**
@@ -565,6 +609,7 @@ export default class RoundTripPlugin extends Plugin {
 			this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
 		}
 		await this.state.saveMappings(this.settings.mappings);
+		await this.state.saveHandwriting(handwritingOf(this.settings));
 	}
 
 	onunload(): void {
@@ -787,7 +832,7 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		for (const id of Object.keys(cache)) if (!present.has(id)) delete cache[id];
 		const known = new Set(Object.values(this.settings.mappings).map((entry) => entry.deviceDocId));
-		for (const sheet of [this.settings.pendingSheet, this.settings.pendingWordSheet]) {
+		for (const sheet of [this.settings.pendingSheet, this.settings.pendingWordSheet, this.settings.pendingTestSheet]) {
 			if (sheet !== null) known.add(sheet.deviceDocId);
 		}
 		const found = findNewNotebooks(Object.values(cache), {
@@ -1309,6 +1354,7 @@ export default class RoundTripPlugin extends Plugin {
 		}
 
 		await this.refreshState();
+		await this.ink.refreshSamples();
 		const log: string[] = [];
 		this.inkCache.clear();
 		this.remarkImages.clear();
@@ -1728,7 +1774,7 @@ export default class RoundTripPlugin extends Plugin {
 		// How sure each reader was, above its own cut-off: decides whether this
 		// reading may later replace one the note already shows.
 		let scored: { score?: number; by?: ReaderName } = {};
-		if (result !== null && result.confidence >= OCR_TRUST) {
+		if (result !== null && builtinTrusted(result)) {
 			text = result.text;
 			scored = { score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
 		} else if (this.settings.ocrUseWritePad) {
@@ -2113,6 +2159,106 @@ export default class RoundTripPlugin extends Plugin {
 		}
 	}
 
+	async sendTestSheet(): Promise<void> {
+		if (!this.requirePaired()) return;
+		const notice = this.progress("Sending the handwriting test sheet…");
+		try {
+			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+			let parentId: string | undefined;
+			if (this.settings.mirrorFolders && this.settings.deviceBaseFolder !== "") {
+				parentId = await new MirrorTransport(api, this.settings.deviceBaseFolder).ensureFolderPath("");
+			}
+			await this.ink.sendTestSheet(api.raw, parentId);
+			notify(
+				"Handwriting test sheet sent. Copy each line below it the way you normally write, let it sync, then run “Save handwriting test sheet to the vault”.",
+				10000,
+			);
+		} catch (error) {
+			notify(toTransportError(error).message, 10000);
+		} finally {
+			notice.hide();
+		}
+	}
+
+	/**
+	 * Read the test sheet with today's readers and save the result — ink,
+	 * readings, a note — to the vault, to measure the readers on this hand
+	 * (ocr/testcapture.ts). Held out: nothing here is learned or remembered,
+	 * so no recognizeLocally, rememberReading or worked examples. The sheet
+	 * stays pending, to be saved again after more writing.
+	 */
+	async saveTestSheet(): Promise<void> {
+		if (!this.requirePaired()) return;
+		const notice = this.progress("Reading your handwriting test sheet…");
+		try {
+			const { pending, items } = await this.ink.readTestSheet(await this.rawApi());
+			const lexicon = await this.vaultLexicon();
+			const templates = await this.ocrTemplates();
+			const words = await this.wordReader();
+			const writePad = this.settings.ocrUseWritePad ? await this.writePad() : null;
+			const now = new Date();
+			const stamp = captureStamp(now);
+			const base = this.settings.handwritingFolder.replace(/^\/+|\/+$/g, "");
+			const folder = `${base === "" ? "" : `${base}/`}test-sheets/${stamp}`;
+			const images = new Map<string, string>();
+			for (const item of items) {
+				const strokes = itemPoints(item);
+				// Read as an import would today, the vault's words included, and
+				// kept whether trusted or not: the misreadings are the point.
+				const letters = recognize(strokes, templates, lexicon, words);
+				item.readings.builtin = {
+					text: letters?.text ?? "",
+					confidence: letters?.confidence,
+					accepted: builtinTrusted(letters),
+				};
+				if (writePad !== null) {
+					// read() drops a reading too few of whose words the vault knows;
+					// then the reading without the vault's words, as not used.
+					const gated = writePad.read(strokes, lexicon);
+					const cursive = gated ?? writePad.read(strokes);
+					item.readings.writepad = {
+						text: cursive?.text ?? "",
+						confidence: cursive?.confidence,
+						accepted: gated !== null && gated.confidence >= WRITEPAD_TRUST,
+					};
+				}
+				const png = await this.strokesToPng(item.strokes.map(unflattenStroke));
+				if (this.settings.ocrMode === "endpoint") {
+					// No worked examples: they are the owner's corrections, and
+					// would make this a different reader than the one measured.
+					const text = png === null ? null : await this.ink.ocr(obsidianHttp, png, undefined, false, []).catch(() => null);
+					item.readings.endpoint = text === null ? null : { text, accepted: text.trim() !== "" };
+				}
+				if (png !== null) {
+					const path = `${folder}/${item.id}.png`;
+					await this.writeVaultBinary(path, png);
+					images.set(item.id, path);
+				}
+			}
+			const capture: HandwritingCapture = {
+				format: CAPTURE_FORMAT,
+				version: 1,
+				createdAt: now.toISOString(),
+				pluginVersion: this.manifest.version,
+				sheet: { kind: "test", version: pending.version },
+				profile: pending.profile,
+				hand: this.settings.handVersion === "" ? null : await this.ink.ensureHand(this.settings.handVersion),
+				items,
+			};
+			const jsonName = `handwriting-test-${stamp}.json`;
+			await this.writeVaultFile(`${folder}/${jsonName}`, JSON.stringify(capture));
+			const notePath = `${folder}/Handwriting test ${stamp}.md`;
+			await this.writeVaultFile(notePath, captureMarkdown(capture, images, jsonName));
+			const note = this.app.vault.getFileByPath(notePath);
+			if (note !== null) await this.app.workspace.getLeaf(false).openFile(note);
+			notify(`Saved ${items.length} line(s) of the handwriting test to ${folder}. Attach ${jsonName} to the forge issue.`, 10000);
+		} catch (error) {
+			notify(error instanceof Error ? error.message : String(error), 10000);
+		} finally {
+			notice.hide();
+		}
+	}
+
 	async learnHandwriting(addVariants: boolean): Promise<void> {
 		if (!this.requirePaired()) return;
 		const notice = this.progress("Reading your handwriting sheet…");
@@ -2422,6 +2568,15 @@ const obsidianHttp: HttpClient = async (request) => {
 		arrayBuffer: response.arrayBuffer,
 	};
 };
+
+function handwritingOf(settings: RoundTripSettings): SharedHandwriting {
+	return {
+		handVersion: settings.handVersion,
+		pendingSheet: settings.pendingSheet,
+		pendingWordSheet: settings.pendingWordSheet,
+		pendingTestSheet: settings.pendingTestSheet,
+	};
+}
 
 /**
  * Streaming NDJSON over Node http(s), for the Ollama pull's progress (#26):

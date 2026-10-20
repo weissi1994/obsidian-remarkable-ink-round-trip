@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Handwriting test sheet (#14):** **Send handwriting test sheet to
+  reMarkable** sends 18 short German and English lines to copy by hand.
+  **Save handwriting test sheet to the vault** reads them with today's readers,
+  learning nothing. It saves your ink, every reading (also the ones the plugin
+  would not have used) and the character error rate per reader to
+  `<handwriting folder>/test-sheets/<date-time>/`. The one
+  `handwriting-test-….json` there is meant for attaching to an issue. It holds
+  only the prepared lines, your ink of them, your learned letters and the
+  readings, nothing else from the vault. A test sheet is also listed under
+  *Settings → Handwriting*.
+
+- **Learned handwriting follows the vault:** which hand is in use and the
+  sheets waiting on the tablet now live in `reMarkable/.sync/handwriting.json`
+  too, so every copy of the vault uses the hand learned on any of them. Word
+  samples and corrections learned on different copies are merged at each sync
+  instead of one copy's overwriting the other's.
+
 - **No `OLLAMA_ORIGINS` needed:** the setup guide no longer asks you to set
   it; Ollama 0.1.42+ accepts the plugin's requests as they are.
 - **Unconfirmed remarks show on the text:** a remark you have not confirmed
@@ -22,6 +39,11 @@
   size, progress and a Cancel — checks it against the published SHA-256, opens
   it, and carries on once Ollama is running. Linux gets the official install
   command to copy. Any failure falls back to the ollama.com/download link.
+- **One-click setup finds LM Studio too:** when Ollama is not running but LM
+  Studio's server is, *Set up local reading for me* offers LM Studio and the
+  vision models already downloaded there (loaded ones first), points the OCR
+  settings at the one you pick and runs *Test connection*. It downloads
+  nothing; with no vision model yet it says where to get one in LM Studio.
 - **Tables, lists, task boxes, code and nested quotes inside quotes and
   callouts** are typeset as such, set in by the quote's bar: a table gets its
   grid, a task a box to tick, code its band, and a callout's title a line of

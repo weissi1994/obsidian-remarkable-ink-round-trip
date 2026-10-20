@@ -191,6 +191,40 @@ export function migrate(raw: unknown): SampleStore {
 	return store as SampleStore;
 }
 
+/**
+ * Two copies of the store — another device's, read from the shared folder,
+ * and this one's — as one: every word's samples from both (newest kept), and
+ * per remark the owner's verified text over a reading, else the latest.
+ */
+export function mergeStores(disk: SampleStore, mine: SampleStore): SampleStore {
+	const words = mergeSamples(disk.words, mine.words, (samples) => samples.slice(-PER_WORD));
+	const letters = mergeSamples(disk.letters ?? {}, mine.letters ?? {}, (samples) =>
+		samples.length <= PER_LETTER ? samples : keepDiverse(samples, PER_LETTER),
+	);
+	const remarks: Record<string, RemarkRecord> = { ...disk.remarks };
+	const rank = (r: RemarkRecord) => Number(isVerified(r));
+	for (const [key, record] of Object.entries(mine.remarks)) {
+		const other = remarks[key];
+		if (other === undefined || rank(record) > rank(other) || (rank(record) === rank(other) && record.at >= other.at)) {
+			remarks[key] = record;
+		}
+	}
+	return { ...disk, ...mine, words, letters, remarks };
+}
+
+function mergeSamples(
+	disk: Record<string, Point[][][]>,
+	mine: Record<string, Point[][][]>,
+	cap: (samples: Point[][][]) => Point[][][],
+): Record<string, Point[][][]> {
+	const out = { ...disk };
+	for (const [key, samples] of Object.entries(mine)) {
+		const known = new Set((out[key] ?? []).map((sample) => JSON.stringify(sample)));
+		out[key] = cap([...(out[key] ?? []), ...samples.filter((sample) => !known.has(JSON.stringify(sample)))]);
+	}
+	return out;
+}
+
 const round = (strokes: Point[][]) =>
 	strokes.map((stroke) => stroke.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) })));
 
