@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TransportError, type HttpClient, type HttpRequest } from "../transport/http";
 import {
 	createLineSplitter,
+	describePull,
 	detectOllama,
 	hasModel,
 	listLocalModels,
@@ -167,13 +168,13 @@ describe("pullModel", () => {
 		);
 		await pullModel(stream, BASE, "qwen2.5vl:7b", (p) => progress.push(p));
 		expect(seen[0]).toMatchObject({ url: `${BASE}/api/pull`, method: "POST" });
-		expect(JSON.parse(String(seen[0].body))).toEqual({ model: "qwen2.5vl:7b", stream: true });
+		expect(JSON.parse(seen[0].body as string)).toEqual({ model: "qwen2.5vl:7b", stream: true });
 		expect(progress[0]).toEqual({ status: "pulling manifest", completed: 0, total: 0 });
 		expect(progress[1]).toEqual({ status: "pulling aaa", completed: 100, total: 1000 });
 		expect(progress[2]).toEqual({ status: "pulling bbb", completed: 100, total: 1500 });
 		expect(progress[3]).toEqual({ status: "pulling aaa", completed: 1000, total: 1500 });
 		expect(progress[4]).toEqual({ status: "pulling bbb", completed: 1250, total: 1500 });
-		expect(progress.at(-1)).toEqual({ status: "success", completed: 1250, total: 1500 });
+		expect(progress[progress.length - 1]).toEqual({ status: "success", completed: 1250, total: 1500 });
 	});
 
 	it("resolves on success", async () => {
@@ -231,7 +232,7 @@ describe("pullModelBuffered", () => {
 		const seen: HttpRequest[] = [];
 		await pullModelBuffered(fixed({ status: 200, text: '{"status":"success"}' }, seen), BASE, "m");
 		expect(seen[0]).toMatchObject({ url: `${BASE}/api/pull`, method: "POST" });
-		expect(JSON.parse(String(seen[0].body))).toEqual({ model: "m", stream: false });
+		expect(JSON.parse(seen[0].body as string)).toEqual({ model: "m", stream: false });
 	});
 
 	it("rejects with the server's error", async () => {
@@ -239,5 +240,19 @@ describe("pullModelBuffered", () => {
 			pullModelBuffered(fixed({ status: 200, text: '{"error":"file does not exist"}' }), BASE, "m"),
 		).rejects.toThrow(/file does not exist/);
 		await expect(pullModelBuffered(fixed({ status: 500, text: "boom" }), BASE, "m")).rejects.toThrow(/500: boom/);
+	});
+});
+
+describe("describePull", () => {
+	it("shows overall gigabytes and a percentage", () => {
+		expect(describePull("qwen2.5vl:7b", { status: "pulling a", completed: 1.2e9, total: 5.9e9 })).toBe(
+			"Downloading qwen2.5vl:7b — 1.2 / 5.9 GB (20%)",
+		);
+	});
+
+	it("shows the status text while the total is unknown", () => {
+		expect(describePull("m", { status: "pulling manifest", completed: 0, total: 0 })).toBe(
+			"Downloading m — pulling manifest",
+		);
 	});
 });

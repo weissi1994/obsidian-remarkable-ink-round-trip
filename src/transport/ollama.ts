@@ -50,12 +50,17 @@ function unreachable(base: string, error: unknown): string {
 		: `Ollama is not answering at ${base} (${detail}).`;
 }
 
+/** A JSON field as text: strings as they are, anything else as JSON. */
+function asText(value: unknown): string {
+	return typeof value === "string" ? value : JSON.stringify(value);
+}
+
 /** The `error` field of an Ollama JSON body, if it has one. */
 function errorOf(text: string): string | null {
 	try {
 		const parsed: unknown = JSON.parse(text);
 		if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
-			return String((parsed as { error: unknown }).error);
+			return asText(parsed.error);
 		}
 	} catch {
 		// Not JSON: fall through to the raw text.
@@ -88,7 +93,7 @@ export async function detectOllama(http: HttpClient, base: string): Promise<Olla
 	try {
 		const parsed: unknown = JSON.parse(response.text);
 		if (typeof parsed === "object" && parsed !== null && "version" in parsed) {
-			version = String((parsed as { version: unknown }).version);
+			version = asText(parsed.version);
 		}
 	} catch {
 		// Answered 200 at /api/version: running, version unknown.
@@ -116,7 +121,7 @@ export async function listLocalModels(http: HttpClient, base: string): Promise<s
 	return models
 		.map((entry: unknown) =>
 			typeof entry === "object" && entry !== null && "name" in entry
-				? String((entry as { name: unknown }).name)
+				? asText(entry.name)
 				: "",
 		)
 		.filter((name) => name !== "");
@@ -180,10 +185,10 @@ export async function pullModel(
 	signal?: AbortSignal,
 ): Promise<void> {
 	const layers = new Map<string, { completed: number; total: number }>();
-	let succeeded = false;
-	let failure: string | null = null;
+	// Set from the line callback: an object, so the checks after the await see it.
+	const outcome: { succeeded: boolean; failure: string | null } = { succeeded: false, failure: null };
 	const onLine = (line: string) => {
-		if (succeeded || failure !== null) return;
+		if (outcome.succeeded || outcome.failure !== null) return;
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(line);
@@ -193,7 +198,7 @@ export async function pullModel(
 		if (typeof parsed !== "object" || parsed === null) return;
 		const event = parsed as { status?: unknown; digest?: unknown; total?: unknown; completed?: unknown; error?: unknown };
 		if (event.error !== undefined) {
-			failure = String(event.error);
+			outcome.failure = asText(event.error);
 			return;
 		}
 		const status = typeof event.status === "string" ? event.status : "";
@@ -211,7 +216,7 @@ export async function pullModel(
 			total += layer.total;
 		}
 		onProgress({ status, completed, total });
-		if (status === "success") succeeded = true;
+		if (status === "success") outcome.succeeded = true;
 	};
 
 	let response;
@@ -231,8 +236,10 @@ export async function pullModel(
 		throw new TransportError(unreachable(base, error));
 	}
 	if (response.status !== 200) throw statusError("/api/pull", response.status, response.text);
-	if (failure !== null) throw new TransportError(`Ollama could not download ${model}: ${failure}`);
-	if (!succeeded) {
+	if (outcome.failure !== null) {
+		throw new TransportError(`Ollama could not download ${model}: ${outcome.failure}`);
+	}
+	if (!outcome.succeeded) {
 		throw new TransportError(
 			`The download of ${model} ended before Ollama reported success — try again; it resumes where it stopped.`,
 		);
@@ -258,4 +265,12 @@ export async function pullModelBuffered(http: HttpClient, base: string, model: s
 	if (response.status !== 200) throw statusError("/api/pull", response.status, response.text);
 	const failure = errorOf(response.text);
 	if (failure !== null) throw new TransportError(`Ollama could not download ${model}: ${failure}`);
+}
+
+/** `Downloading qwen2.5vl:7b — 1.2 / 5.9 GB (20%)`; the status text until sizes are known. */
+export function describePull(model: string, progress: PullProgress): string {
+	if (progress.total <= 0) return `Downloading ${model} — ${progress.status === "" ? "starting…" : progress.status}`;
+	const gb = (bytes: number) => (bytes / 1e9).toFixed(1);
+	const percent = Math.min(100, Math.floor((progress.completed / progress.total) * 100));
+	return `Downloading ${model} — ${gb(progress.completed)} / ${gb(progress.total)} GB (${percent}%)`;
 }
