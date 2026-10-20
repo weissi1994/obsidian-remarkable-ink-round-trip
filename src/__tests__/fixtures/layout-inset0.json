@@ -1,0 +1,563 @@
+{
+ "placed": [
+  {
+   "page": 1,
+   "x": 40,
+   "y": 316.3,
+   "role": "title",
+   "text": "t"
+  },
+  {
+   "page": 1,
+   "x": 40,
+   "y": 261.95000000000005,
+   "role": "heading",
+   "text": "Title"
+  },
+  {
+   "page": 1,
+   "x": 40,
+   "y": 238.80000000000004,
+   "role": "paragraph",
+   "text": "Intro bold and code and mark text that goes on long enough to"
+  },
+  {
+   "page": 1,
+   "x": 40,
+   "y": 222.30000000000004,
+   "role": "paragraph",
+   "text": "wrap across a couple of lines."
+  },
+  {
+   "page": 1,
+   "x": 54,
+   "y": 199.20000000000005,
+   "role": "quote",
+   "text": "a flat quote with italic, long enough to wrap over the edge of the"
+  },
+  {
+   "page": 1,
+   "x": 54,
+   "y": 182.70000000000005,
+   "role": "quote",
+   "text": "page as well"
+  },
+  {
+   "page": 1,
+   "x": 54,
+   "y": 159.60000000000005,
+   "role": "list",
+   "text": "one"
+  },
+  {
+   "page": 1,
+   "x": 68,
+   "y": 143.10000000000005,
+   "role": "list",
+   "text": "two"
+  },
+  {
+   "page": 1,
+   "x": 54,
+   "y": 126.60000000000005,
+   "role": "list",
+   "text": "task",
+   "checkbox": {
+    "x": 42,
+    "y": 125.94000000000005,
+    "size": 8.25,
+    "checked": false
+   }
+  },
+  {
+   "page": 1,
+   "x": 54,
+   "y": 110.10000000000005,
+   "role": "list",
+   "text": "done",
+   "checkbox": {
+    "x": 42,
+    "y": 109.44000000000005,
+    "size": 8.25,
+    "checked": true
+   }
+  },
+  {
+   "page": 1,
+   "x": 54,
+   "y": 93.60000000000005,
+   "role": "list",
+   "text": "first"
+  },
+  {
+   "page": 1,
+   "x": 48,
+   "y": 74.65000000000006,
+   "role": "code",
+   "text": "const x = 1;"
+  },
+  {
+   "page": 2,
+   "x": 44,
+   "y": 342,
+   "role": "table",
+   "text": "A"
+  },
+  {
+   "page": 2,
+   "x": 74.73926380368098,
+   "y": 342,
+   "role": "table",
+   "text": "B"
+  },
+  {
+   "page": 2,
+   "x": 263.6012269938651,
+   "y": 342,
+   "role": "table",
+   "text": "C"
+  },
+  {
+   "page": 2,
+   "x": 44,
+   "y": 319.5,
+   "role": "table",
+   "text": "1"
+  },
+  {
+   "page": 2,
+   "x": 74.73926380368098,
+   "y": 319.5,
+   "role": "table",
+   "text": "a much longer cell that wraps around"
+  },
+  {
+   "page": 2,
+   "x": 44,
+   "y": 297,
+   "role": "table",
+   "text": "label"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 186.7,
+   "role": "heading",
+   "text": "Sub"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 164.6,
+   "role": "paragraph",
+   "text": "Doel"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 141.5,
+   "role": "paragraph",
+   "text": "paragraph 0 with some words to fill the page paragraph 1 with some"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 125,
+   "role": "paragraph",
+   "text": "words to fill the page paragraph 2 with some words to fill the page"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 108.5,
+   "role": "paragraph",
+   "text": "paragraph 3 with some words to fill the page paragraph 4 with some"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 92,
+   "role": "paragraph",
+   "text": "words to fill the page paragraph 5 with some words to fill the page"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 75.5,
+   "role": "paragraph",
+   "text": "paragraph 6 with some words to fill the page paragraph 7 with some"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 59,
+   "role": "paragraph",
+   "text": "words to fill the page paragraph 8 with some words to fill the page"
+  },
+  {
+   "page": 2,
+   "x": 40,
+   "y": 42.5,
+   "role": "paragraph",
+   "text": "paragraph 9 with some words to fill the page paragraph 10 with"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 343.5,
+   "role": "paragraph",
+   "text": "some words to fill the page paragraph 11 with some words to fill the"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 327,
+   "role": "paragraph",
+   "text": "page paragraph 12 with some words to fill the page paragraph 13"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 310.5,
+   "role": "paragraph",
+   "text": "with some words to fill the page paragraph 14 with some words to"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 294,
+   "role": "paragraph",
+   "text": "fill the page paragraph 15 with some words to fill the page"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 277.5,
+   "role": "paragraph",
+   "text": "paragraph 16 with some words to fill the page paragraph 17 with"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 261,
+   "role": "paragraph",
+   "text": "some words to fill the page paragraph 18 with some words to fill the"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 244.5,
+   "role": "paragraph",
+   "text": "page paragraph 19 with some words to fill the page paragraph 20"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 228,
+   "role": "paragraph",
+   "text": "with some words to fill the page paragraph 21 with some words to"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 211.5,
+   "role": "paragraph",
+   "text": "fill the page paragraph 22 with some words to fill the page"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 195,
+   "role": "paragraph",
+   "text": "paragraph 23 with some words to fill the page paragraph 24 with"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 178.5,
+   "role": "paragraph",
+   "text": "some words to fill the page paragraph 25 with some words to fill the"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 162,
+   "role": "paragraph",
+   "text": "page paragraph 26 with some words to fill the page paragraph 27"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 145.5,
+   "role": "paragraph",
+   "text": "with some words to fill the page paragraph 28 with some words to"
+  },
+  {
+   "page": 3,
+   "x": 40,
+   "y": 129,
+   "role": "paragraph",
+   "text": "fill the page paragraph 29 with some words to fill the page"
+  }
+ ],
+ "rules": [
+  {
+   "page": 1,
+   "x1": 43,
+   "y1": 196.72500000000005,
+   "x2": 43,
+   "y2": 213.22500000000005,
+   "thickness": 1.5
+  },
+  {
+   "page": 1,
+   "x1": 43,
+   "y1": 180.22500000000005,
+   "x2": 43,
+   "y2": 196.72500000000005,
+   "thickness": 1.5
+  },
+  {
+   "page": 1,
+   "x1": 43.65,
+   "y1": 113.15250000000006,
+   "x2": 45.465,
+   "y2": 111.09000000000006,
+   "thickness": 1
+  },
+  {
+   "page": 1,
+   "x1": 45.465,
+   "y1": 111.09000000000006,
+   "x2": 49.0125,
+   "y2": 116.04000000000005,
+   "thickness": 1
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 360,
+   "x2": 407,
+   "y2": 360,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 360,
+   "x2": 40,
+   "y2": 337.5,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 407,
+   "y1": 360,
+   "x2": 407,
+   "y2": 337.5,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 70.73926380368098,
+   "y1": 360,
+   "x2": 70.73926380368098,
+   "y2": 337.5,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 259.6012269938651,
+   "y1": 360,
+   "x2": 259.6012269938651,
+   "y2": 337.5,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 337.5,
+   "x2": 407,
+   "y2": 337.5,
+   "thickness": 1.3
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 337.5,
+   "x2": 40,
+   "y2": 315,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 407,
+   "y1": 337.5,
+   "x2": 407,
+   "y2": 315,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 70.73926380368098,
+   "y1": 337.5,
+   "x2": 70.73926380368098,
+   "y2": 315,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 259.6012269938651,
+   "y1": 337.5,
+   "x2": 259.6012269938651,
+   "y2": 315,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 315,
+   "x2": 407,
+   "y2": 315,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 315,
+   "x2": 40,
+   "y2": 277.5,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 407,
+   "y1": 315,
+   "x2": 407,
+   "y2": 277.5,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 70.73926380368098,
+   "y1": 315,
+   "x2": 70.73926380368098,
+   "y2": 277.5,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 259.6012269938651,
+   "y1": 315,
+   "x2": 259.6012269938651,
+   "y2": 277.5,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 277.5,
+   "x2": 407,
+   "y2": 277.5,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 277.5,
+   "x2": 40,
+   "y2": 247.5,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 407,
+   "y1": 277.5,
+   "x2": 407,
+   "y2": 247.5,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 70.73926380368098,
+   "y1": 277.5,
+   "x2": 70.73926380368098,
+   "y2": 247.5,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 259.6012269938651,
+   "y1": 277.5,
+   "x2": 259.6012269938651,
+   "y2": 247.5,
+   "thickness": 0.5
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 247.5,
+   "x2": 407,
+   "y2": 247.5,
+   "thickness": 0.8
+  },
+  {
+   "page": 2,
+   "x1": 40,
+   "y1": 229.5,
+   "x2": 407,
+   "y2": 229.5,
+   "thickness": 0.5
+  }
+ ],
+ "bands": [
+  {
+   "page": 1,
+   "kind": "inline-code",
+   "x": 118.48567484662577,
+   "y": 235.50000000000003,
+   "width": 28.419141104294486,
+   "height": 12.649999999999999
+  },
+  {
+   "page": 1,
+   "kind": "mark",
+   "x": 171.68889570552147,
+   "y": 235.50000000000003,
+   "width": 29.316687116564427,
+   "height": 12.649999999999999
+  },
+  {
+   "page": 1,
+   "kind": "quote",
+   "x": 46,
+   "y": 196.72500000000005,
+   "width": 361,
+   "height": 16.5
+  },
+  {
+   "page": 1,
+   "kind": "quote",
+   "x": 46,
+   "y": 180.22500000000005,
+   "width": 361,
+   "height": 16.5
+  },
+  {
+   "page": 1,
+   "kind": "code",
+   "x": 42,
+   "y": 71.56250000000006,
+   "width": 365,
+   "height": 12.35
+  },
+  {
+   "page": 2,
+   "kind": "table-header",
+   "x": 40,
+   "y": 337.5,
+   "width": 367,
+   "height": 22.5
+  }
+ ]
+}
