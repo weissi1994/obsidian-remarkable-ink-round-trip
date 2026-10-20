@@ -251,6 +251,38 @@ export interface Candidate {
 /** Cost of an unrecognised position in a dictionary match. */
 const MISS = 1.2;
 
+/**
+ * Most templates kept per character. A per-writer store that grows (learned
+ * letter templates, many variants of a glyph) must not grow the per-letter
+ * recognition work without bound; this caps the total template count at
+ * roughly OCR_CHARS × TEMPLATE_CAP whatever the store size. The bundled fonts
+ * have at most ~2 variants per character, so nothing bundled is dropped.
+ */
+export const TEMPLATE_CAP = 6;
+
+/**
+ * Keep at most TEMPLATE_CAP templates per character, so read-time work stays
+ * bounded as the store grows. The owner's own hand (lower `weight`) is kept in
+ * preference to the bundled fonts when a character has more variants than the cap.
+ */
+function capPerChar(templates: Template[], cap = TEMPLATE_CAP): Template[] {
+	const byChar = new Map<string, Template[]>();
+	for (const template of templates) {
+		const list = byChar.get(template.ch);
+		if (list === undefined) byChar.set(template.ch, [template]);
+		else list.push(template);
+	}
+	let over = false;
+	for (const list of byChar.values()) if (list.length > cap) over = true;
+	if (!over) return templates;
+	const out: Template[] = [];
+	for (const list of byChar.values()) {
+		if (list.length <= cap) out.push(...list);
+		else out.push(...[...list].sort((a, b) => a.weight - b.weight).slice(0, cap));
+	}
+	return out;
+}
+
 function classify(
 	group: Group,
 	line: { baseline: number; cap: number },
@@ -261,18 +293,37 @@ function classify(
 	const top = (line.baseline - group.box.minY) / line.cap;
 	const bottom = (line.baseline - group.box.maxY) / line.cap;
 	const width = (group.box.maxX - group.box.minX) / line.cap;
-	const costOf = (template: Template, shape: number) =>
-		(shape +
-			0.35 * (Math.abs(top - template.top) + Math.abs(bottom - template.bottom)) +
-			0.25 * Math.abs(width - template.width)) *
-		template.weight;
-	// A quick pass with one starting point, then the full match on the best.
-	const shortlist = templates
-		.map((template) => ({ template, cost: costOf(template, matchDistance(cloud, template.cloud, 1)) }))
-		.sort((a, b) => a.cost - b.cost)
-		.slice(0, 24);
+	// The baseline-relative metric penalty uses only the cheap scalars already on
+	// Template, and — the shape distance being non-negative — is a lower bound on
+	// the full cost. So a template whose metric penalty alone already beats the
+	// 24th-best full cost cannot reach the shortlist, and need not be shape-matched.
+	const metricOf = (t: Template) =>
+		(0.35 * (Math.abs(top - t.top) + Math.abs(bottom - t.bottom)) + 0.25 * Math.abs(width - t.width)) * t.weight;
+	const costOf = (template: Template, shape: number) => template.weight * shape + metricOf(template);
+	// Rank by the cheap metric lower bound, then run the quick shape pass in that
+	// order, stopping as soon as no unseen template could beat the 24 kept. Same
+	// "quick pass → top-24 → full match" as before; the quick pass just stops
+	// being unconditionally O(all templates) as the store grows.
+	const ranked = templates
+		.map((template) => ({ template, metric: metricOf(template) }))
+		.sort((a, b) => a.metric - b.metric);
+	const kept: { template: Template; cost: number }[] = []; // ascending by cost, length <= 24
+	for (const { template, metric } of ranked) {
+		if (kept.length === 24 && metric >= kept[23].cost) break;
+		const cost = costOf(template, matchDistance(cloud, template.cloud, 1));
+		if (kept.length < 24) {
+			let pos = kept.length;
+			while (pos > 0 && kept[pos - 1].cost > cost) pos--;
+			kept.splice(pos, 0, { template, cost });
+		} else if (cost < kept[23].cost) {
+			kept.pop();
+			let pos = 23;
+			while (pos > 0 && kept[pos - 1].cost > cost) pos--;
+			kept.splice(pos, 0, { template, cost });
+		}
+	}
 	const best = new Map<string, number>();
-	for (const { template } of shortlist) {
+	for (const { template } of kept) {
 		const cost = costOf(template, matchDistance(cloud, template.cloud));
 		if (cost < (best.get(template.ch) ?? Infinity)) best.set(template.ch, cost);
 	}
@@ -600,13 +651,14 @@ export function recognize(
 ): Recognition | null {
 	const usable = strokes.filter((stroke) => stroke.length > 0);
 	if (usable.length === 0 || templates.length === 0) return null;
+	const capped = capPerChar(templates);
 	const lines: string[] = [];
 	let cost = 0;
 	let letters = 0;
 	for (const { line, words: wordGroups } of layoutOf(usable)) {
 		const out: string[] = [];
 		for (const groups of wordGroups) {
-			const letterCandidates = segment(groups, line, templates);
+			const letterCandidates = segment(groups, line, capped);
 			if (letterCandidates.length === 0) continue;
 			const corrected = correct(letterCandidates, lexicon);
 			let text = corrected.text;
