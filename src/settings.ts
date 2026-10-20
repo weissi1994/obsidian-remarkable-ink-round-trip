@@ -11,6 +11,7 @@
 import {
 	App,
 	ButtonComponent,
+	Platform,
 	PluginSettingTab,
 	type SettingDefinition,
 	type SettingDefinitionItem,
@@ -115,6 +116,7 @@ export class RoundTripSettingTab extends PluginSettingTab {
 						: [{ name: section.heading, desc: section.note, searchable: false }]),
 					...section.items.map((spec) => this.defineSetting(spec)),
 					...(section.heading === "Handwriting" ? this.handwritingActions() : []),
+					...(section.heading === "Reading handwriting (OCR)" ? this.ocrActions() : []),
 				],
 			});
 		}
@@ -177,6 +179,53 @@ export class RoundTripSettingTab extends PluginSettingTab {
 				name: "Detect page size",
 				desc: "Read the canvas size from a notebook made on your reMarkable.",
 				action: button("Detect", () => this.plugin.detectPageSize()),
+			},
+		];
+	}
+
+	/** Ink fork: the vision-endpoint "Test connection" and one-click Ollama setup buttons. */
+	private ocrActions(): SettingDefinition[] {
+		return [
+			{
+				name: "Set up local reading for me",
+				desc:
+					"Desktop only: finds Ollama on this computer, downloads the handwriting model if " +
+					"needed (you confirm first), and points the plugin at it.",
+				visible: () => Platform.isDesktopApp,
+				action: (el: HTMLElement) => {
+					new ButtonComponent(el).setButtonText("Set up").onClick(async () => {
+						try {
+							await this.plugin.setUpLocalOllama(() => this.update());
+						} catch (error) {
+							notify(
+								error instanceof TransportError ? error.message : String(error),
+								15000,
+							);
+						}
+					});
+				},
+			},
+			{
+				name: "Test connection",
+				desc:
+					"Pings the endpoint, checks it serves the model, and sends a tiny probe image — " +
+					"so a misconfigured server tells you exactly what is wrong.",
+				visible: () => this.plugin.settings.ocrMode === "endpoint",
+				action: (el: HTMLElement) => {
+					new ButtonComponent(el).setButtonText("Test connection").onClick(async () => {
+						const s = this.plugin.settings;
+						notify(`Testing ${s.ocrModel} at ${s.ocrEndpoint}…`);
+						try {
+							await this.plugin.testOcrConnection();
+							notify(`Connected to ${s.ocrModel} at ${s.ocrEndpoint} — probe read OK.`);
+						} catch (error) {
+							notify(
+								error instanceof TransportError ? error.message : String(error),
+								15000,
+							);
+						}
+					});
+				},
 			},
 		];
 	}

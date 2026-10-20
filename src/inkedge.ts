@@ -36,7 +36,7 @@ import type { Picture } from "./ink/inkimage";
 import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
-import { addSample, emptyStore, mergeStores, type SampleStore } from "./ocr/samples";
+import { addSample, emptyStore, mergeStores, migrate, type SampleStore } from "./ocr/samples";
 import type { DeviceItem } from "./sync/deviceimport";
 import type { SyncState } from "./sync/syncstate";
 import type { HttpClient } from "./transport/http";
@@ -160,6 +160,7 @@ export class InkEdge {
 			...(s.inkAccents ? { accents: true as const } : {}),
 			inline: true,
 			quotePictures: true,
+			nestedQuotes: true,
 		};
 	}
 
@@ -230,7 +231,11 @@ export class InkEdge {
 		// The pictures exactly as quantised at send time, never re-read from disk.
 		const options = { ...found, images: sent.images, drawings: sent.drawings };
 		return renderInk(
-			parseBlocks(sent.markdown, { html: entry.ink.inline === true, quotePictures: entry.ink.quotePictures === true }),
+			parseBlocks(sent.markdown, {
+				html: entry.ink.inline === true,
+				quotePictures: entry.ink.quotePictures === true,
+				nestedQuotes: entry.ink.nestedQuotes === true,
+			}),
 			sent.title,
 			{ ...entry.pdfLayout, typo: entry.pdfLayout.typo ?? 1 },
 			options,
@@ -313,10 +318,11 @@ export class InkEdge {
 
 	/** The owner's written words and remembered remarks (ocr/samples.ts). */
 	async loadSamples(): Promise<SampleStore> {
-		this.samples ??=
+		this.samples ??= migrate(
 			(await this.host.state.readSamples()) ??
-			(await this.readJson<SampleStore>(`${this.dir}/ocr/samples.json`)) ??
-			emptyStore();
+				(await this.readJson<unknown>(`${this.dir}/ocr/samples.json`)) ??
+				emptyStore(),
+		);
 		return this.samples;
 	}
 
@@ -325,7 +331,7 @@ export class InkEdge {
 		if (this.samples === null) return;
 		const disk = await this.host.state.readSamples();
 		// In place: callers hold on to the store they loaded.
-		if (disk !== null) Object.assign(this.samples, mergeStores(disk, this.samples));
+		if (disk !== null) Object.assign(this.samples, mergeStores(migrate(disk), this.samples));
 	}
 
 	async saveSamples(): Promise<void> {

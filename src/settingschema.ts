@@ -358,6 +358,15 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				},
 			},
 			{
+				key: "inkRemarkOverlay",
+				name: "Show unconfirmed remarks on the text",
+				desc:
+					"Draws each remark you have not confirmed yet faded over the note, " +
+					"roughly where you wrote it on the page. Only a picture: the note is " +
+					"unchanged, and it goes away once the remark is confirmed or inserted as text.",
+				control: { type: "toggle" },
+			},
+			{
 				key: "inkDiagrams",
 				name: "Mermaid diagrams",
 				desc:
@@ -402,7 +411,8 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 			"the device. It reads separate print letters well and leaves joined-up " +
 			"writing it is unsure of as image only. A vision endpoint is the " +
 			"alternative for that: an OpenAI-compatible model you choose, local (Ollama, " +
-			"LM Studio) or hosted; only the cropped remark images are sent there.",
+			"LM Studio) or hosted; only the cropped remark images are sent there. " +
+			"First-time endpoint setup (Ollama/LM Studio): see docs/ocr-endpoint-setup.md.",
 		items: [
 			{
 				key: "ocrMode",
@@ -449,9 +459,26 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				visibleWhen: { key: "ocrMode", equals: "endpoint" },
 			},
 			{
+				key: "ocrUseWritePad",
+				name: "Read joined-up writing too",
+				desc:
+					"When built-in is unsure of a remark, also try the cursive reader (WritePad) " +
+					"made for joined-up writing. Turn it off if it produces junk rather than leaving " +
+					"hard-to-read ink as an image.",
+				control: { type: "toggle" },
+				visibleWhen: { key: "ocrMode", equals: "builtin" },
+			},
+			{
 				key: "ocrKeepImage",
 				name: "Keep the image next to the text",
 				desc: "Recommended: a misread word is easy to check against the ink.",
+				control: { type: "toggle" },
+				visibleWhen: { key: "ocrMode", in: ["builtin", "endpoint"] },
+			},
+			{
+				key: "ocrDiagnostics",
+				name: "Show reader diagnostics in the import report",
+				desc: "Show which reader produced each remark and how confident it was, in the import report.",
 				control: { type: "toggle" },
 				visibleWhen: { key: "ocrMode", in: ["builtin", "endpoint"] },
 			},

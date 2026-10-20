@@ -92,6 +92,8 @@ export interface RoundTripSettings {
 	 * was written, or as the callout the note shows (title, text and ink).
 	 */
 	inkRemarks: "in-place" | "callout";
+	/** Unconfirmed remarks shown faded over the note's text, where they were written. */
+	inkRemarkOverlay: boolean;
 	/** Mermaid diagrams in a handwritten notebook: drawn by hand, or as code. */
 	inkDiagrams: "handwritten" | "code";
 	/** Highlighter colour behind code and quotes, and for diagram fills. */
@@ -106,8 +108,12 @@ export interface RoundTripSettings {
 	ocrApiKey: string;
 	/** Keep the ink image next to its transcript. */
 	ocrKeepImage: boolean;
+	/** Built-in OCR: also try the WritePad cursive reader when the letter reader is unsure. */
+	ocrUseWritePad: boolean;
 	/** Vision endpoint: how many of the owner's corrections go along as worked examples. */
 	ocrExamples: number;
+	/** Show which reader produced each remark and how confident it was, in the import report. */
+	ocrDiagnostics: boolean;
 	/** docId ↔ device document mapping (round-trip foundation, F5). */
 	mappings: MappingTable;
 }
@@ -153,6 +159,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	pendingWordSheet: null,
 	inkImages: "colour-hatch",
 	inkRemarks: "in-place",
+	inkRemarkOverlay: true,
 	inkDiagrams: "handwritten",
 	inkAccents: true,
 	erasedAs: "delete",
@@ -161,7 +168,9 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	ocrModel: "qwen2.5vl:7b",
 	ocrApiKey: "",
 	ocrKeepImage: true,
+	ocrUseWritePad: true,
 	ocrExamples: 3,
+	ocrDiagnostics: false,
 	mappings: {},
 };
 

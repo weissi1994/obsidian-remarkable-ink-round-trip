@@ -120,23 +120,53 @@ export function highlightedText(
 	return { text: out.join("\n"), placed: true };
 }
 
+/** A word of a line, markdown and punctuation aside, and where it stands in the line. */
+export interface WordSpan {
+	word: string;
+	start: number;
+	end: number;
+}
+
+/** A line's words with their places, markdown and punctuation aside. */
+export function wordSpans(line: string): WordSpan[] {
+	const spans: WordSpan[] = [];
+	for (const match of line.matchAll(/[^\s|]+/g)) {
+		const raw = match[0];
+		const lead = /^[^\p{L}\p{N}]*/u.exec(raw)?.[0].length ?? 0;
+		const word = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+		if (word === "") continue;
+		const start = match.index + lead;
+		spans.push({ word, start, end: start + word.length });
+	}
+	return spans;
+}
+
 /** A line's words, markdown and punctuation aside, for finding a printed line in the source. */
-function wordsOf(line: string): string[] {
-	return line
-		.split(/[\s|]+/)
-		.map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
-		.filter((word) => word !== "");
+export function wordsOf(line: string): string[] {
+	return wordSpans(line).map((span) => span.word);
+}
+
+/** The words a printed row is found by in the source: its first four. */
+export function rowWords(quote: string | undefined): string[] {
+	return wordsOf(quote ?? "").slice(0, 4);
+}
+
+/** Where the words run in a line's words, in order: the index of the first of each run. */
+export function runsOf(words: string[], wanted: string[]): number[] {
+	const runs: number[] = [];
+	if (wanted.length === 0) return runs;
+	for (let at = 0; at + wanted.length <= words.length; at++) {
+		if (wanted.every((word, k) => words[at + k] === word)) runs.push(at);
+	}
+	return runs;
 }
 
 /** The source line the remark was written against: the nearest one above it holding the quote. */
-function anchorAbove(lines: string[], before: number, quote: string | undefined): number | null {
-	const wanted = wordsOf(quote ?? "").slice(0, 4);
+export function anchorAbove(lines: string[], before: number, quote: string | undefined): number | null {
+	const wanted = rowWords(quote);
 	if (wanted.length === 0) return null;
 	for (let i = before - 1; i >= 0; i--) {
-		const words = wordsOf(lines[i]);
-		for (let at = 0; at + wanted.length <= words.length; at++) {
-			if (wanted.every((word, k) => words[at + k] === word)) return i;
-		}
+		if (runsOf(wordsOf(lines[i]), wanted).length > 0) return i;
 	}
 	return null;
 }
@@ -210,34 +240,40 @@ export function insertRemarkText(note: string, id: string, text: string, target:
 		return lines.join("\n");
 	}
 	const line = lines[anchor];
+	// A line of a callout or quote: the table and list logic below runs on the
+	// line without its `>` prefix, and every line it writes gets it back.
+	const prefix = /^(\s*(?:>\s?)+)/.exec(line)?.[1] ?? "";
+	const body = line.slice(prefix.length);
+	const unquoted = (at: number) => (lines[at].startsWith(prefix) ? lines[at].slice(prefix.length) : "");
 
 	const fence = fenceEnd(lines, anchor);
 	if (fence !== null) {
 		paragraph(fence);
-	} else if (TABLE_ROW.test(line) && !TABLE_RULE.test(line)) {
+	} else if (TABLE_ROW.test(body) && !TABLE_RULE.test(body)) {
 		// Into the cell under the ink.
-		const cells = cellsOf(line);
+		const cells = cellsOf(body);
 		const column = Math.min(Math.max(target.column ?? cells.length - 1, 0), cells.length - 1);
 		const value = textLines.map((l) => l.replace(/(?<!\\)\|/g, "\\|")).join("<br>");
 		const current = cells[column].trim();
 		cells[column] = ` ${current === "" ? value : `${current} ${value}`} `;
-		const indent = /^\s*/.exec(line)![0];
-		lines[anchor] = `${indent}|${cells.join("|")}|`;
-	} else if (/^\s*>/.test(line)) {
-		// A line of the callout or quote it was written in, right after that line.
-		const prefix = /^(\s*(?:>\s?)+)/.exec(line)![1];
-		lines.splice(anchor + 1, 0, ...textLines.map((l) => `${prefix}${l}`));
-	} else if (LIST_ITEM.test(line)) {
+		const indent = /^\s*/.exec(body)![0];
+		lines[anchor] = `${prefix}${indent}|${cells.join("|")}|`;
+	} else if (LIST_ITEM.test(body)) {
 		// A new item after the one it was written against (and that item's continuation).
-		const [, indent, marker, gap] = LIST_ITEM.exec(line)!;
+		const [, indent, marker, gap] = LIST_ITEM.exec(body)!;
 		let end = anchor;
-		while (end + 1 < lines.length && /^\s+\S/.test(lines[end + 1]) && /^\s*/.exec(lines[end + 1])![0].length > indent.length && !LIST_ITEM.test(lines[end + 1].slice(indent.length))) {
+		while (end + 1 < lines.length) {
+			const following = unquoted(end + 1);
+			if (!/^\s+\S/.test(following) || /^\s*/.exec(following)![0].length <= indent.length || LIST_ITEM.test(following.slice(indent.length))) break;
 			end++;
 		}
 		const ordered = /^\d+/.exec(marker);
 		const next = ordered === null ? marker : `${Number(ordered[0]) + 1}${marker.slice(ordered[0].length)}`;
 		const pad = " ".repeat(next.length + gap.length);
-		lines.splice(end + 1, 0, `${indent}${next}${gap}${textLines[0]}`, ...textLines.slice(1).map((l) => `${indent}${pad}${l}`));
+		lines.splice(end + 1, 0, `${prefix}${indent}${next}${gap}${textLines[0]}`, ...textLines.slice(1).map((l) => `${prefix}${indent}${pad}${l}`));
+	} else if (prefix !== "") {
+		// A line of the callout or quote it was written in, right after that line.
+		lines.splice(anchor + 1, 0, ...textLines.map((l) => `${prefix}${l}`));
 	} else {
 		paragraph(paragraphEnd(lines, anchor));
 	}

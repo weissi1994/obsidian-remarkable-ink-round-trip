@@ -13,7 +13,7 @@
  * sidesteps CORS on desktop and mobile alike).
  */
 
-import { HttpClient, TransportError } from "./http";
+import { HttpClient, HttpRequest, HttpResponse, TransportError } from "./http";
 
 export interface OcrConfig {
 	/** Base URL up to and including /v1. */
@@ -136,37 +136,171 @@ export function parseOcrResponse(text: string): string | null {
 	return cleaned;
 }
 
+/** Base URL, trimmed and without a trailing slash; throws if it is not http(s). */
+function normaliseEndpoint(raw: string): string {
+	const endpoint = raw.trim().replace(/\/+$/, "");
+	if (!/^https?:\/\//i.test(endpoint)) {
+		throw new TransportError("The OCR endpoint must start with http:// or https://.");
+	}
+	return endpoint;
+}
+
+function authHeaders(config: OcrConfig): Record<string, string> {
+	return config.apiKey !== undefined && config.apiKey.trim() !== ""
+		? { Authorization: `Bearer ${config.apiKey.trim()}` }
+		: {};
+}
+
+function hasApiKey(config: OcrConfig): boolean {
+	return config.apiKey !== undefined && config.apiKey.trim() !== "";
+}
+
+/** The first 200 chars of a response body, whitespace-collapsed, for the raw passthrough. */
+function bodySnippet(text: string): string {
+	const trimmed = (text ?? "").replace(/\s+/g, " ").trim();
+	return trimmed.length > 200 ? trimmed.slice(0, 200) : trimmed;
+}
+
+/**
+ * Call the endpoint, turning a rejected request (connection refused, DNS,
+ * timeout) into an actionable reachability error — `requestUrl({throw:false})`
+ * suppresses non-2xx *status* throws but still rejects when it cannot connect,
+ * so this is the only place a stopped server is caught.
+ */
+async function send(http: HttpClient, endpoint: string, request: HttpRequest): Promise<HttpResponse> {
+	try {
+		return await http(request);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		const refused = /refus|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|timed? ?out|network|socket/i.test(
+			detail,
+		);
+		throw new TransportError(
+			refused
+				? `Could not reach the OCR endpoint at ${endpoint} — is the server running? (connection refused)`
+				: `Could not reach the OCR endpoint at ${endpoint} — is the server running? (${detail})`,
+		);
+	}
+}
+
+/**
+ * Map a non-2xx status to a TransportError, or null for a 2xx. The raw status
+ * and a body snippet are always appended, so the action stays useful even for
+ * a failure signature we did not anticipate; the specific hints layer on top.
+ */
+function mapStatus(response: HttpResponse, config: OcrConfig, route: string): TransportError | null {
+	const { status } = response;
+	if (status >= 200 && status < 300) return null;
+	const snippet = bodySnippet(response.text);
+	const raw = `(HTTP ${status}${snippet === "" ? "" : `: ${snippet}`})`;
+	// A local server (no API key) answering 403 is not a bad key. Our requests
+	// carry no Origin header and Ollama 0.1.42+ allows app:// anyway, so it is
+	// an older Ollama's origin allowlist, or a proxy in front of the server.
+	if (status === 403 && !hasApiKey(config)) {
+		return new TransportError(
+			`The local endpoint refused the request. Ollama 0.1.42 and later accept the plugin's ` +
+				`requests as they are, so update Ollama. On an older Ollama, set ` +
+				`OLLAMA_ORIGINS=app://obsidian.md (or *) and restart it. ` +
+				`See docs/ocr-endpoint-setup.md → Troubleshooting. ${raw}`,
+			status,
+		);
+	}
+	if (status === 401 || status === 403) {
+		return new TransportError(`The OCR endpoint refused the API key. ${raw}`, status);
+	}
+	if (status === 404) {
+		return new TransportError(
+			`The OCR endpoint has no ${route} route, or the model "${config.model}" is unknown. ${raw}`,
+			status,
+		);
+	}
+	return new TransportError(`The OCR endpoint answered ${status}. ${raw}`, status);
+}
+
 /** Transcribe one image. Throws a TransportError with an actionable message on failure. */
 export async function transcribe(
 	http: HttpClient,
 	config: OcrConfig,
 	request: OcrRequest,
 ): Promise<string | null> {
-	const endpoint = config.endpoint.trim().replace(/\/+$/, "");
-	if (!/^https?:\/\//i.test(endpoint)) {
-		throw new TransportError("The OCR endpoint must start with http:// or https://.");
-	}
-	const headers: Record<string, string> = { "Content-Type": "application/json" };
-	if (config.apiKey !== undefined && config.apiKey.trim() !== "") {
-		headers.Authorization = `Bearer ${config.apiKey.trim()}`;
-	}
-	const response = await http({
+	const endpoint = normaliseEndpoint(config.endpoint);
+	const response = await send(http, endpoint, {
 		url: `${endpoint}/chat/completions`,
 		method: "POST",
-		headers,
+		headers: { "Content-Type": "application/json", ...authHeaders(config) },
 		body: ocrBody(config, request),
 	});
-	if (response.status === 401 || response.status === 403) {
-		throw new TransportError("The OCR endpoint refused the API key.", response.status);
+	const error = mapStatus(response, config, "/chat/completions");
+	if (error !== null) throw error;
+	return parseOcrResponse(response.text);
+}
+
+/**
+ * The models the endpoint serves. `GET {endpoint}/models` is the OpenAI route;
+ * Ollama and LM Studio both answer it at `/v1/models`. Parses `data[].id`.
+ */
+export async function listModels(http: HttpClient, config: OcrConfig): Promise<string[]> {
+	const endpoint = normaliseEndpoint(config.endpoint);
+	const response = await send(http, endpoint, {
+		url: `${endpoint}/models`,
+		method: "GET",
+		headers: authHeaders(config),
+	});
+	const error = mapStatus(response, config, "/models");
+	if (error !== null) throw error;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(response.text);
+	} catch {
+		throw new TransportError("The OCR endpoint did not answer /models with JSON.");
 	}
-	if (response.status === 404) {
+	const data = (parsed as { data?: unknown }).data;
+	if (!Array.isArray(data)) return [];
+	return data
+		.map((entry) =>
+			typeof entry === "object" && entry !== null && "id" in entry
+				? String((entry as { id: unknown }).id)
+				: "",
+		)
+		.filter((id) => id !== "");
+}
+
+/**
+ * A 1×1 PNG, sent through the real transcribe path so Test connection exercises
+ * the same request the import does — auth, route, body shape and all.
+ */
+const PROBE_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+function pngFromBase64(b64: string): ArrayBuffer {
+	const binary = atob(b64);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+	return bytes.buffer;
+}
+
+const PROBE_PNG = pngFromBase64(PROBE_PNG_BASE64);
+
+export interface OcrConnection {
+	models: string[];
+	probe: string | null;
+}
+
+/**
+ * The Test-connection flow: list the served models, assert the configured one
+ * is among them, then send a tiny probe image through `transcribe()`. Each step
+ * throws a TransportError with an actionable message on failure.
+ */
+export async function checkConnection(http: HttpClient, config: OcrConfig): Promise<OcrConnection> {
+	const models = await listModels(http, config);
+	if (!models.includes(config.model)) {
 		throw new TransportError(
-			`The OCR endpoint has no /chat/completions route, or the model "${config.model}" is unknown.`,
-			404,
+			`Model "${config.model}" is not served by this endpoint — pull it (ollama pull ${config.model})` +
+				(models.length === 0
+					? ", or check the endpoint serves it."
+					: ` or pick one of: ${models.join(", ")}.`),
 		);
 	}
-	if (response.status < 200 || response.status >= 300) {
-		throw new TransportError(`The OCR endpoint answered ${response.status}.`, response.status);
-	}
-	return parseOcrResponse(response.text);
+	const probe = await transcribe(http, config, { png: PROBE_PNG });
+	return { models, probe };
 }

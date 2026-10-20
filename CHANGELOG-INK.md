@@ -8,6 +8,37 @@
   samples and corrections learned on different copies are merged at each sync
   instead of one copy's overwriting the other's.
 
+- **No `OLLAMA_ORIGINS` needed:** the setup guide no longer asks you to set
+  it; Ollama 0.1.42+ accepts the plugin's requests as they are.
+- **Unconfirmed remarks show on the text:** a remark you have not confirmed
+  yet is also drawn half-transparent over the note, roughly where you wrote it
+  beside the printed line, in reading view and in the editor. Only a picture —
+  the note and its callout are unchanged — and it goes once the remark is
+  confirmed (✓) or inserted as text. **Show unconfirmed remarks on the text**
+  under Handwriting turns it off.
+- **One-click local reading (desktop):** *Settings → Reading handwriting (OCR)
+  → Set up local reading for me* finds Ollama on this computer, downloads the
+  handwriting model if it is missing — after you confirm, with progress and a
+  Cancel — points the OCR settings at it and runs *Test connection*. If Ollama
+  is not running it links to the installer. The manual endpoint settings stay
+  for everything else.
+- **Tables, lists, task boxes, code and nested quotes inside quotes and
+  callouts** are typeset as such, set in by the quote's bar: a table gets its
+  grid, a task a box to tick, code its band, and a callout's title a line of
+  its own. Before, everything in a quote ran together into one italic
+  paragraph of pipes and markers. Notebooks already on the tablet keep their
+  look until their note changes and is sent again.
+- **Ticks, strikes and remarks inside quotes and callouts come back into the
+  note:** a tick or a stripe on a task in a callout (`> - [ ] task`, also in a
+  nested quote) marks it done or cancelled, like a task outside one. A remark
+  written in a table cell inside a callout goes into that cell instead of
+  breaking the table, and one written against a list item in a callout becomes
+  a new item of that list.
+- **Nested callouts get their title too:** a callout inside a callout or
+  quote (`> > [!tip] Inner`) reaches the tablet as a bold "Inner" line at its
+  quote depth instead of the literal `[!tip] Inner`, and callout syntax inside
+  a code fence is no longer rewritten. Notes with a nested callout are sent
+  once more on the next sync.
 - **Handwriting sheets have a layer of their own to write on:** the boxes,
   guides and labels sit on a "Sheet" layer, and the page opens on an empty
   "Your handwriting" layer above it. The tablet's eraser and lasso only touch

@@ -8,9 +8,14 @@
  *   words with the remark's ink words;
  * - from the word sheet, where each box is one word written joined-up.
  *
- * Each word keeps up to three samples, newest last. The whole-word reader
- * (words.ts) checks them before anything else, so a word the owner wrote
- * once is recognised in their own hand from then on.
+ * Each word keeps up to PER_WORD samples, newest last. When a word is over
+ * that cap the most *redundant* sample is dropped — the one closest in shape
+ * to another kept sample — rather than the oldest, so the kept set spans the
+ * owner's variation (slant, join, a differently-formed letter) instead of
+ * collapsing onto whichever way they happened to write it most recently. The
+ * whole-word reader (words.ts) checks these samples before anything else, so a
+ * word the owner wrote once is recognised in their own hand from then on, and
+ * the more of their *range* the store keeps, the more remarks it recalls.
  *
  * The text the note has for a remark is the owner's from the moment they
  * change it: a later reading of the same ink never replaces it, here or in
@@ -21,12 +26,37 @@
 
 import type { ImportedMark } from "../incoming/pull";
 import { findRemark, remarkText, type RemarkRef } from "../incoming/remarkid";
-import { splitLineInto, splitWords, type Point } from "./recognize";
+import { cloudOf, cutLetters, matchDistance, splitLineInto, splitWords, type Point } from "./recognize";
 
 export { remarkText };
 
-/** Samples kept per word; the oldest goes first. */
-const PER_WORD = 3;
+/**
+ * Samples kept per word; over this the most redundant goes first (see
+ * `addSample`). Raised from 3: the #5 spike showed accumulated samples help
+ * recall, and read-time work stays in budget because the scaling MR (!15, now
+ * on main) bounds how many samples the reader actually scores per word — the
+ * two are complementary (!15 caps the read, this grows the store without
+ * keeping junk). 10 sits mid-range of the 8–12 the budget allows. The format
+ * is unchanged (`words: Record<string, Point[][][]>`), so a store written with
+ * the old cap of 3 stays valid and needs no migration.
+ */
+export const PER_WORD = 10;
+/**
+ * Samples kept per letter shape; over this the most *redundant* goes first
+ * (same diversity-preserving cull as `PER_WORD`, see `keepDiverse`), so the
+ * kept set spans how the owner forms a letter rather than collapsing onto
+ * their most recent stroke of it. Set to TEMPLATE_CAP (`recognize.ts`), the
+ * most learned templates the reader scores per character: at this value every
+ * retained letter sample is actually used at read time — none is silently
+ * dropped by `capPerChar` (it keeps the owner's lower-weight learned letters
+ * ahead of the bundled fonts) — so the store cap and the read cap line up.
+ * Read work stays bounded by TEMPLATE_CAP whatever the store holds, and the
+ * format is unchanged (`letters: Record<string, Point[][][]>`), so a store
+ * written with the old cap of 3 stays valid and needs no migration.
+ */
+const PER_LETTER = 6;
+/** Letter ink is stored in cap units; coordinates are rounded to this many places. */
+const LETTER_PLACES = 1000;
 /** Remarks remembered for learning that were never corrected, newest kept. */
 const REMARKS_KEPT = 500;
 /** Corrected or confirmed remarks kept (worked examples, training export), newest kept. */
@@ -96,10 +126,25 @@ export interface RemarkRecord {
 	inserted?: boolean;
 }
 
+/**
+ * The store's shape version. Bumped from 1 to 2 as the first real format
+ * transition: Direction 2 keeps adding optional fields (`letters` in !12,
+ * `joins` coming), which are backward-compatible on their own, but there was
+ * no seam for a change that isn't — `migrate` is that seam. Bump this and add
+ * a case to `migrate` for the next shape change.
+ */
+export const CURRENT_FORMAT = 2;
+
 export interface SampleStore {
-	format: 1;
+	format: typeof CURRENT_FORMAT;
 	/** Word as written → its samples, each a list of strokes (device units). */
 	words: Record<string, Point[][][]>;
+	/**
+	 * Letter as written → its samples, each a list of strokes in cap units with
+	 * the word baseline at y = 0 (lettersTemplates reads them). Learned only from
+	 * corrections whose ink separates cleanly into letters; absent in old stores.
+	 */
+	letters?: Record<string, Point[][][]>;
 	/** Remarks by id — or by the vault path of their image, in stores from before ids. */
 	remarks: Record<string, RemarkRecord>;
 }
@@ -110,7 +155,40 @@ export function isVerified(record: RemarkRecord): boolean {
 }
 
 export function emptyStore(): SampleStore {
-	return { format: 1, words: {}, remarks: {} };
+	return { format: CURRENT_FORMAT, words: {}, letters: {}, remarks: {} };
+}
+
+/**
+ * Bring a loaded blob up to the current store shape — the single seam every
+ * read goes through (inkedge.ts `loadSamples`), so a shape change has one home.
+ * A linear version ladder: the next bump is "add a case".
+ *
+ * - Not an object (null, a number, an array) → an empty current store, so the
+ *   raw cast that used to trust the JSON can no longer hand back a non-store.
+ * - Format missing or 1 → a format-1 store: upgraded losslessly to the current
+ *   format. A format-1 store carries the same information, so the upgrade only
+ *   defaults absent required containers and sets the version; optional fields
+ *   (`letters`, future `joins`) are left exactly as they were.
+ * - Current format → returned after the same defensive container defaulting.
+ * - Unknown / newer format → defaulted and returned rather than thrown away, so
+ *   a store written by a newer plugin build survives a downgrade with its data.
+ */
+export function migrate(raw: unknown): SampleStore {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return emptyStore();
+	const store = raw as Partial<SampleStore> & Record<string, unknown>;
+	// Required containers always exist after this, whatever the source format.
+	if (typeof store.words !== "object" || store.words === null) store.words = {};
+	if (typeof store.remarks !== "object" || store.remarks === null) store.remarks = {};
+	const format: unknown = store.format;
+	if (format !== undefined && format !== 1 && format !== CURRENT_FORMAT) {
+		// Unknown or newer: keep whatever shape (and version) it has rather than
+		// wiping it, so a store from a newer build survives a downgrade.
+		return store as unknown as SampleStore;
+	}
+	// Missing/format-1 is a lossless upgrade (same information); format-2 is a
+	// no-op. Either way the version is now current.
+	store.format = CURRENT_FORMAT;
+	return store as SampleStore;
 }
 
 /**
@@ -119,20 +197,32 @@ export function emptyStore(): SampleStore {
  * per remark the owner's verified text over a reading, else the latest.
  */
 export function mergeStores(disk: SampleStore, mine: SampleStore): SampleStore {
-	const words: Record<string, Point[][][]> = { ...disk.words };
-	for (const [word, samples] of Object.entries(mine.words)) {
-		const known = new Set((words[word] ?? []).map((sample) => JSON.stringify(sample)));
-		words[word] = [...(words[word] ?? []), ...samples.filter((sample) => !known.has(JSON.stringify(sample)))].slice(-PER_WORD);
-	}
+	const words = mergeSamples(disk.words, mine.words, (samples) => samples.slice(-PER_WORD));
+	const letters = mergeSamples(disk.letters ?? {}, mine.letters ?? {}, (samples) =>
+		samples.length <= PER_LETTER ? samples : keepDiverse(samples, PER_LETTER),
+	);
 	const remarks: Record<string, RemarkRecord> = { ...disk.remarks };
+	const rank = (r: RemarkRecord) => Number(isVerified(r));
 	for (const [key, record] of Object.entries(mine.remarks)) {
 		const other = remarks[key];
-		const rank = (r: RemarkRecord) => Number(isVerified(r));
 		if (other === undefined || rank(record) > rank(other) || (rank(record) === rank(other) && record.at >= other.at)) {
 			remarks[key] = record;
 		}
 	}
-	return { format: 1, words, remarks };
+	return { ...disk, ...mine, words, letters, remarks };
+}
+
+function mergeSamples(
+	disk: Record<string, Point[][][]>,
+	mine: Record<string, Point[][][]>,
+	cap: (samples: Point[][][]) => Point[][][],
+): Record<string, Point[][][]> {
+	const out = { ...disk };
+	for (const [key, samples] of Object.entries(mine)) {
+		const known = new Set((out[key] ?? []).map((sample) => JSON.stringify(sample)));
+		out[key] = cap([...(out[key] ?? []), ...samples.filter((sample) => !known.has(JSON.stringify(sample)))]);
+	}
+	return out;
 }
 
 const round = (strokes: Point[][]) =>
@@ -140,7 +230,81 @@ const round = (strokes: Point[][]) =>
 
 export function addSample(store: SampleStore, word: string, strokes: Point[][]): void {
 	if (word === "" || strokes.length === 0) return;
-	store.words[word] = [...(store.words[word] ?? []), round(strokes)].slice(-PER_WORD);
+	const kept = [...(store.words[word] ?? []), round(strokes)];
+	store.words[word] = kept.length <= PER_WORD ? kept : keepDiverse(kept, PER_WORD);
+}
+
+/**
+ * Cut a sample set down to `cap` by dropping the most redundant one at a time
+ * — the sample whose closest neighbour (by the cheap $P cloud distance) is
+ * nearest, i.e. the one another kept sample already covers. The kept set then
+ * spans the owner's variation rather than collapsing onto the newest way of
+ * writing it. Survivors stay in their original (newest-last) order, and a tie
+ * — a pair of near-duplicates equally close to each other — drops the *older*
+ * one, so recency still breaks even cases. Used for both word samples (cap
+ * `PER_WORD`) and per-letter samples (cap `PER_LETTER`); both are the same
+ * stroke-cloud representation, so the $P proxy fits either.
+ */
+function keepDiverse(samples: Point[][][], cap: number): Point[][][] {
+	const clouds = samples.map((strokes) => cloudOf(strokes));
+	const between = clouds.map((a) => clouds.map((b) => matchDistance(a, b)));
+	const live = samples.map((_, i) => i); // indices still kept, oldest-first
+	while (live.length > cap) {
+		let dropAt = 0;
+		let mostRedundant = Infinity;
+		for (let a = 0; a < live.length; a++) {
+			let nearest = Infinity;
+			for (let b = 0; b < live.length; b++) {
+				if (a !== b) nearest = Math.min(nearest, between[live[a]][live[b]]);
+			}
+			// Strictly-less keeps the first (oldest) of a tie as the one to drop.
+			if (nearest < mostRedundant) {
+				mostRedundant = nearest;
+				dropAt = a;
+			}
+		}
+		live.splice(dropAt, 1);
+	}
+	return live.map((i) => samples[i]);
+}
+
+function boxOf(strokes: Point[][]): { minX: number; maxX: number; minY: number; maxY: number } {
+	const box = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+	for (const p of strokes.flat()) {
+		box.minX = Math.min(box.minX, p.x);
+		box.maxX = Math.max(box.maxX, p.x);
+		box.minY = Math.min(box.minY, p.y);
+		box.maxY = Math.max(box.maxY, p.y);
+	}
+	return box;
+}
+
+/**
+ * Keep each letter of a word the owner wrote, in their own hand — but only when
+ * the word's ink separates cleanly into exactly its letters (cutLetters). Each
+ * letter's strokes are stored in cap units with the word baseline at y = 0, so
+ * lettersTemplates can read its shape and where it sits back out. Cursive ink
+ * that cannot be segmented teaches nothing here; its whole-word sample stands.
+ */
+function learnLetters(store: SampleStore, word: string, strokes: Point[][]): void {
+	const chars = [...word];
+	if (chars.length === 0) return;
+	const letters = cutLetters(strokes, chars.length);
+	if (letters === null || letters.length !== chars.length) return;
+	const wordBox = boxOf(strokes);
+	const baseline = wordBox.maxY;
+	const cap = wordBox.maxY - wordBox.minY || 1;
+	const place = (v: number) => Math.round(v * LETTER_PLACES) / LETTER_PLACES;
+	const kept = (store.letters ??= {});
+	for (let i = 0; i < chars.length; i++) {
+		const ink = letters[i].filter((stroke) => stroke.length > 0);
+		if (ink.flat().length < 2) continue;
+		const norm = ink.map((stroke) =>
+			stroke.map((p) => ({ x: place((p.x - wordBox.minX) / cap), y: place((p.y - baseline) / cap) })),
+		);
+		const samples = [...(kept[chars[i]] ?? []), norm];
+		kept[chars[i]] = samples.length <= PER_LETTER ? samples : keepDiverse(samples, PER_LETTER);
+	}
 }
 
 /** Where a remark is found in its note: keys from before ids are image paths. */
@@ -314,7 +478,10 @@ export function learnCorrection(store: SampleStore, record: RemarkRecord, correc
 		const text = textLines.flat();
 		if (ink.length === text.length) pairs = ink.map((strokes, i) => [text[i], strokes]);
 	}
-	for (const [word, strokes] of pairs) addSample(store, word, strokes);
+	for (const [word, strokes] of pairs) {
+		addSample(store, word, strokes);
+		learnLetters(store, word, strokes);
+	}
 	return pairs.length;
 }
 

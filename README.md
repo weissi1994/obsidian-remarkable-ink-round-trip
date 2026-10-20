@@ -171,7 +171,10 @@ Remarks come back as an image of your ink and — when they can be read — as t
 - **Vision model endpoint**: any OpenAI-compatible vision model — local (Ollama,
   LM Studio) or hosted. Only the cropped remark images are sent there, never the
   note — plus, as worked examples, your latest corrected remarks (*Worked
-  examples from your corrections*, 3 by default, 0 for none).
+  examples from your corrections*, 3 by default, 0 for none). First time? On
+  desktop, *Set up local reading for me* finds a local Ollama, downloads the
+  model (after asking) and fills the settings in; otherwise see the
+  [endpoint setup guide](docs/ocr-endpoint-setup.md).
 - **Off**: images only.
 
 ### Correcting what was read
@@ -205,6 +208,12 @@ Each remark callout has two buttons in its title:
   printed text gets. If the text and the ink can't be matched word by word,
   a remark highlighted almost entirely is marked as a whole; otherwise the
   highlighting is left out and a notice says so.
+- **Faded ink on the text**: until you ✓ Confirm it or Insert it as text, a
+  remark's ink is also drawn half-transparent over the note, roughly where you
+  wrote it beside the printed line — in reading view and in the editor. It is
+  only a picture (the note is unchanged, the text under it stays selectable)
+  and disappears once the remark is confirmed or inserted. Turn it off with
+  **Show unconfirmed remarks on the text** under Handwriting.
 
 The same as commands: **Confirm handwriting reading at cursor**, **Correct
 handwriting reading at cursor**, **Insert handwriting reading as text at

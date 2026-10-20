@@ -65,7 +65,9 @@ import { parseRmPage } from "./incoming/rmlines";
 import { confirmAllRemarks, confirmRemarkAt, findRemark, remarkAt, remarkId } from "./incoming/remarkid";
 import { highlightedText, insertRemarkText } from "./incoming/remarkinsert";
 import { RemarkControls } from "./remarkui";
-import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
+import { RemarkOverlays } from "./remarkoverlayui";
+import { resolveLayoutOptions } from "./convert/pdf";
+import { Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
 import {
@@ -84,7 +86,11 @@ import {
 	withEarlierReadings,
 } from "./ocr/samples";
 import { datasetInfo, datasetJsonl, trainingSamples } from "./ocr/trainingset";
-import type { OcrExample } from "./transport/ocr";
+import type { OcrExample, OcrConnection } from "./transport/ocr";
+import { checkConnection } from "./transport/ocr";
+import type { NdjsonClient } from "./transport/ollama";
+import { nodeNdjson } from "./transport/nodestream";
+import { setUpLocalOllama } from "./ollamasetup";
 import { builtinFont } from "./ink/glyphs";
 import {
 	DocumentFile,
@@ -152,6 +158,7 @@ export default class RoundTripPlugin extends Plugin {
 	private writepad: Promise<WritePad | null> | null = null;
 	private samplesDirty = false;
 	private syncTimer: number | null = null;
+	private remarkOverlays: RemarkOverlays | null = null;
 	/** What every copy of the vault shares (sync/syncstate.ts); set up on load. */
 	state: SyncState = new SyncState(vaultFs(this.app), DEFAULT_SETTINGS.syncStateFolder);
 	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
@@ -310,6 +317,20 @@ export default class RoundTripPlugin extends Plugin {
 		// Ink fork: confirm or correct a handwritten remark's reading in the note.
 		const remarkControls = new RemarkControls(this.app, (file, id) => this.insertRemark(file, id));
 		this.registerMarkdownPostProcessor(remarkControls.process);
+		// Ink fork: unconfirmed remarks drawn faded over the text, where they were written (#29).
+		this.remarkOverlays = new RemarkOverlays(this.app, {
+			enabled: () => this.settings.inkRemarkOverlay,
+			readInk: (imageName) => this.state.readInk(imageName),
+			layoutFor: (notePath) =>
+				resolveLayoutOptions(Object.values(this.settings.mappings).find((entry) => entry.notePath === notePath)?.pdfLayout),
+		});
+		this.registerMarkdownPostProcessor(this.remarkOverlays.process);
+		this.registerEditorExtension(this.remarkOverlays.extension);
+		this.registerEvent(
+			this.app.vault.on("modify", (file) => {
+				if (file instanceof TFile) this.remarkOverlays?.changed(file);
+			}),
+		);
 		this.addCommand({
 			id: "confirm-remark-reading",
 			name: "Confirm handwriting reading at cursor",
@@ -537,6 +558,7 @@ export default class RoundTripPlugin extends Plugin {
 	async onExternalSettingsChange(): Promise<void> {
 		await this.syncCoordinator.enqueue("pull", async () => {
 			await this.loadSettings();
+			this.remarkOverlays?.sync();
 			this.setupWatcher();
 			this.setupFetchShim();
 			this.setupSyncTimer();
@@ -546,6 +568,7 @@ export default class RoundTripPlugin extends Plugin {
 	async saveSettings(): Promise<void> {
 		await this.syncCoordinator.enqueue("pull", async () => {
 			await this.persistSettings();
+			this.remarkOverlays?.sync();
 			this.setupWatcher();
 			this.setupFetchShim();
 			this.setupSyncTimer();
@@ -817,12 +840,13 @@ export default class RoundTripPlugin extends Plugin {
 					wholePage: true,
 				};
 				const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
-				const text =
+				const read =
 					this.settings.ocrMode === "builtin"
 						? await this.recognizeLocally(request)
 						: this.settings.ocrMode === "endpoint"
 							? await this.transcribeStrokes(request).catch(() => null)
 							: null;
+				const text = read?.text ?? null;
 				written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
 			}
 			const docId = generateDocId();
@@ -1380,6 +1404,7 @@ export default class RoundTripPlugin extends Plugin {
 					startedAt,
 					pluginVersion: this.manifest.version,
 					handwritingEnabled: this.settings.importHandwriting,
+					ocrDiagnostics: this.settings.ocrDiagnostics,
 				})}\n\n--- details ---\n${log.join("\n")}`;
 				await this.deliverReport(report, !quiet);
 			}
@@ -1707,13 +1732,15 @@ export default class RoundTripPlugin extends Plugin {
 	 * Read one remark on this device, from its strokes (ocr/recognize.ts).
 	 * Unsure readings come back null: the image is the better answer then.
 	 */
-	private async recognizeLocally(request: StrokeRenderRequest & { quote?: string }): Promise<string | null> {
+	private async recognizeLocally(
+		request: StrokeRenderRequest & { quote?: string },
+	): Promise<{ text: string; by?: ReaderName; score?: number } | null> {
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
 		// Read before: the note's text for it — the owner's, once corrected — stands.
 		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
 		if (known !== null) {
 			await this.rememberReading(request, known, {});
-			return known;
+			return { text: known };
 		}
 		const lexicon = await this.vaultLexicon();
 		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
@@ -1724,7 +1751,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (result !== null && result.confidence >= OCR_TRUST) {
 			text = result.text;
 			scored = { score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
-		} else {
+		} else if (this.settings.ocrUseWritePad) {
 			// Joined-up writing, most likely: WritePad was made for it.
 			const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
 			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) {
@@ -1733,7 +1760,7 @@ export default class RoundTripPlugin extends Plugin {
 			}
 		}
 		await this.rememberReading(request, text, scored);
-		return text;
+		return text === null ? null : { text, ...scored };
 	}
 
 	/**
@@ -1914,16 +1941,26 @@ export default class RoundTripPlugin extends Plugin {
 		notify(`Exported ${written} handwriting correction(s) to ${folder} (dataset.jsonl, LLaMA-Factory format).`);
 	}
 
-	/** Letter templates: the owner's hand first, print letters for the rest. */
+	/**
+	 * Letter templates: the owner's hand first — the handwriting sheet, then the
+	 * letters learned from corrections (ocr/samples.ts) — print letters for the
+	 * rest. Keyed on the hand version and the number of learned letter samples,
+	 * so a correction that adds letters takes effect without a reload.
+	 */
 	private async ocrTemplates(): Promise<Template[]> {
-		const key = this.settings.handVersion;
+		const store = await this.ink.loadSamples();
+		const learned = Object.values(store.letters ?? {}).reduce((n, samples) => n + samples.length, 0);
+		const key = `${this.settings.handVersion}#${learned}`;
 		if (this.templates?.key === key) return this.templates.templates;
-		const hand = key === "" ? null : await this.ink.ensureHand(key);
-		const templates = templatesFrom([
-			...(hand === null ? [] : [{ glyphs: hand.glyphs, weight: 0.9 }]),
-			{ glyphs: builtinFont("readability").glyphs, weight: 1 },
-			{ glyphs: builtinFont("hershey-sans").glyphs, weight: 1 },
-		]);
+		const hand = this.settings.handVersion === "" ? null : await this.ink.ensureHand(this.settings.handVersion);
+		const templates = [
+			...templatesFrom([
+				...(hand === null ? [] : [{ glyphs: hand.glyphs, weight: 0.9 }]),
+				{ glyphs: builtinFont("readability").glyphs, weight: 1 },
+				{ glyphs: builtinFont("hershey-sans").glyphs, weight: 1 },
+			]),
+			...lettersTemplates(store),
+		];
 		this.templates = { key, templates };
 		return templates;
 	}
@@ -1945,13 +1982,47 @@ export default class RoundTripPlugin extends Plugin {
 	 * owner's latest corrections as worked examples. A remark read before
 	 * keeps the note's text, the owner's once corrected.
 	 */
+	/**
+	 * Test connection: ping the chosen vision endpoint, confirm it serves the
+	 * configured model, and send a tiny probe image — surfacing the exact
+	 * misconfiguration that the silent import-time fallback would hide. Throws a
+	 * TransportError with an actionable message; the settings action reports it.
+	 */
+	testOcrConnection(): Promise<OcrConnection> {
+		const s = this.settings;
+		return checkConnection(obsidianHttp, {
+			endpoint: s.ocrEndpoint,
+			model: s.ocrModel,
+			apiKey: s.ocrApiKey,
+		});
+	}
+
+	/**
+	 * "Set up local reading for me" (#26): find a local Ollama, pull the model
+	 * with the owner's consent, point the OCR settings at it, test. Desktop
+	 * only — the settings tab hides the action elsewhere.
+	 */
+	setUpLocalOllama(refresh: () => void): Promise<void> {
+		return setUpLocalOllama(
+			{
+				app: this.app,
+				settings: () => this.settings,
+				saveSettings: () => this.saveSettings(),
+				testOcrConnection: () => this.testOcrConnection(),
+				http: obsidianHttp,
+				stream: desktopNdjson(),
+			},
+			refresh,
+		);
+	}
+
 	private async transcribeStrokes(
 		request: StrokeRenderRequest & { quote?: string },
-	): Promise<string | null> {
+	): Promise<{ text: string; by?: ReaderName; score?: number } | null> {
 		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
 		if (known !== null) {
 			await this.rememberReading(request, known, {});
-			return known;
+			return { text: known };
 		}
 		const png = await this.strokesToPng(request.strokes);
 		if (png === null) return null;
@@ -1959,7 +2030,7 @@ export default class RoundTripPlugin extends Plugin {
 		// No confidence from a chat endpoint: its readings fill empty callouts
 		// but never replace text the note already shows.
 		await this.rememberReading(request, text, { by: "endpoint" });
-		return text;
+		return text === null ? null : { text, by: "endpoint" };
 	}
 
 	/** Worked examples, rendered once per run: the latest corrections, oldest first. */
@@ -2377,4 +2448,19 @@ function handwritingOf(settings: RoundTripSettings): SharedHandwriting {
 		pendingSheet: settings.pendingSheet,
 		pendingWordSheet: settings.pendingWordSheet,
 	};
+}
+
+/**
+ * Streaming NDJSON over Node http(s), for the Ollama pull's progress (#26):
+ * requestUrl buffers the whole response, so it cannot report any. Desktop
+ * only, and Node is reached lazily through `window.require` — never a bundled
+ * `require("http")` that would break mobile (N7). No `Origin` header goes out
+ * this way, as with requestUrl. Null where there
+ * is no Node (mobile, or a desktop that hides it): the pull then falls back
+ * to requestUrl without progress.
+ */
+function desktopNdjson(): NdjsonClient | null {
+	if (!Platform.isDesktopApp) return null;
+	const load = (window as unknown as { require?: (module: string) => unknown }).require;
+	return typeof load === "function" ? nodeNdjson(load) : null;
 }

@@ -350,6 +350,22 @@ interface Typesetter {
 	wordId: number;
 	/** Styled words of the current block, consumed as words are placed. */
 	code?: InlineTrack;
+	/**
+	 * Left indent of everything drawn, in points, on top of the margin: the
+	 * content of a quote is set in by its bar (#22). 0 outside quotes, where
+	 * every layout stays exactly what it was.
+	 */
+	inset: number;
+	/** The quotes being drawn, outermost first: their bars break with the page. */
+	frames: QuoteFrame[];
+	/** Left edge of the quote band behind the lines drawn now, if any. */
+	band?: number;
+}
+
+/** An open quote's bar: its x, and where its segment on this page starts. */
+interface QuoteFrame {
+	x: number;
+	top: number;
 }
 
 interface InlineTrack {
@@ -399,9 +415,13 @@ function runsOf(words: PlacedWord[], has: (style: WordStyle) => boolean): [Place
 }
 
 function newPage(ts: Typesetter): void {
+	// An open quote's bar runs to the foot of the page and picks up again
+	// at the top of the next one.
+	for (const frame of ts.frames) drawBar(ts, frame, ts.opts.margin);
 	ts.page = ts.backend.addPage(ts.opts.pageWidth, ts.opts.pageHeight);
 	ts.pageIndex++;
 	ts.y = ts.opts.pageHeight - ts.opts.margin;
+	for (const frame of ts.frames) frame.top = barTop(ts);
 }
 
 /**
@@ -617,13 +637,19 @@ function drawLines(
 	for (const line of lines) {
 		ensureRoom(ts, step);
 		ts.y -= step;
-		put(ts, line, ts.opts.margin + indent, ts.y, size, font);
+		drawBand(ts, step);
+		put(ts, line, left(ts) + indent, ts.y, size, font);
 	}
 	ts.y -= extraGapAfter;
 }
 
+/** Left edge of the text column: the margin, plus a quote's inset. */
+function left(ts: Typesetter): number {
+	return ts.opts.margin + ts.inset;
+}
+
 function contentWidth(ts: Typesetter, indent = 0): number {
-	return ts.opts.pageWidth - 2 * ts.opts.margin - indent;
+	return ts.opts.pageWidth - 2 * ts.opts.margin - ts.inset - indent;
 }
 
 function drawHeading(ts: Typesetter, level: number, text: string, inline?: InlineStyles): void {
@@ -647,6 +673,8 @@ function drawParagraph(
 	text: string,
 	style?: "bold" | "italic",
 	inline?: InlineStyles,
+	/** The font of a paragraph without a style of its own; the body font by default. */
+	plain: MeasureFont = ts.body,
 ): void {
 	beginBlock(ts, "paragraph");
 	trackInline(ts, text, inline);
@@ -658,7 +686,7 @@ function drawParagraph(
 			? ts.bold
 			: ts.opts.typo >= 7 && style === "italic"
 				? ts.italic
-				: ts.body;
+				: plain;
 	const lines = wrapText(
 		toWinAnsi(text, ts.opts.typo),
 		font,
@@ -695,24 +723,25 @@ function drawList(ts: Typesetter, items: ListItem[]): void {
 		ensureRoom(ts, step);
 		// Bullet on the first line, hanging indent for wrapped lines.
 		ts.y -= step;
+		drawBand(ts, step);
 		if (task) {
-			drawCheckbox(ts, ts.opts.margin + indent - 12, ts.y, size, task.checked);
+			drawCheckbox(ts, left(ts) + indent - 12, ts.y, size, task.checked);
 		} else {
 			ts.page.drawText(bullet, {
-				x: ts.opts.margin + indent - 12,
+				x: left(ts) + indent - 12,
 				y: ts.y,
 				size,
 				font: ts.body,
 			});
 		}
 		if (lines.length > 0) {
-			put(ts, lines[0], ts.opts.margin + indent, ts.y, size, ts.body);
+			put(ts, lines[0], left(ts) + indent, ts.y, size, ts.body);
 			// The import needs to know where the box sits to read a pen tick
 			// in it (GP_E5_S12); checkboxRect is the same function drawCheckbox
 			// draws from, so the two cannot drift.
 			if (task) {
 				ts.placed[ts.placed.length - 1].checkbox = {
-					...checkboxRect(ts.opts.margin + indent - 12, ts.y, size),
+					...checkboxRect(left(ts) + indent - 12, ts.y, size),
 					checked: task.checked,
 				};
 			}
@@ -720,7 +749,8 @@ function drawList(ts: Typesetter, items: ListItem[]): void {
 		for (const line of lines.slice(1)) {
 			ensureRoom(ts, step);
 			ts.y -= step;
-			put(ts, line, ts.opts.margin + indent, ts.y, size, ts.body);
+			drawBand(ts, step);
+			put(ts, line, left(ts) + indent, ts.y, size, ts.body);
 		}
 	}
 	ts.y -= size * 0.6;
@@ -792,21 +822,84 @@ function drawQuote(ts: Typesetter, quoteLines: string[], inline?: InlineStyles):
 		// per-line segments span the full line step, so consecutive lines
 		// join into one continuous bar.
 		ts.page.drawLine({
-			start: { x: ts.opts.margin + 3, y: ts.y - step * 0.15 },
-			end: { x: ts.opts.margin + 3, y: ts.y + step * 0.85 },
+			start: { x: left(ts) + 3, y: ts.y - step * 0.15 },
+			end: { x: left(ts) + 3, y: ts.y + step * 0.85 },
 			thickness: 1.5,
 			color: rgb(0.55, 0.55, 0.55),
 		});
 		ts.page.drawHighlight?.({
-			x: ts.opts.margin + 6,
+			x: left(ts) + 6,
 			y: ts.y - step * 0.15,
 			width: contentWidth(ts) - 6,
 			height: step,
 			kind: "quote",
 		});
-		put(ts, line, ts.opts.margin + indent, ts.y, size, ts.italic);
+		put(ts, line, left(ts) + indent, ts.y, size, ts.italic);
 	}
 	ts.y -= size * 0.6;
+}
+
+/** Blocks the quote band runs behind; code, tables and pictures keep their own look. */
+const BANDED: ReadonlySet<Block["type"]> = new Set(["paragraph", "heading", "list"]);
+
+/**
+ * A quote whose content was parsed as blocks (#22): every child is drawn by
+ * its own routine, set in by the width of the bar, so a table stays a table
+ * and a task keeps a box to tick. One bar runs along the whole quote — per
+ * page, as children may break it — and the quote band only behind lines of
+ * text. A plain paragraph keeps the italic a quote has always had.
+ */
+function drawQuoteBlocks(ts: Typesetter, children: Block[]): void {
+	const size = ts.opts.fontSize;
+	const step = size * ts.opts.lineHeight;
+	const outer = { inset: ts.inset, band: ts.band, y: ts.y, page: ts.pageIndex };
+	const frame: QuoteFrame = { x: left(ts) + 3, top: barTop(ts) };
+	ts.frames.push(frame);
+	ts.inset = outer.inset + 14;
+	for (const child of children) {
+		// A nested quote draws its own band; this one stays off behind it.
+		ts.band = BANDED.has(child.type) ? ts.opts.margin + outer.inset + 6 : undefined;
+		if (child.type === "paragraph" && child.style === undefined) {
+			drawParagraph(ts, child.text, undefined, child.inline, ts.italic);
+		} else {
+			drawBlock(ts, child);
+		}
+	}
+	ts.frames.pop();
+	ts.inset = outer.inset;
+	ts.band = outer.band;
+	// The last child's gap is the quote's: the bar stops where a line's
+	// segment would, above it.
+	drawBar(ts, frame, ts.y + size * 0.6 - step * 0.15);
+	if (ts.y === outer.y && ts.pageIndex === outer.page) ts.y -= size * 0.6;
+}
+
+/** Where a quote bar starts above the next line: the top of its line step. */
+function barTop(ts: Typesetter): number {
+	return ts.y - ts.opts.fontSize * ts.opts.lineHeight * 0.15;
+}
+
+/** One page's segment of a quote bar, down to `bottom`; nothing when empty. */
+function drawBar(ts: Typesetter, frame: QuoteFrame, bottom: number): void {
+	if (frame.top - bottom < 0.5) return;
+	ts.page.drawLine({
+		start: { x: frame.x, y: bottom },
+		end: { x: frame.x, y: frame.top },
+		thickness: 1.5,
+		color: rgb(0.55, 0.55, 0.55),
+	});
+}
+
+/** The quote band behind the line just stepped to, inside a quote. */
+function drawBand(ts: Typesetter, step: number): void {
+	if (ts.band === undefined) return;
+	ts.page.drawHighlight?.({
+		x: ts.band,
+		y: ts.y - step * 0.15,
+		width: ts.opts.pageWidth - ts.opts.margin - ts.band,
+		height: step,
+		kind: "quote",
+	});
 }
 
 function drawCode(ts: Typesetter, codeLines: string[]): void {
@@ -822,13 +915,13 @@ function drawCode(ts: Typesetter, codeLines: string[]): void {
 		ensureRoom(ts, step);
 		ts.y -= step;
 		ts.page.drawHighlight?.({
-			x: ts.opts.margin + 2,
+			x: left(ts) + 2,
 			y: ts.y - step * 0.25,
 			width: contentWidth(ts) - 2,
 			height: step,
 			kind: "code",
 		});
-		put(ts, line, ts.opts.margin + 8, ts.y, size, ts.mono);
+		put(ts, line, left(ts) + 8, ts.y, size, ts.mono);
 	}
 	ts.y -= size * 0.8;
 }
@@ -845,17 +938,17 @@ function drawGridRows(
 	g: { size: number; step: number; total: number; offsets: number[]; inset: number; padTop: number; padBottom: number },
 	inline?: (InlineStyles | null)[][],
 ): void {
-	const left = ts.opts.margin;
-	const right = ts.opts.margin + g.total;
+	const x0 = left(ts);
+	const right = x0 + g.total;
 	const border = rgb(0.25, 0.25, 0.25);
 	const inner = rgb(0.6, 0.6, 0.6);
 	const hline = (y: number, thickness: number, color: DrawColor) =>
-		ts.page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness, color });
+		ts.page.drawLine({ start: { x: x0, y }, end: { x: right, y }, thickness, color });
 	const vlines = (top: number, bottom: number) => {
-		ts.page.drawLine({ start: { x: left, y: top }, end: { x: left, y: bottom }, thickness: 0.8, color: border });
+		ts.page.drawLine({ start: { x: x0, y: top }, end: { x: x0, y: bottom }, thickness: 0.8, color: border });
 		ts.page.drawLine({ start: { x: right, y: top }, end: { x: right, y: bottom }, thickness: 0.8, color: border });
 		for (const offset of g.offsets.slice(1)) {
-			const x = left + offset;
+			const x = x0 + offset;
 			ts.page.drawLine({ start: { x, y: top }, end: { x, y: bottom }, thickness: 0.5, color: inner });
 		}
 	};
@@ -869,7 +962,7 @@ function drawGridRows(
 		if (ts.pageIndex !== page) hline(top, 0.8, border);
 		page = ts.pageIndex;
 		if (rowIndex === 0) {
-			ts.page.drawHighlight?.({ x: left, y: top - plan.height, width: g.total, height: plan.height, kind: "table-header" });
+			ts.page.drawHighlight?.({ x: x0, y: top - plan.height, width: g.total, height: plan.height, kind: "table-header" });
 		}
 		let bottom = top - plan.height;
 		if (!plan.writing) {
@@ -881,7 +974,7 @@ function drawGridRows(
 				for (const line of plan.cellLines[c]) {
 					y -= g.step;
 					if (y < ts.opts.margin) break;
-					put(ts, line, left + g.offsets[c] + g.inset, y, g.size, font);
+					put(ts, line, x0 + g.offsets[c] + g.inset, y, g.size, font);
 				}
 				lowest = Math.min(lowest, y);
 			});
@@ -1023,8 +1116,8 @@ function drawTable(ts: Typesetter, rows: string[][], inline?: (InlineStyles | nu
 			ensureRoom(ts, plan.height);
 			ts.y -= plan.height;
 			ts.page.drawLine({
-				start: { x: ts.opts.margin, y: ts.y },
-				end: { x: ts.opts.margin + total, y: ts.y },
+				start: { x: left(ts), y: ts.y },
+				end: { x: left(ts) + total, y: ts.y },
 				thickness: 0.4,
 				color: rgb(0.7, 0.7, 0.7),
 			});
@@ -1048,7 +1141,7 @@ function drawTable(ts: Typesetter, rows: string[][], inline?: (InlineStyles | nu
 			for (const line of cellLines[c]) {
 				y -= step;
 				if (y < ts.opts.margin) break;
-				put(ts, line, ts.opts.margin + offsets[c], y, size, font);
+				put(ts, line, left(ts) + offsets[c], y, size, font);
 			}
 			lowest = Math.min(lowest, y);
 		});
@@ -1056,8 +1149,8 @@ function drawTable(ts: Typesetter, rows: string[][], inline?: (InlineStyles | nu
 		if (isLabelRow) {
 			ts.y = Math.min(ts.y, Math.max(top - rowHeight, ts.opts.margin));
 			ts.page.drawLine({
-				start: { x: ts.opts.margin, y: ts.y },
-				end: { x: ts.opts.margin + total, y: ts.y },
+				start: { x: left(ts), y: ts.y },
+				end: { x: left(ts) + total, y: ts.y },
 				thickness: 0.4,
 				color: rgb(0.7, 0.7, 0.7),
 			});
@@ -1065,8 +1158,8 @@ function drawTable(ts: Typesetter, rows: string[][], inline?: (InlineStyles | nu
 		if (rowIndex === 0) {
 			ts.y -= 3;
 			ts.page.drawLine({
-				start: { x: ts.opts.margin, y: ts.y },
-				end: { x: ts.opts.margin + total, y: ts.y },
+				start: { x: left(ts), y: ts.y },
+				end: { x: left(ts) + total, y: ts.y },
 				thickness: 0.5,
 				color: rgb(0.4, 0.4, 0.4),
 			});
@@ -1080,7 +1173,7 @@ function drawHr(ts: Typesetter): void {
 	ensureRoom(ts, 14);
 	ts.y -= 10;
 	ts.page.drawLine({
-		start: { x: ts.opts.margin, y: ts.y },
+		start: { x: left(ts), y: ts.y },
 		end: { x: ts.opts.pageWidth - ts.opts.margin, y: ts.y },
 		thickness: 0.5,
 		color: rgb(0.4, 0.4, 0.4),
@@ -1101,7 +1194,7 @@ function drawHr(ts: Typesetter): void {
  */
 function drawImageBlock(ts: Typesetter, block: Block & { type: "image" }): void {
 	const gap = ts.opts.fontSize * 0.6;
-	const contentW = ts.opts.pageWidth - 2 * ts.opts.margin;
+	const contentW = contentWidth(ts);
 	const maxH = ts.opts.pageHeight - 2 * ts.opts.margin - 2 * gap;
 	const scale = Math.min(1, contentW / block.w, maxH / block.h);
 	const width = block.w * scale;
@@ -1109,7 +1202,7 @@ function drawImageBlock(ts: Typesetter, block: Block & { type: "image" }): void 
 	ensureRoom(ts, height + 2 * gap);
 	ts.y -= gap;
 	ts.page.drawPng?.(block, {
-		x: ts.opts.margin + (contentW - width) / 2,
+		x: left(ts) + (contentW - width) / 2,
 		y: ts.y - height,
 		width,
 		height,
@@ -1134,7 +1227,7 @@ function drawImage(ts: Typesetter, block: { name: string; width: number; height:
 	const gap = ts.opts.fontSize * 0.6;
 	ensureRoom(ts, height + gap);
 	ts.y -= height + gap * 0.5;
-	ts.page.drawImage?.(block.name, { x: ts.opts.margin, y: ts.y, width, height });
+	ts.page.drawImage?.(block.name, { x: left(ts), y: ts.y, width, height });
 	ts.y -= gap;
 }
 
@@ -1151,7 +1244,8 @@ function drawBlock(ts: Typesetter, block: Block): void {
 			drawList(ts, block.items);
 			break;
 		case "quote":
-			drawQuote(ts, block.lines, block.inline);
+			if (block.blocks !== undefined) drawQuoteBlocks(ts, block.blocks);
+			else drawQuote(ts, block.lines, block.inline);
 			break;
 		case "code":
 			drawCode(ts, block.lines);
@@ -1233,12 +1327,16 @@ function measureBlocks(ts: Typesetter, blocks: Block[]): number {
 		wordId: ts.wordId,
 		y: ts.y,
 		code: ts.code,
+		inset: ts.inset,
+		frames: ts.frames,
+		band: ts.band,
 	};
 	const tall = 1_000_000;
 	ts.opts = { ...ts.opts, pageHeight: tall };
 	ts.placed = [];
 	ts.page = MEASURE_SINK;
 	ts.y = tall - ts.opts.margin;
+	ts.frames = [];
 	for (const block of blocks) {
 		drawBlock(ts, block);
 	}
@@ -1254,6 +1352,9 @@ function measureBlocks(ts: Typesetter, blocks: Block[]): number {
 	ts.wordId = saved.wordId;
 	ts.y = saved.y;
 	ts.code = saved.code;
+	ts.inset = saved.inset;
+	ts.frames = saved.frames;
+	ts.band = saved.band;
 	return used;
 }
 
@@ -1284,6 +1385,8 @@ export function typesetBlocks(
 		italic: backend.italic,
 		mono: backend.mono,
 		opts,
+		inset: 0,
+		frames: [],
 	};
 	newPage(ts);
 

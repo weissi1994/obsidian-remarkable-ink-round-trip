@@ -179,6 +179,14 @@ export interface WordMatch {
 export const SAMPLE_TRUST = 0.2;
 export const FONT_TRUST = 0.08;
 
+/**
+ * How many owner samples get the full DTW after the cheap profile shortlist.
+ * The owner store grows without bound (more word samples; letter templates),
+ * but the expensive per-sample DTW stays bounded — `readFonts` already narrows
+ * its font candidates the same way (to 150) before DTW.
+ */
+export const SAMPLE_SHORTLIST = 50;
+
 /** Joined-up word reader: the owner's own word samples, then script fonts over the vault's words. */
 export class WordReader implements WholeWordReader {
 	private readonly traces = new Map<string, Trace | null>();
@@ -219,9 +227,22 @@ export class WordReader implements WholeWordReader {
 		const trace = traceOf(strokes);
 		if (trace === null) return null;
 		let own: WordMatch | null = null;
+		// Narrow the owner samples by the same cheap coarse signal readFonts uses
+		// — the up-and-down profile plus the width-ratio gate — and run the full
+		// DTW on only the best few. The trusted-match semantics are unchanged:
+		// only the set that gets the expensive DTW narrows.
+		const shortlist: { sample: { word: string; trace: Trace }; ratio: number; score: number }[] = [];
 		for (const sample of this.samples) {
 			const ratio = sample.trace.width / trace.width;
 			if (ratio < 0.6 || ratio > 1.7) continue;
+			shortlist.push({
+				sample,
+				ratio,
+				score: profileDistance(trace.profile, sample.trace.profile) + 0.2 * Math.abs(Math.log(ratio)),
+			});
+		}
+		shortlist.sort((a, b) => a.score - b.score);
+		for (const { sample, ratio } of shortlist.slice(0, SAMPLE_SHORTLIST)) {
 			const cost = dtw(trace, sample.trace) + 0.2 * Math.abs(Math.log(ratio));
 			if (own === null || cost < own.cost) own = { word: sample.word, cost, trusted: cost < SAMPLE_TRUST };
 		}
