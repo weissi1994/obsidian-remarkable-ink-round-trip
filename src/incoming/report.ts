@@ -6,6 +6,7 @@
  * user can read — and paste — so the next question is answerable.
  */
 
+import type { ReaderName } from "../ocr/samples";
 import { adviseFailure, classifyFailure } from "../transport/failure";
 import { PullResult, SourceState } from "./pull";
 
@@ -16,7 +17,12 @@ export interface ImportReportInput {
 	pluginVersion: string;
 	/** Whether handwriting rendering was on for this run (F12 setting). */
 	handwritingEnabled?: boolean;
+	/** Show which reader read each remark, and how sure it was (diagnostics toggle). */
+	ocrDiagnostics?: boolean;
 }
+
+/** Readers listed in a stable order; only those with a reading appear. */
+const READER_ORDER: ReaderName[] = ["builtin", "writepad", "endpoint"];
 
 export function renderImportReport(input: ImportReportInput): string {
 	const lines = [
@@ -90,6 +96,8 @@ export function renderImportReport(input: ImportReportInput): string {
 							`${scan.ink.partialWords} partly erased; ${scan.ink.ownStrokes} stroke(s) of your own` +
 							(scan.ink.transcribed > 0 ? `, ${scan.ink.transcribed} remark(s) transcribed` : ""),
 			);
+			const readers = readerLine(scan.ink.readers);
+			if (input.ocrDiagnostics && readers !== "") lines.push(`    ${readers}`);
 		}
 		lines.push(`    ${describeWrite(scan)}`);
 		const state = describeSource(scan.sourceState);
@@ -119,6 +127,30 @@ export function renderImportReport(input: ImportReportInput): string {
  * *reading* side, so a failed projection looked like a successful import that
  * did nothing (beta, 2026-07-27).
  */
+/**
+ * Who read this run's remarks, behind the diagnostics toggle. Only readers
+ * that produced a reading appear, in a stable order. The score is the average
+ * of each reader's normalised confidence (0 just passed, 1 certain); an
+ * endpoint has none, so it shows a count alone. "" when nothing was read.
+ */
+function readerLine(
+	readers: NonNullable<
+		NonNullable<Extract<PullResult, { ok: true }>["scan"]>["ink"]
+	>["readers"],
+): string {
+	if (readers === undefined) return "";
+	const parts = READER_ORDER.flatMap((name) => {
+		const reader = readers[name];
+		if (reader === undefined || reader.count === 0) return [];
+		const avg =
+			name === "endpoint"
+				? ""
+				: ` (avg ${(reader.scoreSum / reader.count).toFixed(2)})`;
+		return [`${name} ${reader.count}${avg}`];
+	});
+	return parts.length === 0 ? "" : `readers: ${parts.join(", ")}`;
+}
+
 /** Remarks read better this time; their earlier text is in the note's previous version. */
 const reread = (count: number | undefined) =>
 	count === undefined || count === 0 ? "" : `, ${count} remark(s) read anew (earlier readings you never edited)`;

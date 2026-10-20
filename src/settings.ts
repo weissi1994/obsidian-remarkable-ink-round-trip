@@ -115,6 +115,7 @@ export class RoundTripSettingTab extends PluginSettingTab {
 						: [{ name: section.heading, desc: section.note, searchable: false }]),
 					...section.items.map((spec) => this.defineSetting(spec)),
 					...(section.heading === "Handwriting" ? this.handwritingActions() : []),
+					...(section.heading === "Reading handwriting (OCR)" ? this.ocrActions() : []),
 				],
 			});
 		}
@@ -177,6 +178,34 @@ export class RoundTripSettingTab extends PluginSettingTab {
 				name: "Detect page size",
 				desc: "Read the canvas size from a notebook made on your reMarkable.",
 				action: button("Detect", () => this.plugin.detectPageSize()),
+			},
+		];
+	}
+
+	/** Ink fork: the vision-endpoint "Test connection" button. */
+	private ocrActions(): SettingDefinition[] {
+		return [
+			{
+				name: "Test connection",
+				desc:
+					"Pings the endpoint, checks it serves the model, and sends a tiny probe image — " +
+					"so a misconfigured server tells you exactly what is wrong.",
+				visible: () => this.plugin.settings.ocrMode === "endpoint",
+				action: (el: HTMLElement) => {
+					new ButtonComponent(el).setButtonText("Test connection").onClick(async () => {
+						const s = this.plugin.settings;
+						notify(`Testing ${s.ocrModel} at ${s.ocrEndpoint}…`);
+						try {
+							await this.plugin.testOcrConnection();
+							notify(`Connected to ${s.ocrModel} at ${s.ocrEndpoint} — probe read OK.`);
+						} catch (error) {
+							notify(
+								error instanceof TransportError ? error.message : String(error),
+								15000,
+							);
+						}
+					});
+				},
 			},
 		];
 	}
