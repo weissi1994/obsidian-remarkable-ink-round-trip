@@ -1702,7 +1702,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (result !== null && result.confidence >= OCR_TRUST) {
 			text = result.text;
 			scored = { score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
-		} else {
+		} else if (this.settings.ocrUseWritePad) {
 			// Joined-up writing, most likely: WritePad was made for it.
 			const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
 			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) {

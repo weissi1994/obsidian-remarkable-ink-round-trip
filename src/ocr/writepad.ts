@@ -22,6 +22,14 @@ export const WRITEPAD_LANGUAGES = {
 /** Below this the image alone is the safer answer. */
 export const WRITEPAD_TRUST = 0.7;
 
+/**
+ * Least fraction of a reading's own words that must be ones the vault knows for
+ * the reading to be trusted. WritePad's confidence does not rank reads by
+ * correctness — a partial-junk read can out-score a near-perfect one — so the
+ * image alone is the safer answer when too few words are recognisable.
+ */
+export const WRITEPAD_MIN_KNOWN = 2 / 3;
+
 /** How far below the top a vault word may score and still be preferred. */
 const VAULT_MARGIN = 10;
 /** What a word found in the vault is worth on top of its own weight. */
@@ -71,6 +79,7 @@ export class WritePad {
 		if (usable.length === 0 || this.readers.length === 0) return null;
 		const lines = splitWords(usable).map((line) => line.flat());
 		let best: Recognition | null = null;
+		let quality = { known: 0, tokens: 0 };
 		for (const reader of this.readers) {
 			const read = lines.map((line) => choose(this.raw(reader, line), lexicon));
 			const words = read.reduce((n, line) => n + line.words, 0);
@@ -79,7 +88,20 @@ export class WritePad {
 			if (best === null || confidence > best.confidence) {
 				const text = read.map((line) => line.text).filter((line) => line !== "").join("\n");
 				best = { text, confidence };
+				quality = {
+					known: read.reduce((n, line) => n + line.known, 0),
+					tokens: read.reduce((n, line) => n + line.tokens, 0),
+				};
 			}
+		}
+		// Quality gate (needs the vault's words to judge against). Measured on the
+		// bundled-font fixtures: a junk read like "the quick brown po,frjunql5"
+		// scores 0.72 — above WRITEPAD_TRUST — yet is only 3/5 vault-known words
+		// (0.60), while a clean "meeting is on Monday" is 4/4 (1.0). Confidence
+		// alone cannot tell them apart; the known-word fraction does. Two-thirds
+		// rejects the junk while still tolerating one unknown word in three.
+		if (best !== null && lexicon !== undefined && quality.tokens > 0 && quality.known / quality.tokens < WRITEPAD_MIN_KNOWN) {
+			return null;
 		}
 		return best;
 	}
@@ -110,20 +132,40 @@ export class WritePad {
 	}
 }
 
-/** Per word the vault's spelling when it scores close to the top. */
-export function choose(words: Alternatives[], lexicon: Lexicon | undefined): { text: string; words: number; score: number } {
+/**
+ * Per word the vault's spelling when it scores close to the top. `tokens`/`known`
+ * count the chosen reading's own words and how many of them the vault knows —
+ * the signal the quality gate in read() weighs against WRITEPAD_MIN_KNOWN.
+ */
+export function choose(
+	words: Alternatives[],
+	lexicon: Lexicon | undefined,
+): { text: string; words: number; score: number; tokens: number; known: number } {
 	const chosen: string[] = [];
 	let score = 0;
+	let tokens = 0;
+	let known = 0;
 	for (const alternatives of words) {
 		if (alternatives.length === 0) continue;
 		const [top, topWeight] = alternatives[0];
 		let pick: [string, number] = [top, topWeight];
-		const known = lexicon === undefined ? undefined : alternatives.find(([text, weight]) => weight >= topWeight - VAULT_MARGIN && wordsKnown(text, lexicon));
-		if (known !== undefined) pick = [known[0], Math.min(100, known[1] + VAULT_BONUS)];
+		const vault = lexicon === undefined ? undefined : alternatives.find(([text, weight]) => weight >= topWeight - VAULT_MARGIN && wordsKnown(text, lexicon));
+		if (vault !== undefined) pick = [vault[0], Math.min(100, vault[1] + VAULT_BONUS)];
 		chosen.push(pick[0]);
 		score += pick[1];
+		// Count the parts the vault could actually hold (its index skips < 2),
+		// so a single junk run like "po,frjunql5" weighs as its two dead tokens.
+		for (const part of wordParts(pick[0])) {
+			tokens++;
+			if (lexicon?.has(part) === true) known++;
+		}
 	}
-	return { text: chosen.join(" "), words: chosen.length, score };
+	return { text: chosen.join(" "), words: chosen.length, score, tokens, known };
+}
+
+/** The vault-indexable words of a reading: letters/digits, length ≥ 2. */
+function wordParts(text: string): string[] {
+	return (text.match(/[\p{L}\p{N}]+/gu) ?? []).filter((part) => part.length >= 2);
 }
 
 /** A reading may hold two words ("is a"), and punctuation around them. */

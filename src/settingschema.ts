@@ -449,6 +449,16 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				visibleWhen: { key: "ocrMode", equals: "endpoint" },
 			},
 			{
+				key: "ocrUseWritePad",
+				name: "Read joined-up writing too",
+				desc:
+					"When built-in is unsure of a remark, also try the cursive reader (WritePad) " +
+					"made for joined-up writing. Turn it off if it produces junk rather than leaving " +
+					"hard-to-read ink as an image.",
+				control: { type: "toggle" },
+				visibleWhen: { key: "ocrMode", equals: "builtin" },
+			},
+			{
 				key: "ocrKeepImage",
 				name: "Keep the image next to the text",
 				desc: "Recommended: a misread word is easy to check against the ink.",
