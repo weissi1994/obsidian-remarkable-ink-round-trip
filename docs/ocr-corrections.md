@@ -220,3 +220,68 @@ result through any OpenAI-compatible server and set it as the endpoint model.
 Whether a given server (e.g. Ollama) can load a LoRA adapter for a vision
 model depends on that server and model — merging the adapter into the base
 weights before serving avoids the question.
+
+## Handwriting test — `src/ocr/testcapture.ts`
+
+Measures the readers on the owner's real hand (#14). Training and
+measuring are kept apart.
+
+- **Sheet**: `buildSheet(profile, "test", TEST_SHEET_VERSION)`
+  (`src/ink/handsheet.ts`), one prompt per row from `TEST_SHEET_PROMPTS`. It
+  is pending as `pendingTestSheet` (`kind: "test"`) and shared in
+  `.sync/handwriting.json`. A file written before the test sheet existed reads
+  as none pending. To change the prompts, bump `TEST_SHEET_VERSION` and keep
+  the old list, so a sheet already on a tablet still reads back.
+- **Held out, never learned from.** *Save handwriting test sheet to the vault*
+  calls `recognize(…)` and `WritePad.read(…)` directly. It never goes through
+  `recognizeLocally`, `rememberReading` or `addSample`, so nothing reaches the
+  sample store, the word reader or the worked examples. The endpoint is
+  asked with **no** worked examples. A sheet the readers trained on could no
+  longer measure them. If a "learn from this test sheet" is ever added, it
+  must say so.
+- **Readings** are what the plugin would read at import, with the vault's words.
+  Each is kept with `accepted` (above `OCR_TRUST` / `WRITEPAD_TRUST`) even when
+  it was not accepted. When WritePad's known-word gate drops a reading, the
+  reading without the vault's words is stored, marked not accepted. An
+  endpoint error is stored as `null`; a reader that wasn't run has no key.
+- **CER** is `cer(got, want)`, edit distance over the prompt's length.
+  Per item, whitespace is collapsed first (`itemCer`), so a line that ran onto a
+  second row is not counted as misread.
+
+Output, under `<handwriting folder>/test-sheets/<YYYY-MM-DD-HHmmss>/`:
+
+- `handwriting-test-<stamp>.json`: the capture, the one file to attach.
+- `p<page>-<row>.png`: each line's ink.
+- `Handwriting test <stamp>.md`: readings, CER per line and per reader, the ink.
+
+Capture format (`format: "remarkable-ink-handwriting-test"`, `version: 1`):
+
+| field | |
+|---|---|
+| `createdAt`, `pluginVersion` | when and by which build |
+| `sheet` | `{ kind: "test", version }`: the `TEST_SHEET_VERSION` it was sent with |
+| `profile` | canvas `{ width, height, dpi }`, enough to rebuild the boxes |
+| `hand` | the `HandLibrary` in use (letters from the handwriting sheet), or `null` |
+| `items[]` | `{ id: "p1-03", prompt, box, strokes, readings }` |
+| `strokes[]` | `{ tool, color, thicknessScale, points }`, where `points` is flat x, y, width, pressure in device units |
+| `readings` | `{ builtin?, writepad?, endpoint? }`, each `{ text, confidence?, accepted }` or `null` |
+
+**Privacy:** the capture holds the prepared prompts, the owner's ink of them,
+the hand library (already shared in `.sync`) and the readings. It holds no
+vault lexicon, no `samples.json` word samples or remarks, and no note paths or
+remark texts.
+
+**Replay** an attached capture with today's readers:
+
+```
+HANDWRITING_CAPTURE=path/to/handwriting-test-<stamp>.json npx vitest run src/__tests__/testcapture.test.ts
+```
+
+It prints, per reader, the captured CER next to the replayed CER, then every
+line. Replay has no vault words, no word samples and no letters learned from
+corrections, because none of them are in the file. It uses the built-in
+reader's templates from `capture.hand`, falling back to print letters. So the
+replayed number measures the readers alone, and the captured one is what the
+owner saw. Replay asserts only that the file parses, not how accurate the
+readers are. To make a synthetic capture for trying it out:
+`HANDWRITING_CAPTURE_OUT=/tmp/capture.json npx vitest run src/__tests__/testcapture.test.ts`.

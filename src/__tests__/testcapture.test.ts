@@ -323,5 +323,5 @@ describe.skipIf(!process.env.HANDWRITING_CAPTURE)("replay a handwriting capture"
 				"",
 			].join("\n"),
 		);
-	});
+	}, 600_000);
 });

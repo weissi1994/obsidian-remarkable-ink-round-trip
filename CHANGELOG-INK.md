@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Handwriting test sheet (#14):** **Send handwriting test sheet to
+  reMarkable** sends 18 short German and English lines to copy by hand.
+  **Save handwriting test sheet to the vault** reads them with today's readers,
+  learning nothing. It saves your ink, every reading (also the ones the plugin
+  would not have used) and the character error rate per reader to
+  `<handwriting folder>/test-sheets/<date-time>/`. The one
+  `handwriting-test-….json` there is meant for attaching to an issue. It holds
+  only the prepared lines, your ink of them, your learned letters and the
+  readings, nothing else from the vault. A test sheet is also listed under
+  *Settings → Handwriting*.
+
 - **Learned handwriting follows the vault:** which hand is in use and the
   sheets waiting on the tablet now live in `reMarkable/.sync/handwriting.json`
   too, so every copy of the vault uses the hand learned on any of them. Word
