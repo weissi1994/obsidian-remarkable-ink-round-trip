@@ -90,6 +90,8 @@ import type { OcrExample, OcrConnection } from "./transport/ocr";
 import { checkConnection } from "./transport/ocr";
 import type { NdjsonClient } from "./transport/ollama";
 import { nodeNdjson } from "./transport/nodestream";
+import { nodeDownload, nodePrepareDir } from "./transport/nodedownload";
+import type { DesktopInstaller } from "./ollamainstall";
 import { setUpLocalOllama } from "./ollamasetup";
 import { builtinFont } from "./ink/glyphs";
 import {
@@ -1989,6 +1991,7 @@ export default class RoundTripPlugin extends Plugin {
 				testOcrConnection: () => this.testOcrConnection(),
 				http: obsidianHttp,
 				stream: desktopNdjson(),
+				installer: desktopInstaller(),
 			},
 			refresh,
 		);
@@ -2433,4 +2436,36 @@ function desktopNdjson(): NdjsonClient | null {
 	if (!Platform.isDesktopApp) return null;
 	const load = (window as unknown as { require?: (module: string) => unknown }).require;
 	return typeof load === "function" ? nodeNdjson(load) : null;
+}
+
+/**
+ * Download-and-open for Ollama's official installer (#28). Desktop only, and
+ * Node is reached lazily through `window.require`, as for desktopNdjson —
+ * never a bundled `require("fs")` (N7). Electron's `shell.openPath` hands the
+ * verified file to the OS; no `child_process`. The installer lands in the
+ * system temp folder, outside the vault, so it never syncs. Null where any
+ * piece is missing: the dialogue then keeps v1's ollama.com/download link.
+ */
+function desktopInstaller(): DesktopInstaller | null {
+	if (!Platform.isDesktopApp) return null;
+	const load = (window as unknown as { require?: (module: string) => unknown }).require;
+	if (typeof load !== "function") return null;
+	try {
+		const shell = (load("electron") as { shell?: { openPath?: unknown } } | undefined)?.shell;
+		const openPath = shell?.openPath;
+		if (typeof openPath !== "function") return null;
+		const path = load("path") as { join(...parts: string[]): string };
+		const dir = path.join((load("os") as { tmpdir(): string }).tmpdir(), "remarkable-ink-ollama");
+		const prepare = nodePrepareDir(load);
+		return {
+			os: Platform.isMacOS ? "macos" : Platform.isWin ? "windows" : Platform.isLinux ? "linux" : "other",
+			dir,
+			prepare: () => prepare(dir),
+			fileFor: (name) => path.join(dir, name),
+			download: nodeDownload(load),
+			open: (file) => (openPath as (file: string) => Promise<string>).call(shell, file),
+		};
+	} catch {
+		return null;
+	}
 }

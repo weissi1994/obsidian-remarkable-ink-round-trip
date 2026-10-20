@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { TransportError, type HttpClient, type HttpRequest } from "../transport/http";
-import { OLLAMA_RELEASES_API, installerAsset, latestInstaller } from "../transport/ollamarelease";
+import {
+	OLLAMA_RELEASES_API,
+	describeInstallerDownload,
+	formatSize,
+	installerAsset,
+	latestInstaller,
+} from "../transport/ollamarelease";
 
 const HEX = "a".repeat(64);
 const OTHER_HEX = "b".repeat(64);
@@ -127,5 +133,22 @@ describe("latestInstaller", () => {
 			throw new Error("getaddrinfo ENOTFOUND api.github.com");
 		};
 		await expect(latestInstaller(http, "Ollama.dmg")).rejects.toThrow(TransportError);
+	});
+});
+
+describe("installer sizes and progress text", () => {
+	it("states sizes the way the confirm step shows them", () => {
+		expect(formatSize(214_000_000)).toBe("214 MB");
+		expect(formatSize(1_580_000_000)).toBe("1.58 GB");
+	});
+
+	it("describes download progress in GB with a percentage", () => {
+		expect(describeInstallerDownload(86_000_000, 214_000_000)).toBe(
+			"Downloading the Ollama installer — 0.1 / 0.2 GB (40%)",
+		);
+		expect(describeInstallerDownload(790_000_000, 1_580_000_000)).toBe(
+			"Downloading the Ollama installer — 0.79 / 1.58 GB (50%)",
+		);
+		expect(describeInstallerDownload(0, 0)).toMatch(/\(0%\)$/);
 	});
 });

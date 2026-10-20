@@ -138,3 +138,15 @@ function checksumFor(text: string, asset: string): string | null {
 	}
 	return null;
 }
+
+/** `214 MB`, `1.58 GB`: sizes as the confirm step states them. */
+export function formatSize(bytes: number): string {
+	return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+}
+
+/** `Downloading the Ollama installer — 0.1 / 0.2 GB (40%)`. */
+export function describeInstallerDownload(received: number, total: number): string {
+	const gb = (bytes: number) => (bytes / 1e9).toFixed(total >= 1e9 ? 2 : 1);
+	const percent = total > 0 ? Math.min(100, Math.floor((received / total) * 100)) : 0;
+	return `Downloading the Ollama installer — ${gb(received)} / ${gb(total)} GB (${percent}%)`;
+}
