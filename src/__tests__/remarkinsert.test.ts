@@ -28,6 +28,23 @@ describe("taking a remark into the note as text", () => {
 		expect(out.split("\n").slice(0, 5)).toEqual(["> [!info] Box", "> inside callout text", "> fix this", "> second callout line", ""]);
 	});
 
+	it("puts it into the cell of a table inside a callout, keeping the table whole", () => {
+		const before = note("> [!note] Box", "> | A | B |", "> | --- | --- |", "> | 1 |  |", "> | 2 | two |");
+		const out = insertRemarkText(before, "aaaaaaaaaaaa", "fix this", { quote: "1", column: 1 })!;
+		expect(out.split("\n").slice(0, 6)).toEqual(["> [!note] Box", "> | A | B |", "> | --- | --- |", "> | 1 | fix this |", "> | 2 | two |", ""]);
+	});
+
+	it("adds a list item after a quoted item, past its quoted continuation", () => {
+		const before = note("> [!info] Box", "> - item one here", ">   more of one", "> - item two here");
+		const out = insertRemarkText(before, "aaaaaaaaaaaa", "fix this\nand that", { quote: "item one here" })!;
+		expect(out.split("\n").slice(0, 7)).toEqual(["> [!info] Box", "> - item one here", ">   more of one", "> - fix this", ">   and that", "> - item two here", ""]);
+	});
+
+	it("continues a numbered list in a nested quote", () => {
+		const out = insertRemarkText(note("> > 1. first", "> > 2. second"), "aaaaaaaaaaaa", "new", { quote: "first" })!;
+		expect(out.split("\n").slice(0, 3)).toEqual(["> > 1. first", "> > 2. new", "> > 2. second"]);
+	});
+
 	it("adds a list item after the item it was written against", () => {
 		const before = note("- item one here", "  more of one", "- item two here");
 		const out = insertRemarkText(before, "aaaaaaaaaaaa", "fix this\nand that", { quote: "item one here" })!;
