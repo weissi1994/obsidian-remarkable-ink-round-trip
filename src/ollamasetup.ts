@@ -33,7 +33,8 @@ const PROGRESS_INTERVAL_MS = 500;
 
 export interface OllamaSetupHost {
 	app: App;
-	settings: RoundTripSettings;
+	/** Read afresh each time: editing a setting replaces the object. */
+	settings(): RoundTripSettings;
 	saveSettings(): Promise<void>;
 	testOcrConnection(): Promise<unknown>;
 	/** requestUrl, for the small calls. */
@@ -53,7 +54,7 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 		return;
 	}
 
-	const model = host.settings.ocrModel.trim() || DEFAULT_SETTINGS.ocrModel;
+	const model = host.settings().ocrModel.trim() || DEFAULT_SETTINGS.ocrModel;
 	try {
 		const local = await listLocalModels(host.http, OLLAMA_LOCAL);
 		if (!hasModel(local, model)) {
@@ -65,9 +66,10 @@ export async function setUpLocalOllama(host: OllamaSetupHost, refresh: () => voi
 		return;
 	}
 
-	host.settings.ocrEndpoint = LOCAL_ENDPOINT;
-	host.settings.ocrModel = model;
-	host.settings.ocrMode = "endpoint";
+	const settings = host.settings();
+	settings.ocrEndpoint = LOCAL_ENDPOINT;
+	settings.ocrModel = model;
+	settings.ocrMode = "endpoint";
 	await host.saveSettings();
 	refresh();
 

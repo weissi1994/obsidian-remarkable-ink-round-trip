@@ -1965,7 +1965,7 @@ export default class RoundTripPlugin extends Plugin {
 		return setUpLocalOllama(
 			{
 				app: this.app,
-				settings: this.settings,
+				settings: () => this.settings,
 				saveSettings: () => this.saveSettings(),
 				testOcrConnection: () => this.testOcrConnection(),
 				http: obsidianHttp,
