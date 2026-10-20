@@ -285,7 +285,7 @@ describe("ink import end to end", () => {
 			readFile: async () => "{}",
 			readBytes: async () => page,
 			renderStrokes: async (request) => `ink-${request.page}-${request.remark}.png`,
-			transcribe: async () => "check this",
+			transcribe: async () => ({ text: "check this", by: "builtin", score: 0.5 }),
 			loadInk: async () => r,
 			writeAnnotations: async () => undefined,
 		};

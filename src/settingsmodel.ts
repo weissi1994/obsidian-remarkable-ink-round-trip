@@ -108,6 +108,8 @@ export interface RoundTripSettings {
 	ocrKeepImage: boolean;
 	/** Vision endpoint: how many of the owner's corrections go along as worked examples. */
 	ocrExamples: number;
+	/** Show which reader produced each remark and how confident it was, in the import report. */
+	ocrDiagnostics: boolean;
 	/** docId ↔ device document mapping (round-trip foundation, F5). */
 	mappings: MappingTable;
 }
@@ -162,6 +164,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	ocrApiKey: "",
 	ocrKeepImage: true,
 	ocrExamples: 3,
+	ocrDiagnostics: false,
 	mappings: {},
 };
 

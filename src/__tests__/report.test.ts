@@ -52,6 +52,59 @@ describe("renderImportReport", () => {
 		expect(report).toContain("5 files, 0 highlight, 3 stroke");
 	});
 
+	it("shows the readers breakdown only when OCR diagnostics is on", () => {
+		const results: PullResult[] = [
+			{
+				ok: true,
+				docId: "a",
+				notePath: "Nota.md",
+				highlightCount: 0,
+				scan: scan({
+					strokeFiles: 1,
+					renderedPages: 1,
+					renderedRemarks: 3,
+					ink: {
+						erasedWords: 0,
+						movedWords: 0,
+						partialWords: 0,
+						ownStrokes: 0,
+						transcribed: 3,
+						readers: {
+							builtin: { count: 2, scoreSum: 1.0 },
+							writepad: { count: 1, scoreSum: 0.1 },
+						},
+					},
+				}),
+			},
+		];
+		const line = "    readers: builtin 2 (avg 0.50), writepad 1 (avg 0.10)";
+
+		// Positive control: the line IS rendered when the toggle is on…
+		const on = renderImportReport({ ...base, ocrDiagnostics: true, results });
+		expect(on).toContain(line);
+
+		// …and absent — byte-for-byte — when it is off. Asserting the whole
+		// report is identical to one rendered without any reader data guards
+		// against a silent partial match passing for "clean".
+		const off = renderImportReport({ ...base, ocrDiagnostics: false, results });
+		expect(off).not.toContain("readers:");
+		const noReaders: PullResult[] = [
+			{
+				ok: true,
+				docId: "a",
+				notePath: "Nota.md",
+				highlightCount: 0,
+				scan: scan({
+					strokeFiles: 1,
+					renderedPages: 1,
+					renderedRemarks: 3,
+					ink: { erasedWords: 0, movedWords: 0, partialWords: 0, ownStrokes: 0, transcribed: 3 },
+				}),
+			},
+		];
+		expect(off).toBe(renderImportReport({ ...base, ocrDiagnostics: true, results: noReaders }));
+	});
+
 	it("does not claim handwriting import is missing when strokes rendered nothing", () => {
 		const results: PullResult[] = [
 			{
