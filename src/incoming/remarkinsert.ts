@@ -120,23 +120,53 @@ export function highlightedText(
 	return { text: out.join("\n"), placed: true };
 }
 
+/** A word of a line, markdown and punctuation aside, and where it stands in the line. */
+export interface WordSpan {
+	word: string;
+	start: number;
+	end: number;
+}
+
+/** A line's words with their places, markdown and punctuation aside. */
+export function wordSpans(line: string): WordSpan[] {
+	const spans: WordSpan[] = [];
+	for (const match of line.matchAll(/[^\s|]+/g)) {
+		const raw = match[0];
+		const lead = /^[^\p{L}\p{N}]*/u.exec(raw)?.[0].length ?? 0;
+		const word = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+		if (word === "") continue;
+		const start = match.index + lead;
+		spans.push({ word, start, end: start + word.length });
+	}
+	return spans;
+}
+
 /** A line's words, markdown and punctuation aside, for finding a printed line in the source. */
-function wordsOf(line: string): string[] {
-	return line
-		.split(/[\s|]+/)
-		.map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
-		.filter((word) => word !== "");
+export function wordsOf(line: string): string[] {
+	return wordSpans(line).map((span) => span.word);
+}
+
+/** The words a printed row is found by in the source: its first four. */
+export function rowWords(quote: string | undefined): string[] {
+	return wordsOf(quote ?? "").slice(0, 4);
+}
+
+/** Where the words run in a line's words, in order: the index of the first of each run. */
+export function runsOf(words: string[], wanted: string[]): number[] {
+	const runs: number[] = [];
+	if (wanted.length === 0) return runs;
+	for (let at = 0; at + wanted.length <= words.length; at++) {
+		if (wanted.every((word, k) => words[at + k] === word)) runs.push(at);
+	}
+	return runs;
 }
 
 /** The source line the remark was written against: the nearest one above it holding the quote. */
-function anchorAbove(lines: string[], before: number, quote: string | undefined): number | null {
-	const wanted = wordsOf(quote ?? "").slice(0, 4);
+export function anchorAbove(lines: string[], before: number, quote: string | undefined): number | null {
+	const wanted = rowWords(quote);
 	if (wanted.length === 0) return null;
 	for (let i = before - 1; i >= 0; i--) {
-		const words = wordsOf(lines[i]);
-		for (let at = 0; at + wanted.length <= words.length; at++) {
-			if (wanted.every((word, k) => words[at + k] === word)) return i;
-		}
+		if (runsOf(wordsOf(lines[i]), wanted).length > 0) return i;
 	}
 	return null;
 }

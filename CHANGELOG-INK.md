@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Unconfirmed remarks show on the text:** a remark you have not confirmed
+  yet is also drawn half-transparent over the note, roughly where you wrote it
+  beside the printed line, in reading view and in the editor. Only a picture —
+  the note and its callout are unchanged — and it goes once the remark is
+  confirmed (✓) or inserted as text. **Show unconfirmed remarks on the text**
+  under Handwriting turns it off.
 - **One-click local reading (desktop):** *Settings → Reading handwriting (OCR)
   → Set up local reading for me* finds Ollama on this computer, downloads the
   handwriting model if it is missing — after you confirm, with progress and a

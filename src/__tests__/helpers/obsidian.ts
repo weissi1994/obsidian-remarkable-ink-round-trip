@@ -42,6 +42,23 @@ export class ButtonComponent {
 
 export class TFile {}
 
+export class MarkdownView {}
+
+export class MarkdownRenderChild {
+	constructor(public containerEl: HTMLElement) {}
+	onload(): void {}
+	onunload(): void {}
+	load(): void {
+		this.onload();
+	}
+	unload(): void {
+		this.onunload();
+	}
+}
+
+/** The editor's file info field: a key only, the editor parts are not under test. */
+export const editorInfoField = {};
+
 /** Obsidian's DOM helpers on HTMLElement (createEl, createDiv), for a DOM test environment. */
 export function installDomHelpers(): void {
 	type Options = { cls?: string; attr?: Record<string, string>; text?: string };
@@ -62,6 +79,12 @@ export function installDomHelpers(): void {
 	};
 	proto.addClass = function (this: HTMLElement, cls: string) {
 		this.classList.add(cls);
+	};
+	proto.removeClass = function (this: HTMLElement, cls: string) {
+		this.classList.remove(cls);
+	};
+	proto.setCssProps = function (this: HTMLElement, props: Record<string, string>) {
+		for (const [k, v] of Object.entries(props)) this.style.setProperty(k, v);
 	};
 	// And the global forms, for building fixtures.
 	const global = globalThis as unknown as Record<string, unknown>;
