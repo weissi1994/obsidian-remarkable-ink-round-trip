@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Ticks, strikes and remarks inside quotes and callouts come back into the
+  note:** a tick or a stripe on a task in a callout (`> - [ ] task`, also in a
+  nested quote) marks it done or cancelled, like a task outside one. A remark
+  written in a table cell inside a callout goes into that cell instead of
+  breaking the table, and one written against a list item in a callout becomes
+  a new item of that list.
 - **Nested callouts get their title too:** a callout inside a callout or
   quote (`> > [!tip] Inner`) reaches the tablet as a bold "Inner" line at its
   quote depth instead of the literal `[!tip] Inner`, and callout syntax inside
