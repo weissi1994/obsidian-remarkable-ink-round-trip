@@ -92,7 +92,18 @@ describe("shared sync state", () => {
 });
 
 describe("learned handwriting shared between copies", () => {
-	const hand = { handVersion: "hand-1", pendingSheet: null, pendingWordSheet: null };
+	const hand = { handVersion: "hand-1", pendingSheet: null, pendingWordSheet: null, pendingTestSheet: null };
+
+	it("reads a handwriting.json from before the test sheet as having none waiting", async () => {
+		const { fs, writes } = memoryFs();
+		const old = { handVersion: "hand-1", pendingSheet: null, pendingWordSheet: null };
+		await fs.write(`${ROOT}/handwriting.json`, JSON.stringify(old));
+		const state = new SyncState(fs, ROOT);
+		expect(await state.readHandwriting()).toEqual(hand);
+		const before = writes();
+		await state.saveHandwriting(hand);
+		expect(writes()).toBe(before);
+	});
 
 	it("carries the hand in use to another copy, written only when it changed", async () => {
 		const { fs, writes } = memoryFs();

@@ -12,6 +12,7 @@ import type { PdfLayoutOptions } from "./convert/pdf";
 import type { InkSnapshot, MappingEntry } from "./id/mapping";
 import { builtinFont, GlyphSource } from "./ink/glyphs";
 import {
+	boxInk,
 	buildSheet,
 	learnWords,
 	handSource,
@@ -21,6 +22,7 @@ import {
 	PendingSheet,
 	SHEET_VERSION,
 	sheetPagesToRm,
+	TEST_SHEET_VERSION,
 } from "./ink/handsheet";
 import { fontVersionsOf, INK_SHAPE_VERSION, inkOptionsFor, makeInkFonts } from "./ink/inkfonts";
 import {
@@ -37,6 +39,7 @@ import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
 import type { SentRecord } from "./sync/send";
 import { addSample, emptyStore, mergeStores, migrate, type SampleStore } from "./ocr/samples";
+import { captureItems, type CaptureItem } from "./ocr/testcapture";
 import type { DeviceItem } from "./sync/deviceimport";
 import type { SyncState } from "./sync/syncstate";
 import type { HttpClient } from "./transport/http";
@@ -371,6 +374,37 @@ export class InkEdge {
 		return words;
 	}
 
+	/** Send a fresh handwriting test sheet and remember it as pending. */
+	async sendTestSheet(api: RawSyncApi, parentId?: string): Promise<void> {
+		const profile = this.profile();
+		const sheet = buildSheet(profile, "test");
+		const result = await sendNotebook(api, "Handwriting test", sheetPagesToRm(sheet, profile), { parentId });
+		this.host.settings.pendingTestSheet = {
+			deviceDocId: result.docId,
+			pageIds: result.pageIds,
+			profile,
+			version: TEST_SHEET_VERSION,
+			kind: "test",
+		};
+		await this.host.persist();
+	}
+
+	/**
+	 * The ink on the pending test sheet, by prompt, not yet read. Learns
+	 * nothing: the test sheet stays held out (ocr/testcapture.ts).
+	 */
+	async readTestSheet(api: RawSyncApi): Promise<{ pending: PendingSheet; items: CaptureItem[] }> {
+		const pending = this.host.settings.pendingTestSheet;
+		if (pending === null) throw new Error("No handwriting test sheet has been sent yet.");
+		const { pages } = await readNotebook(api, pending.deviceDocId);
+		const ink = boxInk(pending, new Map(pages.map((page) => [page.pageId, page.bytes])), "test");
+		const items = captureItems(buildSheet(pending.profile, "test", pending.version).boxes, ink);
+		if (items.length === 0) {
+			throw new Error("Nothing written on the test sheet yet — copy some lines on the reMarkable and let it sync.");
+		}
+		return { pending, items };
+	}
+
 	/** Read the pending sheet back into a (new or extended) library. */
 	async learnFromSheet(api: RawSyncApi, addVariants: boolean): Promise<LearnResult> {
 		const pending = this.host.settings.pendingSheet;
@@ -403,6 +437,7 @@ export class InkEdge {
 		const ours = new Set(Object.values(this.host.settings.mappings).map((entry) => entry.deviceDocId));
 		if (this.host.settings.pendingSheet !== null) ours.add(this.host.settings.pendingSheet.deviceDocId);
 		if (this.host.settings.pendingWordSheet !== null) ours.add(this.host.settings.pendingWordSheet.deviceDocId);
+		if (this.host.settings.pendingTestSheet !== null) ours.add(this.host.settings.pendingTestSheet.deviceDocId);
 		for (const candidate of candidates) {
 			if (ours.has(candidate.id)) continue;
 			try {
