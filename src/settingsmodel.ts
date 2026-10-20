@@ -85,6 +85,8 @@ export interface RoundTripSettings {
 	pendingSheet: PendingSheet | null;
 	/** A word sheet (joined-up writing) on the tablet waiting to be read back. */
 	pendingWordSheet: PendingSheet | null;
+	/** A handwriting test sheet on the tablet, read back without learning (#14). */
+	pendingTestSheet: PendingSheet | null;
 	/** How embedded pictures are drawn in a handwritten notebook. */
 	inkImages: "colour-hatch" | "mono-hatch" | "placeholder";
 	/**
@@ -157,6 +159,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	handVersion: "",
 	pendingSheet: null,
 	pendingWordSheet: null,
+	pendingTestSheet: null,
 	inkImages: "colour-hatch",
 	inkRemarks: "in-place",
 	inkRemarkOverlay: true,

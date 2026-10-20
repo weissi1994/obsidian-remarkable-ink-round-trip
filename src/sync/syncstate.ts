@@ -60,6 +60,7 @@ export interface SharedHandwriting {
 	handVersion: string;
 	pendingSheet: PendingSheet | null;
 	pendingWordSheet: PendingSheet | null;
+	pendingTestSheet: PendingSheet | null;
 }
 
 export class SyncState {
@@ -237,8 +238,11 @@ export class SyncState {
 	}
 
 	async readHandwriting(): Promise<SharedHandwriting | null> {
-		const shared = await this.readJson<SharedHandwriting>(this.path("handwriting.json"));
-		if (shared !== null) this.seenHandwriting = JSON.stringify(shared);
+		const read = await this.readJson<Partial<SharedHandwriting>>(this.path("handwriting.json"));
+		if (read === null) return null;
+		// Written before the test sheet existed: none is waiting.
+		const shared = { ...read, pendingTestSheet: read.pendingTestSheet ?? null } as SharedHandwriting;
+		this.seenHandwriting = JSON.stringify(shared);
 		return shared;
 	}
 
