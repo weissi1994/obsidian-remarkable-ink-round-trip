@@ -65,7 +65,7 @@ import { parseRmPage } from "./incoming/rmlines";
 import { confirmAllRemarks, confirmRemarkAt, findRemark, remarkAt, remarkId } from "./incoming/remarkid";
 import { highlightedText, insertRemarkText } from "./incoming/remarkinsert";
 import { RemarkControls } from "./remarkui";
-import { Lexicon, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
+import { Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
 import { WordReader } from "./ocr/words";
 import { WRITEPAD_TRUST, WritePad } from "./ocr/writepad";
 import {
@@ -1892,16 +1892,26 @@ export default class RoundTripPlugin extends Plugin {
 		notify(`Exported ${written} handwriting correction(s) to ${folder} (dataset.jsonl, LLaMA-Factory format).`);
 	}
 
-	/** Letter templates: the owner's hand first, print letters for the rest. */
+	/**
+	 * Letter templates: the owner's hand first — the handwriting sheet, then the
+	 * letters learned from corrections (ocr/samples.ts) — print letters for the
+	 * rest. Keyed on the hand version and the number of learned letter samples,
+	 * so a correction that adds letters takes effect without a reload.
+	 */
 	private async ocrTemplates(): Promise<Template[]> {
-		const key = this.settings.handVersion;
+		const store = await this.ink.loadSamples();
+		const learned = Object.values(store.letters ?? {}).reduce((n, samples) => n + samples.length, 0);
+		const key = `${this.settings.handVersion}#${learned}`;
 		if (this.templates?.key === key) return this.templates.templates;
-		const hand = key === "" ? null : await this.ink.ensureHand(key);
-		const templates = templatesFrom([
-			...(hand === null ? [] : [{ glyphs: hand.glyphs, weight: 0.9 }]),
-			{ glyphs: builtinFont("readability").glyphs, weight: 1 },
-			{ glyphs: builtinFont("hershey-sans").glyphs, weight: 1 },
-		]);
+		const hand = this.settings.handVersion === "" ? null : await this.ink.ensureHand(this.settings.handVersion);
+		const templates = [
+			...templatesFrom([
+				...(hand === null ? [] : [{ glyphs: hand.glyphs, weight: 0.9 }]),
+				{ glyphs: builtinFont("readability").glyphs, weight: 1 },
+				{ glyphs: builtinFont("hershey-sans").glyphs, weight: 1 },
+			]),
+			...lettersTemplates(store),
+		];
 		this.templates = { key, templates };
 		return templates;
 	}

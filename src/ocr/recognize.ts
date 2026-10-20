@@ -475,6 +475,29 @@ export function splitWords(strokes: Point[][]): Point[][][][] {
 }
 
 /**
+ * Cut stroke clusters into exactly `count` groups at their widest gaps. Needs
+ * at least `count` clusters; when `minGap` is given every cut must fall on a
+ * gap at least that wide, so a join that never opens up is not cut through.
+ */
+function cutGroups(groups: Group[], count: number, minGap?: number): Point[][][] | null {
+	if (count < 1 || groups.length < count) return null;
+	const chosen = groups
+		.slice(1)
+		.map((group, i) => ({ at: i + 1, gap: group.box.minX - groups[i].box.maxX }))
+		.sort((a, b) => b.gap - a.gap)
+		.slice(0, count - 1);
+	if (minGap !== undefined && chosen.some((cut) => cut.gap < minGap)) return null;
+	const cuts = chosen.map((cut) => cut.at).sort((a, b) => a - b);
+	const out: Point[][][] = [];
+	let start = 0;
+	for (const cut of [...cuts, groups.length]) {
+		out.push(groups.slice(start, cut).flatMap((group) => group.strokes));
+		start = cut;
+	}
+	return out;
+}
+
+/**
  * One line's strokes cut into exactly `count` words at its widest gaps — for
  * when the number of words is known (a corrected remark), which beats any
  * guess at how wide a space is.
@@ -482,21 +505,63 @@ export function splitWords(strokes: Point[][]): Point[][][][] {
 export function splitLineInto(strokes: Point[][], count: number): Point[][][] | null {
 	const box = boxOf(strokes);
 	const groups = clusterStrokes(strokes, (box.maxY - box.minY) * 0.6 || 1);
-	if (count < 1 || groups.length < count) return null;
-	const cuts = groups
-		.slice(1)
-		.map((group, i) => ({ at: i + 1, gap: group.box.minX - groups[i].box.maxX }))
-		.sort((a, b) => b.gap - a.gap)
-		.slice(0, count - 1)
-		.map((cut) => cut.at)
-		.sort((a, b) => a - b);
-	const words: Point[][][] = [];
-	let start = 0;
-	for (const cut of [...cuts, groups.length]) {
-		words.push(groups.slice(start, cut).flatMap((group) => group.strokes));
-		start = cut;
+	return cutGroups(groups, count);
+}
+
+/** A cut between letters must open at least this fraction of the word's height. */
+const LETTER_GAP = 0.08;
+
+/**
+ * One word's strokes cut into exactly `count` letters at its widest gaps — but
+ * only when the ink truly separates into that many letters: there must be at
+ * least `count` stroke clusters and every cut must fall on a clear gap (wider
+ * than a fraction of the word's height). Joined-up cursive runs together into
+ * too few clusters, or into letters with no clear break, and returns null — so
+ * letter shapes are never guessed from ink that cannot be segmented.
+ */
+export function cutLetters(wordStrokes: Point[][], count: number): Point[][][] | null {
+	const box = boxOf(wordStrokes);
+	const height = box.maxY - box.minY || 1;
+	const groups = clusterStrokes(wordStrokes, height * 0.6 || 1);
+	return cutGroups(groups, count, height * LETTER_GAP);
+}
+
+/**
+ * Below the print fonts (weight 1) and no lower than the handwriting sheet
+ * (0.9), so a letter accumulated in the owner's own hand is preferred over the
+ * bundled print letters without ever outweighing the dedicated sheet.
+ */
+export const LEARNED_LETTER_WEIGHT = 0.9;
+
+/**
+ * Templates from the per-letter ink learned from corrections (samples.ts).
+ * Each stored sample is a letter's strokes in cap units with the word baseline
+ * at y = 0 (device y-down kept, so the shape matches a read letter's as
+ * templatesFrom's does); top/bottom (y up, baseline-relative) are then the
+ * negated box and width its x range. `store.letters` may be absent (old stores).
+ */
+export function lettersTemplates(
+	store: { letters?: Record<string, Point[][][]> },
+	weight = LEARNED_LETTER_WEIGHT,
+): Template[] {
+	const out: Template[] = [];
+	for (const [ch, samples] of Object.entries(store.letters ?? {})) {
+		if (!OCR_CHARS.includes(ch)) continue;
+		for (const sample of samples) {
+			const strokes = sample.filter((stroke) => stroke.length > 0);
+			if (strokes.flat().length < 2) continue;
+			const box = boxOf(strokes);
+			out.push({
+				ch,
+				cloud: cloudOf(strokes),
+				top: -box.minY,
+				bottom: -box.maxY,
+				width: box.maxX - box.minX,
+				weight,
+			});
+		}
 	}
-	return words;
+	return out;
 }
 
 /** Reads a whole word at once, for joined-up writing (see words.ts). */
