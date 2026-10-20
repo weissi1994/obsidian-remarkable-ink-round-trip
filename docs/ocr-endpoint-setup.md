@@ -18,8 +18,24 @@ On desktop, *Settings → Reading handwriting (OCR) → Set up local reading for
 me* does step 1 and step 3 below for you:
 
 - it looks for Ollama on this computer (`http://localhost:11434`); if it is not
-  running, it links to [ollama.com/download](https://ollama.com/download) —
-  install or start Ollama, then press the button again;
+  running, on macOS and Windows it offers *Download and install Ollama*: after
+  you confirm (it shows the version and size — about 0.2 GB for macOS' `.dmg`,
+  1.6 GB for Windows' `OllamaSetup.exe`), it downloads Ollama's official,
+  signed installer from its GitHub release into your system's temp folder
+  (`remarkable-ink-ollama`, outside the vault), checks it against the SHA-256
+  GitHub publishes, and opens it. You finish the installation in the installer
+  (on macOS: drag Ollama to Applications, then open it); the dialogue waits for
+  Ollama to start and carries on. On Linux it shows the official command to run
+  in a terminal — it asks for your password (sudo) and installs Ollama as a
+  system service:
+
+  ```
+  curl -fsSL https://ollama.com/install.sh | sh
+  ```
+
+  If anything fails, it says why and falls back to the link to
+  [ollama.com/download](https://ollama.com/download) — install or start
+  Ollama, then press the button again;
 - if the model (*Model*, or `qwen2.5vl:7b` when empty) is missing, it asks
   before downloading it (about 6 GB for the default) and shows the progress.
   Cancel stops the download; Ollama keeps what it already has and resumes from

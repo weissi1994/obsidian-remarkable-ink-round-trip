@@ -14,6 +14,12 @@
   Cancel — points the OCR settings at it and runs *Test connection*. If Ollama
   is not running it links to the installer. The manual endpoint settings stay
   for everything else.
+- **Download and install Ollama (desktop):** when *Set up local reading for me*
+  finds no Ollama, macOS and Windows get a button that downloads Ollama's
+  official installer from its GitHub release — after you confirm, with its
+  size, progress and a Cancel — checks it against the published SHA-256, opens
+  it, and carries on once Ollama is running. Linux gets the official install
+  command to copy. Any failure falls back to the ollama.com/download link.
 - **Tables, lists, task boxes, code and nested quotes inside quotes and
   callouts** are typeset as such, set in by the quote's bar: a table gets its
   grid, a task a box to tick, code its band, and a callout's title a line of

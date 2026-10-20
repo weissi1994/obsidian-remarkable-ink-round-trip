@@ -317,6 +317,12 @@ images to that endpoint. No telemetry. The pairing is a device token obtained
 from a code you enter; it stays in the plugin's own settings and never goes into
 the shared sync state.
 
+Only when you press *Download and install Ollama* (desktop, in *Set up local
+reading for me*) does the plugin contact `api.github.com` and GitHub's release
+downloads for Ollama's official installer; it saves the installer to your
+system's temp folder (`remarkable-ink-ollama`, outside the vault), checks it
+against the SHA-256 GitHub publishes, and opens it — you run the installer.
+
 ## Status
 
 Tested against the `.rm` reference implementation and real device sample files
