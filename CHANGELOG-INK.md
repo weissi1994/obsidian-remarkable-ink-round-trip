@@ -8,6 +8,11 @@
   written in a table cell inside a callout goes into that cell instead of
   breaking the table, and one written against a list item in a callout becomes
   a new item of that list.
+- **Nested callouts get their title too:** a callout inside a callout or
+  quote (`> > [!tip] Inner`) reaches the tablet as a bold "Inner" line at its
+  quote depth instead of the literal `[!tip] Inner`, and callout syntax inside
+  a code fence is no longer rewritten. Notes with a nested callout are sent
+  once more on the next sync.
 - **Handwriting sheets have a layer of their own to write on:** the boxes,
   guides and labels sit on a "Sheet" layer, and the page opens on an empty
   "Your handwriting" layer above it. The tablet's eraser and lasso only touch
