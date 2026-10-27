@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
 	BEGIN_MARKER,
 	END_MARKER,
+	PENDING_TITLE,
 	renderAnnotationBlock,
 	upsertAnnotationBlock,
+	withPendingCallout,
 } from "../incoming/annotationnote";
 
 const INPUT = {
@@ -105,5 +107,58 @@ describe("upsertAnnotationBlock", () => {
 		const result = upsertAnnotationBlock(broken, block);
 		expect(result).toContain("tekst");
 		expect(result).toContain(block);
+	});
+});
+
+describe("the pending callout", () => {
+	const NOTE = "# Plan\n\nSome text.\n";
+	const pending = [
+		{ page: 1, text: "“brown” moved — not next to any word, so its new place in the text is unclear" },
+		{ text: "2 page(s) not read — they could not be downloaded" },
+	];
+
+	it("lists the changes at the end of the note, one per line", () => {
+		const note = withPendingCallout(NOTE, pending);
+		expect(note).toBe(
+			[
+				"# Plan",
+				"",
+				"Some text.",
+				"",
+				PENDING_TITLE,
+				"> Changed on the reMarkable, but not in this note yet — make these changes here, or redo them on the tablet:",
+				"> - Page 1: “brown” moved — not next to any word, so its new place in the text is unclear",
+				"> - 2 page(s) not read — they could not be downloaded",
+				"> ^ink-pending",
+				"",
+			].join("\n"),
+		);
+	});
+
+	it("is replaced wholesale, never doubled, and goes when nothing is pending", () => {
+		const once = withPendingCallout(NOTE, pending);
+		expect(withPendingCallout(once, pending)).toBe(once);
+		const fewer = withPendingCallout(once, pending.slice(1));
+		expect(fewer.match(/\[!info\]/g)).toHaveLength(1);
+		expect(fewer).not.toContain("brown");
+		expect(withPendingCallout(once, [])).toBe(NOTE);
+	});
+
+	it("follows text the owner wrote after it", () => {
+		const once = withPendingCallout(NOTE, pending);
+		const added = `${once}More of my own.\n`;
+		const again = withPendingCallout(added, pending);
+		expect(again.indexOf("More of my own.")).toBeLessThan(again.indexOf(PENDING_TITLE));
+		expect(again.match(/\^ink-pending/g)).toHaveLength(1);
+	});
+
+	it("shows up in the summary form as what the note does not show", () => {
+		const block = renderAnnotationBlock({
+			...INPUT,
+			highlights: [],
+			marks: [{ kind: "skipped", page: 2, unapplied: "not read — its handwriting no longer matches what was sent" }],
+		}).text;
+		expect(block).toContain("**Page 2**");
+		expect(block).toContain("Not in the note: not read — its handwriting no longer matches what was sent");
 	});
 });

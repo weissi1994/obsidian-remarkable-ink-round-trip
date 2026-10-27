@@ -209,17 +209,22 @@ export class MirrorTransport {
 
 	/**
 	 * Move a previously uploaded document to the trash (idempotent re-send,
-	 * N3): recoverable for the user, so safer than a hard delete. Missing
-	 * documents (already removed on-device) are silently fine.
+	 * N3): recoverable for the user, so safer than a hard delete. Reads the
+	 * account afresh — a cached listing carries old hashes — and leaves a
+	 * document that changed since `expectedHash` alone: its new ink is not in
+	 * the note. The outcome says which, so the caller can report it.
 	 */
-	async trashPrevious(deviceDocId: string): Promise<void> {
-		const items = await this.allItems();
+	async trashPrevious(deviceDocId: string, expectedHash?: string): Promise<"trashed" | "not-found" | "changed"> {
+		const items = await this.allItems(true);
 		const doc = items.find((e) => e.type === "DocumentType" && e.id === deviceDocId);
-		if (!doc) return;
+		if (!doc) return "not-found";
+		if (expectedHash !== undefined && doc.hash !== expectedHash) return "changed";
 		await withGenerationRetry(
 			(refresh) => this.api.move(doc.hash, "trash", refresh),
 			this.retry,
 		);
+		this.items = null;
+		return "trashed";
 	}
 }
 

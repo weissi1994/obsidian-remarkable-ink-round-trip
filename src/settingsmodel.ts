@@ -165,7 +165,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	inkRemarkOverlay: true,
 	inkDiagrams: "handwritten",
 	inkAccents: true,
-	erasedAs: "delete",
+	erasedAs: "strikethrough",
 	ocrMode: "builtin",
 	ocrEndpoint: "http://localhost:11434/v1",
 	ocrModel: "qwen2.5vl:7b",

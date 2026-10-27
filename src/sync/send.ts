@@ -8,8 +8,9 @@
 import { preprocess, splitNote, EmbedResolver } from "../preprocess/preprocess";
 import { parseBlocks } from "../convert/mdblocks";
 import { resolveLayoutOptions, PdfLayoutOptions } from "../convert/pdf";
-import { ensureDocId } from "../id/docid";
-import { InkSnapshot, MappingTable, contentHash, recordUpload } from "../id/mapping";
+import { ensureDocId, generateDocId } from "../id/docid";
+import { InkSnapshot, MappingEntry, MappingTable, contentHash, recordUpload } from "../id/mapping";
+import { NotebookChangedError } from "../transport/notebook";
 import type { Block } from "../convert/mdblocks";
 import type { Picture } from "../ink/inkimage";
 import type { InkDrawing } from "../ink/inkdrawing";
@@ -38,15 +39,23 @@ export interface SentRecord {
 export interface SendDeps {
 	client: {
 		/**
-		 * Upload a notebook of pen-stroke pages. Returns the page ids it
-		 * chose, which the import maps back to layout pages.
+		 * Upload a notebook of pen-stroke pages under the ids the send chose
+		 * (and recorded) beforehand. `replaces`: the previous notebook, trashed
+		 * in the same cloud update — only while its hash is still
+		 * `expectedHash`, else NotebookChangedError and nothing is written.
+		 * `hash`: the new document's entry hash in the account root.
 		 */
 		uploadInk(
 			visibleName: string,
 			pages: Uint8Array[],
-			/** `replaces`: the previous notebook, trashed in the same cloud update. */
-			options: { parentId?: string; replaces?: string },
-		): Promise<UploadResult & { pageIds: string[]; replaced?: boolean }>;
+			options: {
+				parentId?: string;
+				replaces?: string;
+				expectedHash?: string;
+				deviceDocId: string;
+				pageIds: string[];
+			},
+		): Promise<UploadResult & { pageIds: string[]; replaced?: boolean; hash?: string }>;
 	};
 	/** Turn a note into handwritten pages. */
 	ink: {
@@ -62,8 +71,14 @@ export interface SendDeps {
 		loadDrawings?(markdown: string): Promise<Record<string, InkDrawing>>;
 		/** The note's embedded pictures, quantised, by placeholder name. */
 		loadImages?(note: NoteInput): Promise<Record<string, Picture>>;
-		/** Keep the sent text, so the import can regenerate it after edits. */
-		persistSent?(docId: string, sent: SentRecord): Promise<void>;
+		/**
+		 * Record the send before its upload, beside the committed one: a crash
+		 * after the upload must not lose the notebook, a failed upload must not
+		 * change the merge base (SyncState.writePending).
+		 */
+		persistPending?(docId: string, sent: SentRecord, mapping: MappingEntry): Promise<void>;
+		/** The upload landed: keep its text and mapping together (SyncState.commitSent). */
+		commitSent?(docId: string, sent: SentRecord, mapping: MappingEntry): Promise<void>;
 	};
 	/** Resolve an embed for a given note (notePath disambiguates targets). */
 	resolveEmbed: (
@@ -78,11 +93,26 @@ export interface SendDeps {
 	 */
 	resolveParent?: (notePath: string) => Promise<string>;
 	/**
-	 * Retire the previous device copy after a successful re-upload
-	 * (idempotent re-send, N3). Failures are non-fatal: the old copy then
-	 * simply lingers, which is the pre-mirroring behavior.
+	 * Retire the previous device copy when the upload could not trash it
+	 * itself (idempotent re-send, N3) — only while its hash is still
+	 * `expectedHash`. Anything but "trashed"/"not-found" is reported.
 	 */
-	replacePrevious?: (previousDeviceDocId: string) => Promise<void>;
+	replacePrevious?: (
+		previousDeviceDocId: string,
+		expectedHash?: string,
+	) => Promise<"trashed" | "not-found" | "changed">;
+	/**
+	 * Notebooks that could not be read in this run, by note docId, with the
+	 * reason. Their notes are not sent: the upload would replace ink that is
+	 * not in the note yet.
+	 */
+	unread?: ReadonlyMap<string, string>;
+	/**
+	 * Read a note's notebook again after it changed on the tablet during the
+	 * send, merging the new ink into the note. Returns the note as it is now
+	 * and its mapping as the read left it; null when it could not be read.
+	 */
+	reread?: (note: NoteInput, docId: string) => Promise<{ note: NoteInput; entry: MappingEntry | undefined } | null>;
 	layout?: PdfLayoutOptions;
 	frontmatterAsTitleBlock?: boolean;
 	/**
@@ -100,6 +130,8 @@ export interface SendSuccess {
 	missingEmbeds: string[];
 	/** True when the note was up to date and no upload happened. */
 	skipped?: boolean;
+	/** Sent, but something about the old notebook needs the owner's eye. */
+	warning?: string;
 }
 
 export interface SendFailure {
@@ -152,85 +184,37 @@ export async function sendNote(
 	table: MappingTable,
 	deps: SendDeps,
 ): Promise<{ result: SendResult; table: MappingTable }> {
+	let current = table;
 	try {
 		const { docId, isNew } = ensureDocId(note.existingDocId);
 		if (isNew) await deps.persistDocId(note, docId);
-		const { markdown, missingEmbeds } = prepareNoteContent(
-			note,
-			deps.resolveEmbed,
-			deps.frontmatterAsTitleBlock,
-		);
-		const hash = contentHash(markdown);
-		const current = table[docId];
-		if (deps.skipUnchanged && current?.format === "ink" && current.contentHash === hash) {
-			return {
-				result: {
-					ok: true,
-					path: note.path,
-					docId,
-					deviceDocId: current.deviceDocId,
-					missingEmbeds,
-					skipped: true,
-				},
-				table,
-			};
+		const unread = current[docId] === undefined ? undefined : deps.unread?.get(docId);
+		if (unread !== undefined) {
+			throw new Error(
+				`Not sent: its notebook could not be read (${unread}), and sending would replace ink that is not in the note yet.`,
+			);
 		}
-		const parentId = deps.resolveParent
-			? await deps.resolveParent(note.path)
-			: undefined;
-		const blocks = parseBlocks(markdown, { html: true, quotePictures: true, nestedQuotes: true });
-		const images = (await deps.ink.loadImages?.(note)) ?? {};
-		const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
-		const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
-		// Keep the text BEFORE uploading: a failed write after a landed
-		// upload would orphan the notebook and duplicate it on retry.
-		await deps.ink.persistSent?.(docId, {
-			title: note.basename,
-			markdown,
-			body: splitNote(note.content).body,
-			images: Object.keys(images).length > 0 ? images : undefined,
-			drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
-		});
-		const upload = await deps.client.uploadInk(note.basename, rendered.pages, {
-			parentId,
-			replaces: deps.replacePrevious === undefined ? undefined : current?.deviceDocId,
-		});
-		const inkSnapshot: InkSnapshot = { ...rendered.snapshot, pageIds: upload.pageIds };
-
-		const previous = table[docId];
-		if (
-			deps.replacePrevious &&
-			upload.replaced !== true &&
-			previous !== undefined &&
-			previous.deviceDocId !== upload.deviceDocId
-		) {
-			try {
-				await deps.replacePrevious(previous.deviceDocId);
-			} catch {
-				// Non-fatal: the old device copy lingers (pre-mirroring behavior).
-			}
+		try {
+			return await uploadOnce(note, docId, current, deps);
+		} catch (error) {
+			if (!(error instanceof NotebookChangedError) || deps.reread === undefined) throw error;
 		}
-
-		const updated = recordUpload(table, {
-			docId,
-			notePath: note.path,
-			deviceDocId: upload.deviceDocId,
-			contentHash: hash,
-			format: "ink",
-			pdfLayout: resolveLayoutOptions(deps.layout),
-			// Ink fork: everything the import needs to regenerate the strokes.
-			ink: inkSnapshot,
-		});
-		return {
-			result: {
-				ok: true,
-				path: note.path,
-				docId,
-				deviceDocId: upload.deviceDocId,
-				missingEmbeds,
-			},
-			table: updated,
-		};
+		// The tablet wrote into the notebook since it was read: bring that ink
+		// in, then send the note as it is now — once; a notebook still being
+		// written in waits for the next sync.
+		const again = await deps.reread(note, docId);
+		if (again === null) {
+			throw new Error("Not sent: its notebook changed on the reMarkable and could not be read again.");
+		}
+		if (again.entry !== undefined) current = { ...current, [docId]: again.entry };
+		try {
+			return await uploadOnce(again.note, docId, current, deps);
+		} catch (error) {
+			if (!(error instanceof NotebookChangedError)) throw error;
+			throw new Error(
+				"Not sent: its notebook keeps changing on the reMarkable (still being written in?). It is tried again on the next sync.",
+			);
+		}
 	} catch (error) {
 		return {
 			result: {
@@ -238,9 +222,111 @@ export async function sendNote(
 				path: note.path,
 				error: error instanceof Error ? error.message : String(error),
 			},
+			table: current,
+		};
+	}
+}
+
+/**
+ * One upload of a note. The send is recorded as pending before the upload
+ * and committed with its mapping after it, so the merge base only moves
+ * once the tablet really holds the new notebook. Throws NotebookChangedError
+ * when the old notebook changed since it was last read; nothing was written.
+ */
+async function uploadOnce(
+	note: NoteInput,
+	docId: string,
+	table: MappingTable,
+	deps: SendDeps,
+): Promise<{ result: SendResult; table: MappingTable }> {
+	const { markdown, missingEmbeds } = prepareNoteContent(note, deps.resolveEmbed, deps.frontmatterAsTitleBlock);
+	const hash = contentHash(markdown);
+	const current = table[docId];
+	if (deps.skipUnchanged && current?.format === "ink" && current.contentHash === hash) {
+		return {
+			result: { ok: true, path: note.path, docId, deviceDocId: current.deviceDocId, missingEmbeds, skipped: true },
 			table,
 		};
 	}
+	const parentId = deps.resolveParent ? await deps.resolveParent(note.path) : undefined;
+	const blocks = parseBlocks(markdown, { html: true, quotePictures: true, nestedQuotes: true });
+	const images = (await deps.ink.loadImages?.(note)) ?? {};
+	const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
+	const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
+	const sent: SentRecord = {
+		title: note.basename,
+		markdown,
+		body: splitNote(note.content).body,
+		images: Object.keys(images).length > 0 ? images : undefined,
+		drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
+	};
+	const replaces = deps.replacePrevious === undefined ? undefined : current?.deviceDocId;
+	// Notebooks the import reads are replaced only as read; an old PDF copy
+	// is never read, so there is nothing to compare it with.
+	const expectedHash = current?.format === "ink" || current?.format === "device" ? current.accountedHash : undefined;
+	const planned: MappingEntry = {
+		docId,
+		notePath: note.path,
+		deviceDocId: generateDocId(),
+		uploadedAt: new Date().toISOString(),
+		contentHash: hash,
+		format: "ink",
+		pdfLayout: resolveLayoutOptions(deps.layout),
+		// Ink fork: everything the import needs to regenerate the strokes.
+		ink: { ...rendered.snapshot, pageIds: rendered.pages.map(() => generateDocId()) },
+	};
+	await deps.ink.persistPending?.(docId, sent, planned);
+	const upload = await deps.client.uploadInk(note.basename, rendered.pages, {
+		parentId,
+		replaces,
+		expectedHash: replaces === undefined ? undefined : expectedHash,
+		deviceDocId: planned.deviceDocId,
+		pageIds: planned.ink?.pageIds ?? [],
+	});
+	const entry: MappingEntry = {
+		...planned,
+		deviceDocId: upload.deviceDocId,
+		ink: { ...rendered.snapshot, pageIds: upload.pageIds },
+		accountedHash: upload.hash,
+	};
+	const updated = recordUpload(table, entry);
+
+	let warning: string | undefined;
+	if (replaces !== undefined && upload.replaced !== true && replaces !== upload.deviceDocId && deps.replacePrevious) {
+		try {
+			const outcome = await deps.replacePrevious(replaces, expectedHash);
+			if (outcome === "changed") {
+				warning = "The previous notebook changed on the reMarkable during the send and was kept: its new ink is not in the note.";
+			}
+		} catch (error) {
+			warning = `The previous notebook could not be moved to the trash: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	}
+	try {
+		await deps.ink.commitSent?.(docId, sent, entry);
+	} catch (error) {
+		// The notebook landed; the pending record still names it, so the next
+		// run commits it from there.
+		return {
+			result: {
+				ok: false,
+				path: note.path,
+				error: `Sent, but recording the send failed (${error instanceof Error ? error.message : String(error)}); the next sync records it.`,
+			},
+			table: updated,
+		};
+	}
+	return {
+		result: {
+			ok: true,
+			path: note.path,
+			docId,
+			deviceDocId: upload.deviceDocId,
+			missingEmbeds,
+			...(warning === undefined ? {} : { warning }),
+		},
+		table: updated,
+	};
 }
 
 /** Send a batch sequentially; one failure never aborts the rest (F8). */
@@ -255,12 +341,13 @@ export async function sendBatch(
 	let current = table;
 	for (const note of notes) {
 		const { result, table: updated } = await sendNote(note, current, deps);
+		const changed = updated !== current;
 		current = updated;
 		results.push(result);
 		onProgress?.(results.length, notes.length, result);
-		// Every notebook that landed is recorded at once: a batch interrupted
-		// half-way must not send them again — the cloud limits how fast it goes.
-		if (notes.length > 1 && result.ok && result.skipped !== true) await onCheckpoint?.(current);
+		// Every change to the mappings is recorded at once — a landed notebook
+		// above all: an interrupted run must not send it again.
+		if (changed) await onCheckpoint?.(current);
 	}
 	return { results, table: current };
 }

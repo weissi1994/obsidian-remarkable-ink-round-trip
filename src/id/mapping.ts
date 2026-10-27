@@ -31,10 +31,14 @@ export interface MappingEntry {
 	 */
 	textHash?: string;
 	/**
-	 * Device document hash at the last annotation import (F10). Unset until
-	 * the first import; equal to the current device hash means "nothing new".
+	 * Device document hash (its entry in the account root) the plugin last
+	 * fully accounted for: the notebook as read and merged into the note, or
+	 * as uploaded by the plugin itself. Equal to the current hash means
+	 * "nothing new on the tablet"; a notebook is only replaced while its hash
+	 * still equals this. Unset = not read since an upload of unknown hash.
+	 * Stored as `importedHash` by earlier versions (migrateMapping).
 	 */
-	importedHash?: string;
+	accountedHash?: string;
 	/**
 	 * Typography of this upload (GP_E3_S8). The layout map itself is far too
 	 * big to keep here, so the import reproduces it from the note plus these
@@ -136,9 +140,9 @@ export function contentHash(text: string): string {
 }
 
 /**
- * Record a fresh upload. `importedHash` is deliberately *not* carried over:
- * a re-send creates a new document on the device, so an import marker from
- * the previous copy would wrongly suppress the next annotation import.
+ * Record a fresh upload. The hash of the previous copy is deliberately *not*
+ * carried over: a re-send creates a new document on the device, so the new
+ * entry carries the new document's hash (`accountedHash` of `entry`), or none.
  */
 export function recordUpload(
 	table: MappingTable,
@@ -148,10 +152,16 @@ export function recordUpload(
 		...table,
 		[entry.docId]: {
 			...entry,
-			importedHash: undefined,
 			uploadedAt: entry.uploadedAt ?? new Date().toISOString(),
 		},
 	};
+}
+
+/** A mapping as stored by an earlier version, in today's shape. */
+export function migrateMapping(entry: MappingEntry & { importedHash?: string }): MappingEntry {
+	if (entry.importedHash === undefined) return entry;
+	const { importedHash, ...rest } = entry;
+	return { ...rest, accountedHash: rest.accountedHash ?? importedHash };
 }
 
 export function lookupByDocId(table: MappingTable, docId: string): MappingEntry | undefined {

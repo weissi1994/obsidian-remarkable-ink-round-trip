@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WatchQueue, isInWatchFolder, parseFolderList } from "../sync/watcher";
 
 /** Manual timer harness: fire() runs all due timers. */
@@ -132,5 +132,73 @@ describe("WatchQueue", () => {
 		expect(queue.status()).toEqual({ pendingChanges: 0 });
 		timers.fire();
 		expect(ready).toEqual([]);
+	});
+});
+
+describe("WatchQueue under real timing", () => {
+	function realQueue(extra: Partial<ConstructorParameters<typeof WatchQueue>[0]> = {}) {
+		const batches: string[][] = [];
+		const queue = new WatchQueue({
+			folders: ["out"],
+			debounceMs: 15_000,
+			setTimer: (fn, ms) => setTimeout(fn, ms) as unknown as number,
+			clearTimer: (id) => clearTimeout(id),
+			onReady: (paths) => batches.push(paths),
+			...extra,
+		});
+		return { queue, batches };
+	}
+
+	it("sends after the max wait even while the note keeps changing", () => {
+		vi.useFakeTimers();
+		try {
+			const { queue, batches } = realQueue();
+			for (let t = 0; t < 55_000; t += 5_000) {
+				queue.noteChanged("out/a.md");
+				vi.advanceTimersByTime(5_000);
+			}
+			expect(batches).toEqual([]);
+			queue.noteChanged("out/a.md");
+			vi.advanceTimersByTime(4_999);
+			expect(batches).toEqual([]);
+			vi.advanceTimersByTime(1);
+			expect(batches).toEqual([["out/a.md"]]);
+			queue.noteChanged("out/a.md");
+			vi.advanceTimersByTime(14_999);
+			expect(batches).toHaveLength(1);
+			vi.advanceTimersByTime(1);
+			expect(batches).toHaveLength(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("ignores the plugin's own write inside the suppression window, not after", () => {
+		vi.useFakeTimers();
+		try {
+			const { queue, batches } = realQueue();
+			queue.suppress("out/a.md", 2_000);
+			queue.noteChanged("out/a.md");
+			vi.advanceTimersByTime(30_000);
+			expect(batches).toEqual([]);
+			queue.noteChanged("out/a.md");
+			vi.advanceTimersByTime(15_000);
+			expect(batches).toEqual([["out/a.md"]]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("never queues notes in an excluded folder inside a watched one", () => {
+		vi.useFakeTimers();
+		try {
+			const { queue, batches } = realQueue({ excludeFolders: ["out/backup"] });
+			queue.noteChanged("out/backup/a.md");
+			queue.noteChanged("out/backupish.md");
+			vi.advanceTimersByTime(15_000);
+			expect(batches).toEqual([["out/backupish.md"]]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

@@ -53,13 +53,14 @@ import {
 } from "./transport/diagnose";
 import { ByteCompatReport, installByteCompat } from "./transport/bytescompat";
 import { EmbedContent } from "./preprocess/preprocess";
-import { DOCID_FRONTMATTER_KEY, generateDocId } from "./id/docid";
+import { DOCID_FRONTMATTER_KEY, duplicateIdLosers, generateDocId } from "./id/docid";
 import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
+import { mergeIntoNote } from "./sync/notewrite";
 import { SyncState, type SharedHandwriting, type StateFs } from "./sync/syncstate";
-import { findNewNotebooks, importedNote, noteFileName, writtenByPlugin } from "./sync/deviceimport";
+import { findNewNotebooks, importedNote, importNotebooks, noteFileName, writtenByPlugin } from "./sync/deviceimport";
 import { parseRmScene } from "./incoming/rmscene";
-import { readNotebook } from "./transport/notebook";
+import { NotebookChangedError, readNotebook } from "./transport/notebook";
 import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
 import { confirmAllRemarks, confirmRemarkAt, findRemark, remarkAt, remarkId } from "./incoming/remarkid";
@@ -77,6 +78,7 @@ import {
 	knownText,
 	learnFromNotes,
 	notedReadings,
+	isVerified,
 	refOf,
 	type ReaderName,
 	rememberRemark,
@@ -114,7 +116,7 @@ import {
 } from "./incoming/pull";
 import { renderImportReport } from "./incoming/report";
 import { paintPlan, planRender } from "./incoming/strokerender";
-import { MappingEntry, MappingTable, contentHash } from "./id/mapping";
+import { MappingEntry, MappingTable, contentHash, migrateMapping } from "./id/mapping";
 import { displayTextForLink, parseFrontmatter, preprocess, splitNote } from "./preprocess/preprocess";
 import type { AnnotationOutcome } from "./incoming/annotationnote";
 import { WatchQueue, parseFolderList } from "./sync/watcher";
@@ -158,6 +160,8 @@ export default class RoundTripPlugin extends Plugin {
 	private fetchShim: { restore: () => void } | null = null;
 	/** Unknown data.json keys, preserved across saves (see extrasFrom). */
 	private extraData: Record<string, unknown> = {};
+	/** Notebooks a pull run could not read, shared by the callers deduplicated onto it. */
+	private readonly pullUnread = new Map<string, Map<string, string>>();
 	private syncRunning: Promise<void> | null = null;
 	/** Progress of the upload batch running now, for the status panel. */
 	private uploading: { done: number; total: number } | null = null;
@@ -525,7 +529,8 @@ export default class RoundTripPlugin extends Plugin {
 	private async openState(legacy: MappingTable): Promise<void> {
 		this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
 		const shared = await this.state.loadMappings();
-		this.settings.mappings = { ...legacy, ...shared };
+		const migrated = Object.fromEntries(Object.entries(legacy).map(([docId, entry]) => [docId, migrateMapping(entry)]));
+		this.settings.mappings = { ...migrated, ...shared };
 		await this.adoptHandwriting();
 		if (Object.keys(legacy).some((docId) => shared[docId] === undefined)) {
 			const moved = await this.ink.migrateToState();
@@ -537,19 +542,39 @@ export default class RoundTripPlugin extends Plugin {
 				10000,
 			);
 		}
-		if (this.state.unreadable.length > 0) {
-			notify(
-				`reMarkable sync state: ${this.state.unreadable.length} file(s) could not be read (a merge conflict?): ` +
-					this.state.unreadable.slice(0, 3).join(", "),
-				15000,
-			);
-		}
+		const problems = this.stateProblems();
+		if (problems.length > 0) notify(`reMarkable sync state:\n${problems.slice(0, 3).join("\n")}`, 15000);
 	}
 
 	/** Take in what other copies of the vault synced since (a git pull). */
 	private async refreshState(): Promise<void> {
 		this.settings.mappings = await this.state.refresh(this.settings.mappings);
 		await this.adoptHandwriting();
+	}
+
+	/** State files the owner has to look at: damaged ones, conflict copies, ones left unwritten. */
+	private stateProblems(): string[] {
+		const { unreadable, conflictCopies, unwritable } = this.state;
+		return [
+			...[...new Set([...unreadable, ...unwritable])].map(
+				(path) => `cannot be read, left as it is (a merge conflict?): ${path} — its note is not synced until it is repaired`,
+			),
+			...conflictCopies.map((path) => `conflict copy, not used: ${path} — merge it into its note's file or delete it`),
+		];
+	}
+
+	/**
+	 * Settle sends a crash left half-done (SyncState.settlePending) against the
+	 * account listing: done before anything reads or sends, so a landed
+	 * notebook is known before its note could be sent a second time.
+	 */
+	private async settlePendingSends(present: ReadonlySet<string>, log: (line: string) => void): Promise<void> {
+		const settled = await this.state.settlePending(this.settings.mappings, present);
+		if (settled.committed.length === 0 && settled.dropped.length === 0) return;
+		this.settings.mappings = settled.table;
+		for (const docId of settled.committed) log(`interrupted send of ${docId} had landed — recorded`);
+		for (const docId of settled.dropped) log(`interrupted send of ${docId} never landed — dropped`);
+		await this.persistSettings();
 	}
 
 	/**
@@ -691,6 +716,8 @@ export default class RoundTripPlugin extends Plugin {
 		this.watchQueue = new WatchQueue({
 			folders,
 			debounceMs: WATCH_DEBOUNCE_MS,
+			// The safety-net copies are the plugin's own writes, never notes to send.
+			excludeFolders: [this.settings.backupFolder.replace(/^\/+|\/+$/g, "") || "previous"],
 			setTimer: (fn, ms) => window.setTimeout(fn, ms),
 			clearTimer: (id) => window.clearTimeout(id),
 			onReady: (paths) => {
@@ -758,7 +785,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (this.syncRunning !== null) return this.syncRunning;
 		this.syncRunning = (async () => {
 			try {
-				const changed = await this.pullAnnotations({ background: options.background });
+				const { changed, unread } = await this.pullAnnotations({ background: options.background });
 				// Notebooks started on the tablet: in as notes, then out below as ink.
 				const imported = await this.importNewNotebooks(options.background === true);
 				for (const path of imported) changed.add(path);
@@ -779,6 +806,7 @@ export default class RoundTripPlugin extends Plugin {
 					auto: true,
 					pullFirst: false,
 					background: options.background,
+					unread,
 				});
 			} finally {
 				this.syncRunning = null;
@@ -798,7 +826,7 @@ export default class RoundTripPlugin extends Plugin {
 		const created: string[] = [];
 		if (!this.settings.watchFolderEnabled || !this.settings.mirrorFolders) return Promise.resolve(created);
 		return this.pullQueue
-			.enqueue("import-new-notebooks", () => this.runImportNewNotebooks(created))
+			.enqueue("import-new-notebooks", () => this.runImportNewNotebooks(created, background))
 			.then(() => created)
 			.catch((error: unknown) => {
 				const message = toTransportError(error).message;
@@ -808,7 +836,7 @@ export default class RoundTripPlugin extends Plugin {
 			});
 	}
 
-	private async runImportNewNotebooks(created: string[]): Promise<void> {
+	private async runImportNewNotebooks(created: string[], background: boolean): Promise<void> {
 		this.examples = null;
 		const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
 		const cache = await this.ink.loadDeviceItems();
@@ -843,64 +871,84 @@ export default class RoundTripPlugin extends Plugin {
 			now: Date.now(),
 			quietMs: 10 * 60_000,
 		});
-		for (const notebook of found) {
-			const { pages, content } = await readNotebook(api.raw, notebook.id);
-			if (content === null || (JSON.parse(content) as { fileType?: string }).fileType !== "notebook") {
-				cache[notebook.id] = { ...cache[notebook.id], notNotebook: true };
-				continue;
-			}
-			if (pages.some((page) => writtenByPlugin(parseRmScene(page.bytes).authors))) {
-				cache[notebook.id] = { ...cache[notebook.id], ours: true };
-				continue;
-			}
-			const order = parsePageOrder(content);
-			pages.sort((a, b) => order.indexOf(a.pageId) - order.indexOf(b.pageId));
-			const written: { image?: string; text?: string }[] = [];
-			for (const [index, page] of pages.entries()) {
-				const strokes = parseRmPage(page.bytes).strokes;
-				if (strokes.length === 0) continue;
-				const request: StrokeRenderRequest = {
-					deviceDocId: notebook.id,
-					strokes,
-					page: index + 1,
-					remark: 1,
-					wholePage: true,
+		const { created: paths, failed } = await importNotebooks(
+			found,
+			async (notebook) => {
+				const { pages, content, hash } = await readNotebook(api.raw, notebook.id);
+				if (content === null || (JSON.parse(content) as { fileType?: string }).fileType !== "notebook") {
+					cache[notebook.id] = { ...cache[notebook.id], notNotebook: true };
+					return null;
+				}
+				if (pages.some((page) => writtenByPlugin(parseRmScene(page.bytes).authors))) {
+					cache[notebook.id] = { ...cache[notebook.id], ours: true };
+					return null;
+				}
+				const order = parsePageOrder(content);
+				pages.sort((a, b) => order.indexOf(a.pageId) - order.indexOf(b.pageId));
+				const written: { image?: string; text?: string }[] = [];
+				for (const [index, page] of pages.entries()) {
+					const strokes = parseRmPage(page.bytes).strokes;
+					if (strokes.length === 0) continue;
+					const request: StrokeRenderRequest = {
+						deviceDocId: notebook.id,
+						strokes,
+						page: index + 1,
+						remark: 1,
+						wholePage: true,
+					};
+					const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
+					const read =
+						this.settings.ocrMode === "builtin"
+							? await this.recognizeLocally(request)
+							: this.settings.ocrMode === "endpoint"
+								? await this.transcribeStrokes(request).catch(() => null)
+								: null;
+					const text = read?.text ?? null;
+					written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
+				}
+				const docId = generateDocId();
+				const base = [notebook.folder, noteFileName(notebook.name)].filter((part) => part !== "").join("/");
+				let path = `${base}.md`;
+				for (let n = 2; this.app.vault.getFileByPath(path) !== null; n++) path = `${base} (${n}).md`;
+				this.watchQueue?.suppress(path, 5000);
+				await this.writeVaultFile(path, importedNote(docId, written));
+				this.settings.mappings = {
+					...this.settings.mappings,
+					[docId]: {
+						docId,
+						notePath: path,
+						deviceDocId: notebook.id,
+						uploadedAt: new Date().toISOString(),
+						contentHash: "",
+						format: "device",
+						// What the note was made from: the send that replaces the
+						// notebook only does so while it is still exactly this.
+						accountedHash: hash,
+					},
 				};
-				const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
-				const read =
-					this.settings.ocrMode === "builtin"
-						? await this.recognizeLocally(request)
-						: this.settings.ocrMode === "endpoint"
-							? await this.transcribeStrokes(request).catch(() => null)
-							: null;
-				const text = read?.text ?? null;
-				written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
-			}
-			const docId = generateDocId();
-			const base = [notebook.folder, noteFileName(notebook.name)].filter((part) => part !== "").join("/");
-			let path = `${base}.md`;
-			for (let n = 2; this.app.vault.getFileByPath(path) !== null; n++) path = `${base} (${n}).md`;
-			await this.writeVaultFile(path, importedNote(docId, written));
-			this.settings.mappings = {
-				...this.settings.mappings,
-				[docId]: {
-					docId,
-					notePath: path,
-					deviceDocId: notebook.id,
-					uploadedAt: new Date().toISOString(),
-					contentHash: "",
-					format: "device",
-				},
-			};
-			await this.persistSettings();
-			created.push(path);
-		}
+				await this.persistSettings();
+				return path;
+			},
+			() => this.ink.saveDeviceItems(cache),
+		);
+		created.push(...paths);
 		if (this.samplesDirty) {
 			await this.ink.saveSamples();
 			this.samplesDirty = false;
 		}
 		await this.ink.saveDeviceItems(cache);
 		if (created.length > 0) notify(`Brought ${created.length} notebook(s) from the reMarkable into the vault.`);
+		if (failed.length > 0) {
+			const message =
+				`${failed.length} notebook(s) on the reMarkable could not be brought in; tried again next sync.\n` +
+				failed
+					.slice(0, 3)
+					.map(({ notebook, error }) => `${notebook.name}: ${error}`)
+					.join("\n");
+			console.warn(`reMarkable Ink Round-Trip: ${message}`);
+			await this.appendReport(message);
+			if (!background) notify(message, 10000);
+		}
 	}
 
 	/** Write every note that has a notebook into a fresh one, read back first as always. */
@@ -946,8 +994,9 @@ export default class RoundTripPlugin extends Plugin {
 	/**
 	 * Send notes as handwritten notebooks. A note that already has a notebook
 	 * gets that notebook read first, so ink not yet in the note is merged
-	 * before the notebook is replaced. In `auto` mode unchanged notes are
-	 * skipped and an all-skipped run stays silent — errors always surface.
+	 * before the notebook is replaced; a note whose notebook could not be read
+	 * is held back. In `auto` mode unchanged notes are skipped and an
+	 * all-skipped run stays silent — errors always surface.
 	 */
 	async sendFiles(
 		files: TFile[],
@@ -957,6 +1006,8 @@ export default class RoundTripPlugin extends Plugin {
 			/** Read the existing notebooks first (default); a sync already did. */
 			pullFirst?: boolean;
 			background?: boolean;
+			/** With `pullFirst: false`: the notebooks that read could not get (by note docId). */
+			unread?: ReadonlyMap<string, string>;
 		} = {},
 	): Promise<void> {
 		if (files.length === 0) {
@@ -970,10 +1021,12 @@ export default class RoundTripPlugin extends Plugin {
 			}
 			return;
 		}
+		const renewed = await this.splitDuplicateIds(files);
+		let unread: ReadonlyMap<string, string> = options.unread ?? new Map<string, string>();
 		if (options.pullFirst !== false) {
 			const synced = files.filter((file) => this.syncedEntry(file) !== undefined);
 			if (synced.length > 0) {
-				await this.pullAnnotations({ only: synced, background: true });
+				unread = (await this.pullAnnotations({ only: synced, background: true })).unread;
 			}
 		}
 		await this.refreshState();
@@ -986,11 +1039,7 @@ export default class RoundTripPlugin extends Plugin {
 					path: file.path,
 					basename: file.basename,
 					content,
-					// A note just written (one brought in from the tablet) may not be
-					// in the metadata cache yet: its own frontmatter has the id too.
-					existingDocId:
-						getFrontmatterValue(this.app.metadataCache.getFileCache(file)?.frontmatter, DOCID_FRONTMATTER_KEY) ??
-						parseFrontmatter(content).fields[DOCID_FRONTMATTER_KEY],
+					existingDocId: renewed.get(file.path) ?? this.noteDocId(file, content),
 				});
 				embedMaps.set(file.path, await this.buildEmbedMap(file));
 			}
@@ -1039,6 +1088,12 @@ export default class RoundTripPlugin extends Plugin {
 							this.rmapiOptions(),
 						);
 						rawApi = api.raw;
+						// A send a crash interrupted is settled before any note is
+						// sent again: had it landed, sending anew would duplicate it.
+						const listing = await api.listIds(true);
+						await this.settlePendingSends(new Set(listing.map((item) => item.id)), (line) =>
+							console.warn(`reMarkable Ink Round-Trip: ${line}`),
+						);
 						mirror = new MirrorTransport(
 							api,
 							mirrorFoldersActive && !structureOnly
@@ -1075,6 +1130,17 @@ export default class RoundTripPlugin extends Plugin {
 					try {
 						const activeMirror = mirror;
 						const activeRaw = rawApi;
+						// Only what the batch changed goes back: a re-read during
+						// the batch may have taken in other copies' mappings.
+						let batchBase = this.settings.mappings;
+						const applyBatch = (next: MappingTable): void => {
+							const merged = { ...this.settings.mappings };
+							for (const [docId, entry] of Object.entries(next)) {
+								if (entry !== batchBase[docId]) merged[docId] = entry;
+							}
+							this.settings.mappings = merged;
+							batchBase = next;
+						};
 						const { results, table } = await sendBatch(
 							queuedNotes,
 							this.settings.mappings,
@@ -1085,9 +1151,16 @@ export default class RoundTripPlugin extends Plugin {
 											return Promise.reject(new Error("The reMarkable sync API is not available right now."));
 										}
 										return this.ink
-											.upload(activeRaw, visibleName, pages, uploadOptions.parentId, uploadOptions.replaces)
+											.upload(activeRaw, visibleName, pages, {
+												parentId: uploadOptions.parentId,
+												replaces: uploadOptions.replaces,
+												expectedHash: uploadOptions.expectedHash,
+												docId: uploadOptions.deviceDocId,
+												pageIds: uploadOptions.pageIds,
+											})
 											.catch((error: unknown) => {
-												throw toTransportError(error);
+												// The send reads the notebook again on this one.
+												throw error instanceof NotebookChangedError ? error : toTransportError(error);
 											});
 									},
 								},
@@ -1096,7 +1169,8 @@ export default class RoundTripPlugin extends Plugin {
 										this.ink.renderForSend(blocks, title, docId, layout, images, drawings),
 									loadImages: (note) => this.noteImages(note),
 									loadDrawings: (markdown) => this.noteDrawings(markdown),
-									persistSent: (docId, sent) => this.ink.persistSent(docId, sent),
+									persistPending: (docId, sent, mapping) => this.state.writePending(docId, sent, mapping),
+									commitSent: (docId, sent, mapping) => this.state.commitSent(docId, sent, mapping),
 								},
 								resolveParent:
 									activeMirror && mirrorFoldersActive
@@ -1113,15 +1187,27 @@ export default class RoundTripPlugin extends Plugin {
 											}
 										: undefined,
 								// The old notebook's ink was pulled into the note just
-								// before this send, so it can go.
+								// before this send; it goes only while it is still as read.
 								replacePrevious: activeMirror
-									? (previousId) => activeMirror.trashPrevious(previousId)
+									? (previousId, expectedHash) => activeMirror.trashPrevious(previousId, expectedHash)
 									: undefined,
+								unread,
+								reread: async (note, docId) => {
+									const file = this.app.vault.getFileByPath(note.path);
+									if (file === null || this.syncedEntry(file) === undefined) return null;
+									const failed = new Map<string, string>();
+									await this.runPullAnnotations({ only: [file], nested: true }, new Set<string>(), failed);
+									if (failed.size > 0) return null;
+									const content = await this.app.vault.read(file);
+									embedMaps.set(file.path, await this.buildEmbedMap(file));
+									return { note: { ...note, content }, entry: this.settings.mappings[docId] };
+								},
 								resolveEmbed: (linkpath, notePath) =>
 									embedMaps.get(notePath)?.get(linkpath) ?? { kind: "missing" },
 								persistDocId: async (note, docId) => {
 									const file = this.app.vault.getFileByPath(note.path);
 									if (!file) return;
+									this.watchQueue?.suppress(file.path, 5000);
 									await this.app.fileManager.processFrontMatter(file, (fm) => {
 										(fm as Record<string, unknown>)[DOCID_FRONTMATTER_KEY] =
 											docId;
@@ -1136,17 +1222,25 @@ export default class RoundTripPlugin extends Plugin {
 								updateProgress(notice, `Sending ${done}/${total} to reMarkable…`, { done, total });
 							},
 							async (checkpoint) => {
-								this.settings.mappings = checkpoint;
+								applyBatch(checkpoint);
 								await this.persistSettings();
 							},
 						);
 
-						this.settings.mappings = table;
+						applyBatch(table);
 						await this.persistSettings();
 						reportResults(results, {
 							quietWhenAllSkipped: options.auto === true,
 							quiet: options.background === true,
 						});
+						const attention = [
+							...results.flatMap((r) => (r.ok ? (r.warning === undefined ? [] : [`${r.path}: ${r.warning}`]) : [`${r.path}: ${r.error}`])),
+							...this.stateProblems().map((problem) => `sync state: ${problem}`),
+						];
+						if (attention.length > 0) {
+							const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+							await this.appendReport(`reMarkable Ink Round-Trip — send (${stamp})\n${attention.join("\n")}`);
+						}
 					} finally {
 						this.uploading = null;
 						notice.hide();
@@ -1158,6 +1252,45 @@ export default class RoundTripPlugin extends Plugin {
 				if (options.background === true) console.warn(`reMarkable Ink Round-Trip: ${message}`);
 				else notify(`${message} No notes were uploaded.`, 10000);
 			});
+	}
+
+	/** A note's document id: the metadata cache, or its own frontmatter for a note just written. */
+	private noteDocId(file: TFile, content: string): unknown {
+		return (
+			getFrontmatterValue(this.app.metadataCache.getFileCache(file)?.frontmatter, DOCID_FRONTMATTER_KEY) ??
+			parseFrontmatter(content).fields[DOCID_FRONTMATTER_KEY]
+		);
+	}
+
+	/**
+	 * Give every copy of a note a document id of its own before anything is
+	 * sent: Obsidian's "Make a copy" duplicates the id, and two notes on one
+	 * id would keep replacing each other's notebook. The copies become new
+	 * notes (docid.ts duplicateIdLosers decides which one keeps the id).
+	 * Returns the new ids by path — the metadata cache lags behind the write.
+	 */
+	private async splitDuplicateIds(files: TFile[]): Promise<Map<string, string>> {
+		const notes: { path: string; docId: unknown; ctime: number }[] = [];
+		for (const file of files) {
+			notes.push({ path: file.path, docId: this.noteDocId(file, await this.app.vault.cachedRead(file)), ctime: file.stat.ctime });
+		}
+		const renewed = new Map<string, string>();
+		for (const path of duplicateIdLosers(notes, (docId) => this.settings.mappings[docId]?.notePath)) {
+			const file = this.app.vault.getFileByPath(path);
+			if (file === null) continue;
+			const docId = generateDocId();
+			this.watchQueue?.suppress(path, 5000);
+			await this.app.fileManager.processFrontMatter(file, (fm) => {
+				(fm as Record<string, unknown>)[DOCID_FRONTMATTER_KEY] = docId;
+			});
+			renewed.set(path, docId);
+			const line =
+				`“${path}” shared its ${DOCID_FRONTMATTER_KEY} with another note (a copy?); ` +
+				`it now has its own (${docId}) and gets a notebook of its own.`;
+			console.warn(`reMarkable Ink Round-Trip: ${line}`);
+			await this.appendReport(line);
+		}
+		return renewed;
 	}
 
 	/** The mapping entry of a note that has a handwritten notebook, if any. */
@@ -1191,6 +1324,7 @@ export default class RoundTripPlugin extends Plugin {
 			`${DOCID_FRONTMATTER_KEY}-previous`,
 		);
 		const path = `${folder}/${file.basename} (${entry.docId.slice(0, 8)}).md`;
+		this.watchQueue?.suppress(path, 5000);
 		await this.writeVaultFile(path, safeHead + body);
 		return path;
 	}
@@ -1313,37 +1447,55 @@ export default class RoundTripPlugin extends Plugin {
 		}
 	}
 
-	/** The mapping entry of a note whose last send was a REVIEW copy, if any. */
 	/**
 	 * Read the notebooks of every synced note — or, with `only`, of those
 	 * notes — and merge what changed on the tablet into the notes. Resolves
-	 * to the paths of the notes it changed.
+	 * to the paths of the notes it changed, and the notebooks that could not
+	 * be read (by note docId, with the reason): their notes must not be sent.
 	 */
 	async pullAnnotations(
 		options: { force?: boolean; only?: TFile[]; background?: boolean } = {},
-	): Promise<Set<string>> {
+	): Promise<{ changed: Set<string>; unread: Map<string, string> }> {
 		const scopeKey = options.only?.map((file) => file.path).join("|") ?? "all";
 		const key = `annotations:${options.force === true ? "force" : "changed"}:${scopeKey}`;
 		// A run deduplicated onto an identical one already queued leaves this
-		// set empty: that run's caller sends what it changed.
+		// set empty: that run's caller sends what it changed. What could not be
+		// read is shared, though — both callers must hold those notes back.
 		const changed = new Set<string>();
-		await this.pullQueue.enqueue(key, () => this.runPullAnnotations(options, changed));
-		return changed;
+		let unread = this.pullUnread.get(key);
+		if (unread === undefined) {
+			unread = new Map<string, string>();
+			this.pullUnread.set(key, unread);
+		}
+		const shared = unread;
+		try {
+			await this.pullQueue.enqueue(key, () => this.runPullAnnotations(options, changed, shared));
+		} finally {
+			if (this.pullUnread.get(key) === shared) this.pullUnread.delete(key);
+		}
+		return { changed, unread: shared };
 	}
 
+	/**
+	 * `nested`: run from inside a push (a re-read before a send), which already
+	 * holds the sync queue — so no yielding to pushes, and nothing shown.
+	 */
 	private async runPullAnnotations(
-		options: { force?: boolean; only?: TFile[]; background?: boolean },
+		options: { force?: boolean; only?: TFile[]; background?: boolean; nested?: boolean },
 		changed: Set<string>,
+		unread: Map<string, string>,
 	): Promise<void> {
-		const quiet = options.background === true;
-		let scope = this.settings.mappings;
-		if (options.only !== undefined) {
-			scope = {};
+		const quiet = options.background === true || options.nested === true;
+		const scopeOf = (): MappingTable => {
+			if (options.only === undefined) return this.settings.mappings;
+			const scope: MappingTable = {};
 			for (const file of options.only) {
 				const entry = this.syncedEntry(file);
 				if (entry !== undefined) scope[entry.docId] = entry;
 			}
-		}
+			return scope;
+		};
+		let scope = scopeOf();
 		const mappings = Object.keys(scope).length;
 		if (mappings === 0) {
 			if (!quiet && options.only !== undefined) notify("This note has no notebook on the reMarkable yet.");
@@ -1371,11 +1523,15 @@ export default class RoundTripPlugin extends Plugin {
 		const notice = quiet ? null : this.progress(`Checking ${mappings} notebook(s) on the reMarkable…`);
 		try {
 			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+			const listing = await api.listIds(true);
+			await this.settlePendingSends(new Set(listing.map((item) => item.id)), (line) => log.push(line));
+			scope = scopeOf();
+			for (const problem of this.stateProblems()) log.push(`sync state: ${problem}`);
 			const { results, table } = await pullAnnotations(
 				scope,
 				{
 					force: options.force,
-					yieldToPush: () => this.syncCoordinator.yieldToPush(),
+					yieldToPush: options.nested === true ? undefined : () => this.syncCoordinator.yieldToPush(),
 					isCurrent: (entry) =>
 						this.settings.mappings[entry.docId]?.deviceDocId === entry.deviceDocId,
 					log: (line) => log.push(line),
@@ -1420,6 +1576,11 @@ export default class RoundTripPlugin extends Plugin {
 				await this.ink.saveSamples();
 				this.samplesDirty = false;
 			}
+			for (const result of results) if (!result.ok) unread.set(result.docId, result.error);
+			if (options.nested === true) {
+				if (results.some((r) => !r.ok)) await this.appendReport(log.join("\n"));
+				return;
+			}
 
 			const eventful = results.some(
 				(r) => !r.ok || r.removed === true || r.scan?.written !== undefined,
@@ -1438,6 +1599,7 @@ export default class RoundTripPlugin extends Plugin {
 			reportPullResults(results, quiet);
 		} catch (error) {
 			const failure = toTransportError(error).message;
+			for (const docId of Object.keys(scope)) unread.set(docId, failure);
 			if (quiet) {
 				console.warn(`reMarkable Ink Round-Trip: sync failed — ${failure}`);
 				return;
@@ -1450,6 +1612,22 @@ export default class RoundTripPlugin extends Plugin {
 			notify(failure, 10000);
 		} finally {
 			notice?.hide();
+		}
+	}
+
+	/**
+	 * Add to the sync report note what a later step of the same run has to
+	 * say (a send held back, a notebook not brought in), below the report.
+	 */
+	private async appendReport(text: string): Promise<void> {
+		try {
+			const path = "reMarkable Ink Round-Trip log.md";
+			const block = `\`\`\`\n${text}\n\`\`\`\n`;
+			const existing = this.app.vault.getFileByPath(path);
+			if (existing) await this.app.vault.process(existing, (current) => `${current}\n${block}`);
+			else await this.app.vault.create(path, block);
+		} catch {
+			// Writing the log must never break the run itself.
 		}
 	}
 
@@ -2410,7 +2588,9 @@ export default class RoundTripPlugin extends Plugin {
 
 	/**
 	 * Merge what changed on the tablet into the note itself (sync/twoway.ts),
-	 * keeping a copy of the note before it is touched.
+	 * keeping a copy of the note before it is touched. Everything slow is
+	 * loaded first; the merge then runs against the note as it is when it is
+	 * written (sync/notewrite.ts), so typing in the meantime is kept.
 	 */
 	private async applyTabletChanges(
 		entry: MappingEntry,
@@ -2419,32 +2599,51 @@ export default class RoundTripPlugin extends Plugin {
 		changed: Set<string>,
 		sourceState?: SourceState,
 	): Promise<AnnotationOutcome | void> {
-		if (highlights.length === 0 && marks.length === 0) return;
 		const file = this.resolveNote(entry);
-		if (file === null) return { form: "summary", reason: "no-source" };
-		const raw = await this.app.vault.read(file);
-		const { head, body: ours } = splitNote(raw);
+		if (file === null) {
+			return highlights.length === 0 && marks.length === 0 ? undefined : { form: "summary", reason: "no-source" };
+		}
 		const sent = await this.ink.readSent(entry.docId).catch(() => null);
-		const base = sent?.body ?? (sourceState === "match" ? ours : null);
 		const layout = (await this.loadInkRender(entry).catch(() => null))?.layout ?? null;
 		// Readings the owner never touched may be replaced by better ones.
 		const store = await this.ink.loadSamples();
 		const remarks = withEarlierReadings(store, marks);
-		const { body, outcome, refreshed } = mergeTabletChanges({
-			base,
-			ours,
-			layout,
-			highlights,
-			marks: remarks,
-			styles: this.settings.markStyles,
-			erasedAs: this.settings.erasedAs,
-			sourcePath: file.path,
-			sourceName: file.basename,
-			importedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
-		});
-		if (body === ours) return outcome;
-		await this.writePreviousVersion(file, entry, raw);
-		await this.app.vault.modify(file, head + body);
+		const importedAt = new Date().toISOString().slice(0, 16).replace("T", " ");
+		const merged = await mergeIntoNote(
+			{
+				read: () => this.app.vault.read(file),
+				process: (change) => {
+					this.watchQueue?.suppress(file.path, 5000);
+					return this.app.vault.process(file, change);
+				},
+			},
+			async (preImage) => {
+				await this.writePreviousVersion(file, entry, preImage);
+			},
+			(current) => {
+				const { head, body: ours } = splitNote(current);
+				const result = mergeTabletChanges({
+					base: sent?.body ?? (sourceState === "match" ? ours : null),
+					ours,
+					layout,
+					highlights,
+					marks: remarks,
+					styles: this.settings.markStyles,
+					erasedAs: this.settings.erasedAs,
+					sourcePath: file.path,
+					sourceName: file.basename,
+					importedAt,
+					remarkInk: (id: string) => {
+						const record = store.remarks[id];
+						if (record === undefined || record.strokes.length === 0) return null;
+						return { strokes: record.strokes, text: isVerified(record) ? undefined : record.transcript };
+					},
+				});
+				return { text: result.body === ours ? current : head + result.body, result };
+			},
+		);
+		const { body, outcome, refreshed } = merged.result;
+		if (!merged.written) return outcome;
 		changed.add(file.path);
 		notedReadings(store, remarks, body);
 		this.samplesDirty = true;
@@ -2540,6 +2739,12 @@ function reportResults(
 		(r): r is Extract<SendResult, { ok: false }> => !r.ok,
 	);
 	const missing = results.flatMap((r) => (r.ok ? r.missingEmbeds : []));
+	const warnings = results.flatMap((r) => (r.ok && r.warning !== undefined ? [`${r.path.split("/").pop()}: ${r.warning}`] : []));
+	if (warnings.length > 0) {
+		const message = `${warnings.length} note(s) sent with a problem:\n${warnings.slice(0, 3).join("\n")}`;
+		if (options.quiet) console.warn(`reMarkable Ink Round-Trip: ${message}`);
+		else notify(message, 15000);
+	}
 	if (failures.length === 0) {
 		const sent = results.filter((r) => r.ok && r.skipped !== true);
 		if (sent.length === 0 && options.quietWhenAllSkipped) return;

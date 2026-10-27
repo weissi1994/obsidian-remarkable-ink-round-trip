@@ -13,6 +13,8 @@
  */
 
 import { PdfLayout, toWinAnsi } from "../convert/pdf";
+import type { PendingChange } from "./annotationnote";
+import { Bounds, deviceBoundsToPdf, strokeBounds } from "./anchor";
 import { Highlight, colorName, rgbName } from "./highlights";
 import { DEFAULT_MARK_STYLES, MarkStyle, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
@@ -107,10 +109,15 @@ interface Range {
 	end: number;
 }
 
+/** A letter or digit: what a word is made of, for its boundaries. */
+const WORDISH = /[\p{L}\p{N}]/u;
+
 /**
  * Match one word against the source from `from`, allowing markdown syntax to
  * sit anywhere inside or before it — `**Grote** financiële` still contains the
- * word "Grote". Returns the end offset, or null when this position is not it.
+ * word "Grote". Returns the end offset, or null when this position is not it
+ * — also when the match would end inside a longer word: "the" is not in
+ * "theory".
  */
 function matchAt(source: string, from: number, word: string, typo: number): number | null {
 	let at = from;
@@ -133,6 +140,7 @@ function matchAt(source: string, from: number, word: string, typo: number): numb
 		}
 		return null;
 	}
+	if (at < source.length && WORDISH.test(source[at]) && WORDISH.test(source[at - 1])) return null;
 	return at;
 }
 
@@ -168,7 +176,10 @@ function findWord(
 			at = hidden.end - 1;
 			continue;
 		}
-		if (SYNTAX.has(source[at])) continue;
+		// Syntax is stepped over — unless the word itself starts with it (`#tag`, `(see`).
+		if (SYNTAX.has(source[at]) && source[at] !== word[0]) continue;
+		// A word starts at a word boundary, never inside another word.
+		if (at > 0 && WORDISH.test(source[at - 1]) && WORDISH.test(source[at])) continue;
 		const end = matchAt(source, at, word, typo);
 		if (end !== null) return { start: at, end };
 	}
@@ -240,6 +251,11 @@ export interface ProjectionInput {
 	 * removed (default) or kept as struck-through text.
 	 */
 	erasedAs?: "delete" | "strikethrough";
+	/**
+	 * Append the highlights that found no place in the text (the default).
+	 * The two-way merge lists them with the other changes it could not apply.
+	 */
+	listUnplaced?: boolean;
 }
 
 export interface ProjectionResult {
@@ -248,7 +264,17 @@ export interface ProjectionResult {
 	placed: number;
 	/** Highlights whose text could not be located. */
 	unplaced: Highlight[];
+	/** Marks the text does not show, and why — highlights aside. */
+	unapplied: PendingChange[];
 }
+
+/** A jump this far past the cursor needs the words after it to follow. */
+const JUMP = 60;
+/**
+ * How far a missed word is looked for again — past a long link URL, say —
+ * when the words after it confirm the place.
+ */
+const FAR = 2000;
 
 /**
  * The note with every mark inserted. Returns null when the text and the
@@ -256,13 +282,18 @@ export interface ProjectionResult {
  */
 export function projectOntoSource(input: ProjectionInput): ProjectionResult | null {
 	const words = input.layout.lines.flatMap((line) =>
-		line.words.map((word) => ({ ...word, page: line.page, block: line.block })),
+		line.words.map((word) => ({ ...word, page: line.page, block: line.block, y: line.y })),
 	);
 	if (words.length === 0 || input.source.trim() === "") return null;
 
 	// Walk both sides forward together. A word that cannot be found (a title
-	// the note does not carry, an inlined embed) costs its own mark, and the
-	// cursor stays put so the next word can still line up.
+	// the note does not carry, an inlined embed) costs its own mark. A hit
+	// after a miss, or far past the cursor, only counts when the next words
+	// follow right behind it — a short common word must not drag the cursor
+	// to its next occurrence. A word not found nearby is looked for further
+	// on, where a longer run of the words after it has to confirm it: text
+	// the layout skipped (a long link, an embed's target) must not lose the
+	// rest of the note.
 	const ranges = new Map<number, Range>();
 	// Absent means version 1, the same convention as the mapping entry the
 	// layout is rebuilt from (id/mapping.ts) — a legacy layout carries "--"
@@ -271,20 +302,49 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	const typo = input.layout.typo ?? 1;
 	const skip = hiddenRemarks(input.source, input.layout.remarksInPlace);
 	const start = syncPoint(input.source, words, typo, skip);
+	const followed = (from: number, index: number, count: number) => {
+		if (index + count >= words.length) return false;
+		let at = from;
+		for (let next = index + 1; next <= index + count; next++) {
+			const hit = findWord(input.source, at, words[next].text, typo, 40, skip);
+			if (hit === null) return false;
+			at = hit.end;
+		}
+		return true;
+	};
 	let cursor = 0;
 	let found = 0;
-	for (const word of words.slice(start)) {
-		const hit = findWord(input.source, cursor, word.text, typo, WINDOW, skip);
-		if (hit === null) continue;
-		ranges.set(word.id, hit);
+	let missed = 0;
+	for (let index = start; index < words.length; index++) {
+		const text = words[index].text;
+		let hit = findWord(input.source, cursor, text, typo, WINDOW, skip);
+		// Near the end of the layout there is nothing left to confirm with.
+		const lastWords = index + 2 >= words.length;
+		if (hit !== null && (missed > 0 || hit.start - cursor > JUMP) && !lastWords && !followed(hit.end, index, 2)) hit = null;
+		for (let from = cursor; hit === null && !lastWords; ) {
+			const far = findWord(input.source, from, text, typo, FAR - (from - cursor), skip);
+			if (far === null) break;
+			if (followed(far.end, index, Math.min(4, words.length - 1 - index))) hit = far;
+			from = far.start + 1;
+		}
+		if (hit === null) {
+			missed++;
+			continue;
+		}
+		ranges.set(words[index].id, hit);
 		cursor = hit.end;
 		found++;
+		missed = 0;
 	}
 	if (found < (words.length - start) / 4) return null; // not the same document
 
 	const spans: { kind: string; color?: number; rgb?: string; start: number; end: number }[] =
 		[];
 	let placed = 0;
+	const unapplied: PendingChange[] = [];
+	const wordText = new Map(words.map((word) => [word.id, word.text]));
+	const named = (mark: ImportedMark, ids: number[] = mark.words ?? []) =>
+		mark.target ?? ids.map((id) => wordText.get(id) ?? "").join(" ");
 
 	// Task gestures (GP_E5_S12): a tick in a drawn checkbox marks the task
 	// line done; a strike-through covering most of a task line cancels it
@@ -311,9 +371,10 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 		}
 	}
 	for (const [line, struck] of struckPerLine) {
+		// Words proper: a bullet or bracket typeset as text is not half a task.
 		const onLine = words.filter((word) => {
 			const range = ranges.get(word.id);
-			return range !== undefined && lineOf(range.start) === line;
+			return range !== undefined && lineOf(range.start) === line && WORDISH.test(word.text);
 		}).length;
 		// Strictly more than half: striking one word of a two-word task is a
 		// word-level strike, not a cancellation.
@@ -332,6 +393,11 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	for (const mark of input.marks) {
 		if (mark.kind !== "erased") continue;
 		const covered = (mark.words ?? []).map((id) => ranges.get(id)).filter(isRange);
+		const lost = (mark.words ?? []).filter((id) => !ranges.has(id));
+		if (lost.length > 0) {
+			const target = covered.length === 0 ? named(mark) : lost.map((id) => wordText.get(id) ?? "").join(" ");
+			unapplied.push({ page: mark.page, text: `“${target}” erased — not found in the note` });
+		}
 		if (covered.length === 0) continue;
 		for (const id of mark.words ?? []) erased.add(id);
 		if (erasedAs === "strikethrough") {
@@ -346,21 +412,39 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	for (const mark of input.marks) {
 		if (mark.kind !== "moved") continue;
 		const ids = [...(mark.words ?? [])].sort((a, b) => a - b);
+		if (ids.length === 0) continue;
+		const notMoved = (why: string) => unapplied.push({ page: mark.page, text: `“${named(mark, ids)}” moved — ${why}` });
 		const anchorId = mark.moveAfter ?? mark.moveBefore;
-		const anchor = anchorId === undefined ? undefined : ranges.get(anchorId);
-		if (ids.length === 0 || anchor === undefined || anchorId === undefined) continue;
-		if (erased.has(anchorId) || ids.some((id) => erased.has(id) || !ranges.has(id))) continue;
+		if (anchorId === undefined) {
+			notMoved("not next to any word, so its new place in the text is unclear");
+			continue;
+		}
+		const anchor = ranges.get(anchorId);
+		if (anchor === undefined || ids.some((id) => !ranges.has(id))) {
+			notMoved("not found in the note");
+			continue;
+		}
+		if (erased.has(anchorId) || ids.some((id) => erased.has(id))) {
+			notMoved("it was erased, or put next to a word that was");
+			continue;
+		}
 		// Only a contiguous run of words moves: a lasso across a gap would
 		// otherwise drag the words in between along.
-		if (ids.some((id, i) => i > 0 && id !== ids[i - 1] + 1)) continue;
+		if (ids.some((id, i) => i > 0 && id !== ids[i - 1] + 1)) {
+			notMoved("its words were not next to each other");
+			continue;
+		}
 		const start = ranges.get(ids[0])!.start;
 		const end = ranges.get(ids[ids.length - 1])!.end;
 		if (anchor.start >= start && anchor.end <= end) continue; // into itself
 		const text = input.source.slice(start, end);
-		// A phrase spanning lines, or cutting through inline markup, is reported
-		// in the summary but not applied: moving half a **bold** span would
-		// re-bold the wrong words.
-		if (text.includes("\n") || !balancedInline(text)) continue;
+		// A phrase spanning lines, or cutting through inline markup, is listed
+		// but not applied: moving half a **bold** span would re-bold the wrong
+		// words.
+		if (text.includes("\n") || !balancedInline(text)) {
+			notMoved("it runs across a line break or through formatting");
+			continue;
+		}
 		for (const id of ids) removed.push(ranges.get(id)!);
 		edits.push(
 			mark.moveAfter !== undefined
@@ -372,18 +456,28 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	}
 	edits.push(...removalEdits(input.source, removed));
 
+	const styles = input.styles ?? DEFAULT_MARK_STYLES;
 	for (const mark of input.marks) {
 		if (mark.kind === "erased" || mark.kind === "moved") continue;
 		const covered = (mark.words ?? [])
 			.filter((id) => !erased.has(id))
 			.map((id) => ranges.get(id))
 			.filter(isRange);
-		if (covered.length === 0) continue;
+		if (covered.length === 0) {
+			// Words that are gone need no mark; words never found do.
+			const lost = (mark.words ?? []).some((id) => !ranges.has(id));
+			if (lost && styles[mark.kind as keyof MarkStyles] !== "none") {
+				unapplied.push({ page: mark.page, text: `“${named(mark)}” ${DONE[mark.kind] ?? mark.kind} — not found in the note` });
+			}
+			continue;
+		}
 		const line = lineOf(Math.min(...covered.map((range) => range.start)));
 		if (mark.kind === "checkbox" || mark.kind === "checkbox-cancel") {
 			if (TASK_LINE_RE.test(sourceLines[line])) {
 				(mark.kind === "checkbox" ? done : cancelled).add(line);
 				placed++;
+			} else {
+				unapplied.push({ page: mark.page, text: `“${named(mark)}” ${DONE[mark.kind]} — that line is not a task in the note` });
 			}
 			continue;
 		}
@@ -427,17 +521,26 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	// rewrite addresses lines by their untouched-source index (applySpans
 	// only inserts inline, so those indices still hold here).
 	markdown = applyTaskStates(markdown, done, cancelled);
-	markdown = applyBlockMarks(markdown, input, words, ranges);
+	markdown = applyBlockMarks(markdown, input, words, ranges, unapplied);
 
-	if (unplaced.length > 0) {
+	if (unplaced.length > 0 && input.listUnplaced !== false) {
 		markdown += "\n\n**Highlights that could not be placed in the text**\n\n";
 		for (const highlight of unplaced) {
 			const color = rgbName(highlight.rgb) ?? colorName(highlight.color);
 			markdown += `- ==${highlight.text}==${color === undefined ? "" : ` ^[${color}]`}\n`;
 		}
 	}
-	return { markdown: markdown.trimEnd(), placed, unplaced };
+	return { markdown: markdown.trimEnd(), placed, unplaced, unapplied };
 }
+
+/** What a mark did to its words, for the list of what could not be applied. */
+const DONE: Record<string, string> = {
+	strikethrough: "struck through",
+	underline: "underlined",
+	circle: "circled",
+	checkbox: "ticked",
+	"checkbox-cancel": "struck off",
+};
 
 /**
  * A markdown task line: bullet, then a checkbox marker — also inside a quote
@@ -467,11 +570,15 @@ function isRange(range: Range | undefined): range is Range {
 	return range !== undefined;
 }
 
-/** The layout words a highlight's text covers, on its own page. */
+/**
+ * The layout words a highlight covers: the words the highlighter went over
+ * when it says so, else the first run of its text on its own page.
+ */
 function wordIdsOf(
 	words: { id: number; text: string; page: number }[],
 	highlight: Highlight,
 ): number[] {
+	if (highlight.words !== undefined && highlight.words.length > 0) return highlight.words;
 	const wanted = highlight.text.trim().split(/\s+/);
 	if (wanted.length === 0) return [];
 	for (let at = 0; at + wanted.length <= words.length; at++) {
@@ -645,10 +752,9 @@ function beforeMarkup(source: string, at: number): number {
  * markdown for striking a lone quote mark.
  */
 function tightenToWord(source: string, span: Range): Range | null {
-	const wordish = /[\p{L}\p{N}]/u;
 	let { start, end } = span;
-	while (start < end && !wordish.test(source[start])) start++;
-	while (end > start && !wordish.test(source[end - 1])) end--;
+	while (start < end && !WORDISH.test(source[start])) start++;
+	while (end > start && !WORDISH.test(source[end - 1])) end--;
 	return end > start ? { start, end } : null;
 }
 
@@ -691,8 +797,9 @@ function splitAtOuterEdges<T extends { kind: string; start: number; end: number 
 function applyBlockMarks(
 	markdown: string,
 	input: ProjectionInput,
-	words: { id: number; text: string; block: number }[],
+	words: { id: number; text: string; block: number; page: number; y: number }[],
 	ranges: Map<number, Range>,
+	unapplied: PendingChange[],
 ): string {
 	const lineOf = lineIndexer(input.source);
 	const lines = markdown.split("\n");
@@ -704,14 +811,20 @@ function applyBlockMarks(
 		const own = words.filter((word) => blocks.has(word.block) && ranges.has(word.id));
 		const touched = own.map((word) => lineOf(ranges.get(word.id)!.start));
 
-		if (mark.kind === "margin" && touched.length > 0) {
+		if (mark.kind === "margin") {
+			if (touched.length === 0 && blocks.size > 0) {
+				unapplied.push({ page: mark.page, text: `marked in the margin beside “${mark.quote ?? ""}” — not found in the note` });
+			}
 			for (let line = Math.min(...touched); line <= Math.max(...touched); line++) {
 				quoted.add(line);
 			}
 			continue;
 		}
 		if (mark.kind === "note") {
-			const anchor = anchorLine(mark, words, ranges, lineOf, lines.length - 1);
+			// The ink's place on its page; an added page's ink is on a page of its own.
+			const device = mark.addedPage === undefined && mark.strokes !== undefined ? strokeBounds(mark.strokes.map((points) => ({ points }))) : null;
+			const ink = device === null ? null : deviceBoundsToPdf(device, input.layout);
+			const anchor = anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1);
 			// A whole page added on the device is not a remark in the margin;
 			// say what it is, so a page of thinking is not mistaken for a
 			// scribble (GP_E3_S20).
@@ -741,10 +854,12 @@ function applyBlockMarks(
 	// and the lines after it would run on into the remark.
 	const placed = new Map<number, string[]>();
 	for (const [line, remark] of remarks) {
-		const end = blockEnd(lines, line);
+		const end = line < 0 ? -1 : blockEnd(lines, line);
 		placed.set(end, [...(placed.get(end) ?? []), ...remark]);
 	}
 	const out: string[] = [];
+	const top = placed.get(-1);
+	if (top !== undefined) out.push(...top, ...(lines[0].trim() === "" ? [] : [""]));
 	lines.forEach((line, index) => {
 		out.push(quoted.has(index) && !line.startsWith(">") ? `> ${line}` : line);
 		const remark = placed.get(index);
@@ -816,22 +931,43 @@ function lineIndexer(source: string): (offset: number) => number {
 	};
 }
 
-/** The line a free remark belongs under: the last line of its quoted text. */
+/**
+ * The line a remark belongs under. Written against a row: the last line of
+ * that row's text — where the text repeats, the occurrence on the remark's
+ * page nearest its ink. Free, with no row near it: after the nearest line
+ * above it on its page, or before the text when nothing is (-1).
+ */
 function anchorLine(
 	mark: ImportedMark,
-	words: { id: number; text: string }[],
+	words: { id: number; text: string; page: number; y: number }[],
 	ranges: Map<number, Range>,
 	lineOf: (offset: number) => number,
+	ink: Bounds | null,
 	fallback: number,
 ): number {
+	// PDF points, y upwards; another page counts as far away.
+	const distance = (word: { page: number; y: number }) =>
+		(mark.page === undefined || word.page === mark.page ? 0 : 1e6) +
+		(ink === null ? 0 : Math.max(0, ink.minY - word.y, word.y - ink.maxY));
 	const quote = mark.quote?.trim();
-	if (quote === undefined || quote === "") return fallback;
-	const wanted = quote.split(/\s+/).slice(0, 4);
-	for (let at = 0; at + wanted.length <= words.length; at++) {
-		const run = words.slice(at, at + wanted.length);
-		if (!run.every((word, index) => word.text === wanted[index])) continue;
-		const range = ranges.get(run[run.length - 1].id);
-		if (range !== undefined) return lineOf(range.start);
+	if (quote !== undefined && quote !== "") {
+		const wanted = quote.split(/\s+/).slice(0, 4);
+		let best: { line: number; distance: number } | undefined;
+		for (let at = 0; at + wanted.length <= words.length; at++) {
+			const run = words.slice(at, at + wanted.length);
+			if (!run.every((word, index) => word.text === wanted[index])) continue;
+			const range = ranges.get(run[run.length - 1].id);
+			if (range === undefined) continue;
+			const away = distance(run[0]);
+			if (best === undefined || away < best.distance) best = { line: lineOf(range.start), distance: away };
+		}
+		if (best !== undefined) return best.line;
 	}
-	return fallback;
+	const page = mark.page;
+	if (page === undefined) return fallback;
+	const centre = ink === null ? -Infinity : (ink.minY + ink.maxY) / 2;
+	// Words run in document order, so the last one above is the nearest.
+	const above = words.filter((word) => ranges.has(word.id) && (word.page < page || (word.page === page && word.y > centre)));
+	const last = above[above.length - 1];
+	return last === undefined ? -1 : lineOf(ranges.get(last.id)!.start);
 }

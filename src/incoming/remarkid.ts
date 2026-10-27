@@ -6,7 +6,9 @@
  * its image overwritten with someone else's ink and a correction typed
  * under it pinned to the wrong strokes. The ink itself does not move: the
  * same strokes read from the same notebook hash to the same id on every
- * import, and a remark that was added to becomes a new one.
+ * import. A remark that was added to gets a new id, but its callout is
+ * found again by the ink it shares with the old one (isSameRemark) and
+ * updated in place rather than shown twice.
  *
  * The id names the remark's image and is written into its callout as a
  * block id (`^ink-<id>`), so it can be linked to and found again even when
@@ -28,6 +30,13 @@ function fnv(values: number[], basis: number): number {
 	return hash >>> 0;
 }
 
+/** 12 hex digits from two FNV passes over the values. */
+function idOf(values: number[]): string {
+	const a = fnv(values, 0x811c9dc5).toString(16).padStart(8, "0");
+	const b = fnv(values, 0x050c5d1f).toString(16).padStart(8, "0");
+	return `${a}${b.slice(0, 4)}`;
+}
+
 /**
  * 12 hex digits identifying a remark by its strokes: whole device units,
  * stroke by stroke, so float noise in a re-read file cannot change it.
@@ -38,9 +47,12 @@ export function remarkId(strokes: { points: { x: number; y: number }[] }[]): str
 		values.push(0x7fffffff, stroke.points.length);
 		for (const p of stroke.points) values.push(Math.round(p.x) | 0, Math.round(p.y) | 0);
 	}
-	const a = fnv(values, 0x811c9dc5).toString(16).padStart(8, "0");
-	const b = fnv(values, 0x050c5d1f).toString(16).padStart(8, "0");
-	return `${a}${b.slice(0, 4)}`;
+	return idOf(values);
+}
+
+/** 12 hex digits for a piece of text, the same way: the id of a block the plugin wrote. */
+export function textId(text: string): string {
+	return idOf(Array.from(text, (ch) => ch.codePointAt(0) ?? 0));
 }
 
 /** The block-id line that marks a remark in a callout (`> ^ink-…`). */
@@ -51,6 +63,93 @@ export function remarkIdLine(id: string, quoted = true): string {
 /** Whether a note line is a remark's block-id line. */
 export function isRemarkIdLine(line: string): boolean {
 	return new RegExp(`^(>\\s*)*\\^${REMARK_ID_PREFIX}[0-9a-f]+\\s*$`).test(line.trim());
+}
+
+/**
+ * Block-id prefix of a callout showing the tablet's side of a clash
+ * (sync/merge3.ts); the rest is the textId of what it shows, so the same
+ * clash always carries the same id.
+ */
+export const CONFLICT_ID_PREFIX = `${REMARK_ID_PREFIX}conflict-`;
+
+/** Block id of the note's one callout of tablet changes not applied (sync/twoway.ts). */
+export const PENDING_ID = `${REMARK_ID_PREFIX}pending`;
+
+/** A block-id line of another kind the plugin writes (`> ^ink-conflict-…`, `> ^ink-pending`). */
+export function blockIdLine(id: string, quoted = true): string {
+	return `${quoted ? "> " : ""}^${id}`;
+}
+
+/**
+ * Whether a line is any block-id line the plugin writes — a remark's, a
+ * clash's or the pending callout's. They are for Obsidian; on paper they
+ * would be stray "^ink-…" lines.
+ */
+export function isPluginIdLine(line: string): boolean {
+	return new RegExp(`^(>\\s*)*\\^${REMARK_ID_PREFIX}(conflict-[0-9a-f]+|pending|[0-9a-f]+)\\s*$`).test(line.trim());
+}
+
+/** A remark's ink as an earlier import kept it: device units, absolute or from its own corner. */
+export interface RemarkInk {
+	page?: number;
+	strokes: { x: number; y: number }[][];
+}
+
+const inkLength = (points: { x: number; y: number }[]): number => {
+	let total = 0;
+	for (let i = 1; i < points.length; i++) {
+		const dx = points[i].x - points[i - 1].x;
+		const dy = points[i].y - points[i - 1].y;
+		total += Math.sqrt(dx * dx + dy * dy);
+	}
+	return Math.max(total, 1);
+};
+
+/** Tolerance in device units for "the same point" of a stroke read again (a stored copy is rounded). */
+const SAME_POINT = 1.5;
+
+/**
+ * Whether `next` is the remark `known` with strokes added or erased — the
+ * same remark, though its ink (and so its id) changed. Same page when both
+ * are known, and at least half of the larger one's ink, by length, is shared
+ * stroke for stroke at one common shift: the strokes that were there stay
+ * where they were. The shift allows ink kept from its own corner, and a
+ * remark lassoed elsewhere as a whole is still that remark.
+ */
+export function isSameRemark(known: RemarkInk, next: RemarkInk): boolean {
+	if (known.page !== undefined && next.page !== undefined && known.page !== next.page) return false;
+	const old = known.strokes.filter((s) => s.length > 0);
+	const now = next.strokes.filter((s) => s.length > 0);
+	if (old.length === 0 || now.length === 0) return false;
+	const same = (a: { x: number; y: number }[], b: { x: number; y: number }[], dx: number, dy: number) =>
+		a.length === b.length && a.every((p, i) => Math.abs(b[i].x - p.x - dx) <= SAME_POINT && Math.abs(b[i].y - p.y - dy) <= SAME_POINT);
+	// Candidate shifts: one per pair of strokes with the same shape.
+	const shifts: { dx: number; dy: number }[] = [];
+	for (const a of old) {
+		for (const b of now) {
+			const dx = b[0].x - a[0].x;
+			const dy = b[0].y - a[0].y;
+			if (same(a, b, dx, dy) && !shifts.some((s) => Math.abs(s.dx - dx) <= SAME_POINT && Math.abs(s.dy - dy) <= SAME_POINT)) {
+				shifts.push({ dx, dy });
+			}
+		}
+	}
+	const total = Math.max(
+		old.reduce((sum, s) => sum + inkLength(s), 0),
+		now.reduce((sum, s) => sum + inkLength(s), 0),
+	);
+	for (const { dx, dy } of shifts) {
+		const used = new Set<number>();
+		let shared = 0;
+		for (const a of old) {
+			const match = now.findIndex((b, i) => !used.has(i) && same(a, b, dx, dy));
+			if (match === -1) continue;
+			used.add(match);
+			shared += inkLength(a);
+		}
+		if (shared >= total * 0.5) return true;
+	}
+	return false;
 }
 
 /** A remark as the note refers to it: by id, or by its image (notes from before ids). */

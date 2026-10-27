@@ -293,7 +293,9 @@ describe("ink import end to end", () => {
 		expect(scan.ink).toMatchObject({ erasedWords: 1, movedWords: 1, partialWords: 1, transcribed: 1 });
 		expect(highlights.map((h) => h.text)).toEqual(["intro words"]);
 		const kinds = marks.map((m) => m.kind).sort();
-		expect(kinds).toEqual(["erased", "moved", "note", "strikethrough"]);
+		// The half-erased "jumps" is not applied, but listed rather than dropped.
+		expect(kinds).toEqual(["erased", "moved", "note", "skipped", "strikethrough"]);
+		expect(marks.find((m) => m.kind === "skipped")?.unapplied).toContain("“jumps” partly erased");
 		const moved = marks.find((m) => m.kind === "moved")!;
 		expect(moved.moveAfter).toBe(wordId(r, "fox"));
 
@@ -506,22 +508,29 @@ describe("annotation block", () => {
 		expect(renderAnnotationBlock({ ...base, erasedAs: "strikethrough" }).text).toContain("The ~~quick~~ brown fox");
 	});
 
-	it("describes erased and moved words in the summary form", () => {
+	it("describes erased and moved words in the summary form, erased apart from struck through", () => {
 		const { render: r } = render();
-		const text = renderAnnotationBlock({
-			sourcePath: "Ink.md",
-			sourceName: "Ink",
-			highlights: [],
-			importedAt: "now",
-			marks: [
-				{ kind: "erased", page: 1, words: [wordId(r, "quick")], target: "quick" },
-				{ kind: "moved", page: 1, words: [wordId(r, "brown")], target: "brown", quote: "The quick brown fox" },
-				{ kind: "note", page: 1, quote: "second item", transcript: "check this", path: "x.png" },
-			],
-		}).text;
-		expect(text).toContain("~~quick~~ — erased on the reMarkable");
+		const block = (erasedAs?: "delete" | "strikethrough") =>
+			renderAnnotationBlock({
+				sourcePath: "Ink.md",
+				sourceName: "Ink",
+				highlights: [],
+				importedAt: "now",
+				erasedAs,
+				marks: [
+					{ kind: "erased", page: 1, words: [wordId(r, "quick")], target: "quick" },
+					{ kind: "strikethrough", page: 1, words: [wordId(r, "lazy")], target: "lazy" },
+					{ kind: "moved", page: 1, words: [wordId(r, "brown")], target: "brown", quote: "The quick brown fox" },
+					{ kind: "note", page: 1, quote: "second item", transcript: "check this", path: "x.png" },
+				],
+			}).text;
+		const text = block();
+		expect(text).toContain("“quick” — erased on the reMarkable");
+		expect(text).toContain("~~lazy~~ — struck through");
 		expect(text).toContain("“brown” — moved on the reMarkable");
 		expect(text).toContain("> check this");
+		// Kept struck through, as the copy would show it, and still named as erased.
+		expect(block("strikethrough")).toContain("~~quick~~ — erased on the reMarkable");
 	});
 });
 

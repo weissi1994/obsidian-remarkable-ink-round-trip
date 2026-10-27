@@ -206,6 +206,30 @@ describe("renderImportReport", () => {
 		expect(report).toContain("could not be lined up with the note");
 	});
 
+	it("lists every tablet change the note does not show", () => {
+		const results: PullResult[] = [
+			{
+				ok: true,
+				docId: "a",
+				notePath: "Nota.md",
+				highlightCount: 0,
+				scan: scan({
+					written: {
+						form: "copy",
+						unplaced: 1,
+						pending: ["Page 1: “brown” moved — not next to any word, so its new place in the text is unclear", "Page 2: “x” highlighted — not found in the note"],
+					},
+				}),
+			},
+		];
+		const report = renderImportReport({ ...base, results });
+		expect(report).toContain("not applied (2) — listed in the note under “Pending from reMarkable”:");
+		expect(report).toContain("      – Page 1: “brown” moved — not next to any word, so its new place in the text is unclear");
+		expect(report).toContain("      – Page 2: “x” highlighted — not found in the note");
+		// The highlight is among the listed items, not counted twice.
+		expect(report).not.toContain("highlight(s) not placed");
+	});
+
 	it("names the reason a summary was written", () => {
 		const changed: PullResult[] = [
 			{

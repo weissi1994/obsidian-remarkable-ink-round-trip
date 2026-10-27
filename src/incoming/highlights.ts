@@ -22,6 +22,12 @@ export interface Highlight {
 	 * (GP_E3_S16).
 	 */
 	rgb?: string;
+	/**
+	 * Ink fork: the layout words a freehand highlighter stroke went over, so
+	 * a phrase that occurs twice is highlighted where it was, not where it
+	 * first appears.
+	 */
+	words?: number[];
 }
 
 /** reMarkable colour indices seen in the wild, mapped to readable names. */

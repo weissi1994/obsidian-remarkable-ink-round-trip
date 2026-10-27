@@ -481,10 +481,16 @@ describe("task states inside quotes and callouts (#22)", () => {
 	beforeAll(async () => {
 		quoted = (await renderPdf(parseBlocks(QUOTED), { title: "Lijst", docId: "q" })).layout;
 	});
+	// The words of the phrase only: without preprocessing the whole callout is
+	// one laid-out line, title included, which a mark would never cover.
 	const idsOf = (phrase: string) => {
-		const line = quoted.lines.find((candidate) => candidate.text.includes(phrase));
-		if (line === undefined) throw new Error(`phrase not laid out: ${phrase}`);
-		return line.words.filter((word) => /\p{L}/u.test(word.text)).map((word) => word.id);
+		const wanted = phrase.split(" ");
+		const words = quoted.lines.flatMap((line) => line.words);
+		for (let at = 0; at + wanted.length <= words.length; at++) {
+			const run = words.slice(at, at + wanted.length);
+			if (run.every((word, i) => word.text === wanted[i])) return run.map((word) => word.id);
+		}
+		throw new Error(`phrase not laid out: ${phrase}`);
 	};
 	const project = (marks: ImportedMark[]) =>
 		projectOntoSource({ source: QUOTED, layout: quoted, marks, highlights: [] });

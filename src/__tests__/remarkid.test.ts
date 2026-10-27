@@ -3,11 +3,14 @@ import {
 	confirmAllRemarks,
 	confirmRemarkAt,
 	findRemark,
+	isPluginIdLine,
 	isRemarkIdLine,
+	isSameRemark,
 	remarkAt,
 	remarkId,
 	remarkIdLine,
 	setRemarkTextAt,
+	textId,
 } from "../incoming/remarkid";
 
 const stroke = (...xy: [number, number][]) => ({ points: xy.map(([x, y]) => ({ x, y })) });
@@ -41,6 +44,44 @@ describe("remark id", () => {
 		expect(isRemarkIdLine("^ink-3f9a2c1b0d4e")).toBe(true);
 		expect(isRemarkIdLine("> see ^ink-3f9a2c1b0d4e")).toBe(false);
 		expect(isRemarkIdLine("> hello")).toBe(false);
+	});
+});
+
+describe("a remark whose ink changed", () => {
+	const line = (x: number, y: number, n = 6) => Array.from({ length: n }, (_, i) => ({ x: x + i * 4, y: y + (i % 2) * 7 }));
+	const word = [line(100, 300), line(130, 300), line(160, 302)];
+
+	it("is the same remark with a stroke added or one erased", () => {
+		expect(isSameRemark({ page: 1, strokes: word }, { page: 1, strokes: [...word, line(190, 301)] })).toBe(true);
+		expect(isSameRemark({ page: 1, strokes: word }, { page: 1, strokes: word.slice(1) })).toBe(true);
+	});
+
+	it("is recognised from ink kept from its own corner, or lassoed elsewhere whole", () => {
+		const shift = (strokes: typeof word, dx: number, dy: number) => strokes.map((s) => s.map((p) => ({ x: p.x + dx, y: p.y + dy })));
+		expect(isSameRemark({ strokes: shift(word, -100, -300) }, { page: 2, strokes: [...word, line(190, 301)] })).toBe(true);
+		expect(isSameRemark({ page: 1, strokes: word }, { page: 1, strokes: shift(word, 0, 400) })).toBe(true);
+	});
+
+	it("is another remark on another page, or with mostly other ink", () => {
+		expect(isSameRemark({ page: 1, strokes: word }, { page: 2, strokes: word })).toBe(false);
+		const other = [line(100, 900, 9), line(140, 905, 9), line(180, 910, 9), line(220, 915, 9)];
+		expect(isSameRemark({ page: 1, strokes: word }, { page: 1, strokes: other })).toBe(false);
+		// One stroke in common is not "mostly shared".
+		expect(isSameRemark({ page: 1, strokes: word }, { page: 1, strokes: [word[0], ...other] })).toBe(false);
+	});
+});
+
+describe("ids of other blocks the plugin writes", () => {
+	it("are stable for the same text and told apart from a remark's", () => {
+		expect(textId("> The quick ~~brown~~ fox")).toBe(textId("> The quick ~~brown~~ fox"));
+		expect(textId("> The quick ~~brown~~ fox")).not.toBe(textId("> The quick brown fox"));
+		expect(textId("x")).toMatch(/^[0-9a-f]{12}$/);
+		expect(isRemarkIdLine("> ^ink-conflict-3f9a2c1b0d4e")).toBe(false);
+		expect(isRemarkIdLine("> ^ink-pending")).toBe(false);
+		for (const id of ["> ^ink-3f9a2c1b0d4e", "> ^ink-conflict-3f9a2c1b0d4e", "> ^ink-pending"]) {
+			expect(isPluginIdLine(id)).toBe(true);
+		}
+		expect(isPluginIdLine("> ^ink-pendingX")).toBe(false);
 	});
 });
 

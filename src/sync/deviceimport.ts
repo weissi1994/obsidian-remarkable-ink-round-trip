@@ -105,3 +105,29 @@ export function importedNote(docId: string, pages: { image?: string; text?: stri
 		.join("\n\n");
 	return `---\nremarkable-id: ${docId}\n---\n${blocks}\n`;
 }
+
+/**
+ * Bring each notebook in on its own: one that cannot be read is reported and
+ * left for the next run, never a reason to stop the rest. `bringIn` returns
+ * the new note's path, or null when the notebook turned out not to be one to
+ * bring in; `saveProgress` runs after every notebook, so an interrupted run
+ * does not read the same notebooks again.
+ */
+export async function importNotebooks(
+	notebooks: NewNotebook[],
+	bringIn: (notebook: NewNotebook) => Promise<string | null>,
+	saveProgress: () => Promise<void>,
+): Promise<{ created: string[]; failed: { notebook: NewNotebook; error: string }[] }> {
+	const created: string[] = [];
+	const failed: { notebook: NewNotebook; error: string }[] = [];
+	for (const notebook of notebooks) {
+		try {
+			const path = await bringIn(notebook);
+			if (path !== null) created.push(path);
+		} catch (error) {
+			failed.push({ notebook, error: error instanceof Error ? error.message : String(error) });
+		}
+		await saveProgress();
+	}
+	return { created, failed };
+}

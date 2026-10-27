@@ -4,6 +4,7 @@ import { PdfLayout } from "../convert/pdf";
 import { renderPdf } from "./helpers/pdfrender";
 import { preprocess } from "../preprocess/preprocess";
 import { projectOntoSource } from "../incoming/sourceprojection";
+import { deviceGridFor } from "../incoming/strokerender";
 import type { ImportedMark } from "../incoming/pull";
 
 /** A note with the formatting the first annotated copy used to lose. */
@@ -307,5 +308,132 @@ describe("projectOntoSource inside a quote that holds blocks (#22)", () => {
 		expect(out).toContain("> | Monday | ~~Review~~ notes |");
 		expect(out).toContain("> - [ ] call **back**");
 		expect(out).toContain("> | --- | --- |");
+	});
+});
+
+/** A hand-made layout: one laid-out line per row, 30 points apart down each page. */
+function layoutOf(rows: { text: string; block: number; page?: number }[]): PdfLayout {
+	let id = 0;
+	const onPage = new Map<number, number>();
+	const lines = rows.map((row) => {
+		const page = row.page ?? 1;
+		const index = onPage.get(page) ?? 0;
+		onPage.set(page, index + 1);
+		const words = row.text.split(" ").map((text, k) => ({ id: id++, text, x: 40 + k * 40, width: 35 }));
+		return { page, x: 40, y: 550 - index * 30, size: 11, text: row.text, block: row.block, role: "paragraph" as const, words };
+	});
+	return { pageWidth: 447, pageHeight: 596, pageCount: Math.max(...lines.map((line) => line.page)), lines };
+}
+
+/** A remark's ink spanning PDF y from `top` down to `bottom` (points, y upwards), in device units. */
+function inkBetween(layout: PdfLayout, top: number, bottom: number) {
+	const grid = deviceGridFor(layout);
+	const down = (y: number) => ((layout.pageHeight - y) * grid.height) / layout.pageHeight;
+	return [[{ x: 0, y: down(top) }, { x: 60, y: down(bottom) }]];
+}
+
+const remark = (extra: Partial<ImportedMark>): ImportedMark => ({ kind: "note", page: 1, transcript: "my remark", id: "aaaaaaaaaaaa", ...extra });
+
+describe("projectOntoSource lines words up exactly", () => {
+	it("does not take a word for the start of a longer one", () => {
+		// The layout has a word the note does not ("theory" was dropped); the
+		// next word must not then be found inside it.
+		const layout = layoutOf([{ text: "In the plan works and the rest follows.", block: 0 }]);
+		const out = projectOntoSource({
+			source: "In theory the plan works and the rest follows.",
+			layout,
+			marks: [{ kind: "strikethrough", page: 1, words: [layout.lines[0].words[1].id] }],
+			highlights: [],
+		})?.markdown;
+		expect(out).toBe("In theory ~~the~~ plan works and the rest follows.");
+	});
+
+	it("finds its place again after text the page does not show, like a long link", () => {
+		const source = [
+			"Intro words here for the sync point.",
+			"",
+			`See [the guide](https://example.com/${"x".repeat(240)}) for details about the plan and more.`,
+			"",
+			"Closing words of the note.",
+		].join("\n");
+		const layout = layoutOf([
+			{ text: "Intro words here for the sync point.", block: 0 },
+			{ text: "See the guide for details about the plan and more.", block: 1 },
+			{ text: "Closing words of the note.", block: 2 },
+		]);
+		const ids = layout.lines[1].words.filter((word) => word.text === "details" || word.text === "about").map((word) => word.id);
+		const result = projectOntoSource({ source, layout, marks: [{ kind: "strikethrough", page: 1, words: ids }], highlights: [] });
+		expect(result?.markdown).toContain(") for ~~details about~~ the plan");
+		expect(result?.unapplied).toEqual([]);
+	});
+
+	it("highlights the occurrence of a repeated phrase the highlighter went over", () => {
+		const layout = layoutOf([
+			{ text: "Remember to call Anna today.", block: 0 },
+			{ text: "And later call Anna today.", block: 1 },
+		]);
+		const second = layout.lines[1].words.slice(2).map((word) => word.id);
+		const out = projectOntoSource({
+			source: "Remember to call Anna today.\n\nAnd later call Anna today.",
+			layout,
+			marks: [],
+			highlights: [{ text: "call Anna today.", page: 1, rgb: "#ffed75", words: second }],
+		})?.markdown;
+		expect(out).toBe('Remember to call Anna today.\n\nAnd later <mark style="background: #ffed75">call Anna today.</mark>');
+	});
+
+	const REPEATED = ["Check the numbers.", "Something in between here.", "Check the numbers.", "The end of the note."];
+	const repeated = layoutOf(REPEATED.map((text, block) => ({ text, block })));
+	const project = (marks: ImportedMark[], layout = repeated, source = REPEATED.join("\n\n")) =>
+		projectOntoSource({ source, layout, marks, highlights: [] })!.markdown.split("\n");
+
+	it("puts a remark under the occurrence of its line it was written beside", () => {
+		// Row 3 sits at y 490: the ink is just under it.
+		const lines = project([remark({ quote: "Check the numbers.", strokes: inkBetween(repeated, 485, 470) })]);
+		const callout = lines.indexOf("> [!note] Remark");
+		expect(callout).toBeGreaterThan(lines.indexOf("Something in between here."));
+		expect(callout).toBeLessThan(lines.indexOf("The end of the note."));
+		expect(lines.slice(callout - 2, callout)).toEqual(["Check the numbers.", ""]);
+	});
+
+	it("puts a free remark after the nearest text above it on its page, not at the end of the note", () => {
+		// Between row 2 (y 520) and row 3 (y 490), with no row close enough to quote.
+		const lines = project([remark({ strokes: inkBetween(repeated, 512, 500) })]);
+		expect(lines.indexOf("> [!note] Remark")).toBe(lines.indexOf("Something in between here.") + 2);
+		// Above all the text: before it.
+		expect(project([remark({ strokes: inkBetween(repeated, 590, 580) })])[0]).toBe("> [!note] Remark");
+	});
+
+	it("puts a free remark without ink after the last text of its page", () => {
+		const twoPages = layoutOf([
+			{ text: "Page one starts here.", block: 0 },
+			{ text: "Page one ends here.", block: 1 },
+			{ text: "Page two has more words.", block: 2, page: 2 },
+		]);
+		const lines = project([remark({})], twoPages, "Page one starts here.\n\nPage one ends here.\n\nPage two has more words.");
+		expect(lines.indexOf("> [!note] Remark")).toBe(lines.indexOf("Page one ends here.") + 2);
+	});
+
+	it("says which marks it could not apply, and why", () => {
+		const layout = layoutOf([{ text: "The quick brown fox jumps over the lazy dog.", block: 0 }]);
+		const id = (text: string) => layout.lines[0].words.find((word) => word.text === text)!.id;
+		const result = projectOntoSource({
+			source: "The quick brown fox jumps over the lazy dog.",
+			layout,
+			marks: [
+				{ kind: "moved", page: 1, words: [id("brown")], target: "brown" },
+				{ kind: "erased", page: 1, words: [999], target: "ghost" },
+				{ kind: "strikethrough", page: 1, words: [998], target: "phantom" },
+				{ kind: "margin", page: 1, blocks: [7], quote: "elsewhere" },
+			],
+			highlights: [],
+		})!;
+		expect(result.markdown).toBe("The quick brown fox jumps over the lazy dog.");
+		expect(result.unapplied).toEqual([
+			{ page: 1, text: "“ghost” erased — not found in the note" },
+			{ page: 1, text: "“brown” moved — not next to any word, so its new place in the text is unclear" },
+			{ page: 1, text: "“phantom” struck through — not found in the note" },
+			{ page: 1, text: "marked in the margin beside “elsewhere” — not found in the note" },
+		]);
 	});
 });

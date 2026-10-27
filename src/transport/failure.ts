@@ -9,7 +9,7 @@
  */
 
 /** What kind of thing went wrong, as far as the message lets us tell. */
-export type FailureKind = "offline" | "auth" | "server" | "runtime" | "unknown";
+export type FailureKind = "offline" | "auth" | "rate-limit" | "server" | "runtime" | "unknown";
 
 const OFFLINE = [
 	// Android/okhttp, the mobile path
@@ -29,6 +29,10 @@ const OFFLINE = [
 ];
 
 const AUTH = ["401", "403", "unauthorized", "forbidden", "invalid token", "expired token"];
+
+// rmapi-js surfaces the 429 the fetch shim finally gave up on (after honoring
+// Retry-After) as the status code or its reason phrase.
+const RATE_LIMIT = ["429", "too many requests", "rate limit", "rate-limit"];
 
 const SERVER = ["500", "502", "503", "504", "bad gateway", "service unavailable"];
 
@@ -59,6 +63,7 @@ export function classifyFailure(error: unknown): FailureKind {
 	if (OFFLINE.some((needle) => message.includes(needle))) return "offline";
 	if (isMissingBytesMethod(message)) return "runtime";
 	if (AUTH.some((needle) => message.includes(needle))) return "auth";
+	if (RATE_LIMIT.some((needle) => message.includes(needle))) return "rate-limit";
 	if (SERVER.some((needle) => message.includes(needle))) return "server";
 	return "unknown";
 }
@@ -80,6 +85,12 @@ export function adviseFailure(kind: FailureKind): string {
 			return (
 				"The reMarkable cloud refused the credentials. Pair again in the plugin " +
 				"settings with a fresh one-time code."
+			);
+		case "rate-limit":
+			return (
+				"The reMarkable cloud limits how fast it accepts uploads and asked the plugin " +
+				"to slow down. Nothing is wrong with your setup and nothing was lost — the " +
+				"plugin waits and continues on the next sync."
 			);
 		case "server":
 			return "The reMarkable cloud itself returned an error. Nothing to fix here — try again later.";

@@ -29,7 +29,7 @@ export interface InkCluster {
 }
 
 /** Bounds of a set of strokes in device units, or null when there is no ink. */
-export function strokeBounds(strokes: Stroke[]): Bounds | null {
+export function strokeBounds(strokes: { points: { x: number; y: number }[] }[]): Bounds | null {
 	let minX = Infinity;
 	let minY = Infinity;
 	let maxX = -Infinity;

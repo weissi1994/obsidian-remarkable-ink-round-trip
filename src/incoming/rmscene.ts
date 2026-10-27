@@ -15,7 +15,10 @@
  * - groups — moved ink can land in a group anchored to text, whose x origin
  *   (anchor_origin_x) the stroke coordinates are relative to;
  * - the scene info's paper size, which says which canvas the page was made
- *   on — the Paper Pro writes (1620, 2160).
+ *   on — the Paper Pro writes (1620, 2160);
+ * - typed text (the RootText block): a CRDT sequence of character runs,
+ *   tombstones and inline format codes, plus paragraph styles keyed by the
+ *   newline that opens each paragraph — resolved here the way rmscene does.
  *
  * Same tolerance discipline as upstream: an unreadable block costs that
  * block, a truncated file returns what was read (N3).
@@ -42,15 +45,63 @@ export interface SceneLine {
 	rgb?: string;
 	/**
 	 * True when the line sits in a group anchored to typed text: its y is
-	 * relative to a text position this reader does not compute.
+	 * relative to a text position this reader can only estimate.
 	 */
 	anchored: boolean;
+	/**
+	 * Where the typed text puts the anchor of an anchored line, to add to its
+	 * y — rmc's layout: a fixed height per paragraph style and no line wrap,
+	 * so ink below a paragraph that wraps on the tablet lands too high.
+	 * Absent when the anchor is not a character this page's text has.
+	 */
+	textAnchorY?: number;
 }
 
 export interface DeletedRange {
 	author: number;
 	from: number;
 	length: number;
+}
+
+/** Typed-text paragraph styles by the code the page stores (rmscene ParagraphStyle). */
+export const PARAGRAPH_STYLES = [
+	"basic",
+	"plain",
+	"heading",
+	"bold",
+	"bullet",
+	"bullet2",
+	"checkbox",
+	"checkbox-checked",
+] as const;
+export type ParagraphStyle = (typeof PARAGRAPH_STYLES)[number];
+
+export interface TextSpan {
+	text: string;
+	bold: boolean;
+	italic: boolean;
+}
+
+/** A paragraph of typed text as the writer takes it. */
+export interface TypedParagraph {
+	style: ParagraphStyle;
+	spans: TextSpan[];
+}
+
+export interface TextParagraph extends TypedParagraph {
+	/** The newline that opens the paragraph, (0, 0) for the first; styles are keyed by it. */
+	startId: ItemId;
+	text: string;
+	/** Item id of each code point of `text`; erased characters are not in either. */
+	charIds: ItemId[];
+}
+
+/** The page's typed text: paragraphs in document order, and the text box in page units. */
+export interface SceneText {
+	paragraphs: TextParagraph[];
+	x: number;
+	y: number;
+	width: number;
 }
 
 export interface RmScene {
@@ -60,6 +111,8 @@ export interface RmScene {
 	/** Author index → UUID hex, for the diagnostic log. */
 	authors: Map<number, string>;
 	blockTypes: Record<number, number>;
+	/** Absent when the page has no RootText block or it could not be read. */
+	text?: SceneText;
 }
 
 const TAG_BYTE1 = 0x1;
@@ -153,6 +206,12 @@ class Reader {
 		const author = this.u8();
 		const counter = this.varuint();
 		return { author, counter };
+	}
+	utf8(length: number): string {
+		if (length > this.remaining) throw new Error("string past end of block");
+		const bytes = new Uint8Array(this.view.buffer, this.view.byteOffset + this.offset, length);
+		this.offset += length;
+		return new TextDecoder().decode(bytes);
 	}
 	id(index: number): ItemId {
 		this.expect(index, TAG_ID);
@@ -271,6 +330,264 @@ function readTreeNode(reader: Reader): { id: ItemId; group: GroupInfo } {
 	return { id, group };
 }
 
+/** One code point, format code or erased character (value null) of the text sequence. */
+interface TextChar {
+	id: ItemId;
+	left: ItemId;
+	right: ItemId;
+	value: string | number | null;
+}
+
+interface RawRootText {
+	chars: TextChar[];
+	/** Newline id → paragraph style code. */
+	styles: Map<string, number>;
+	x: number;
+	y: number;
+	width: number;
+}
+
+/**
+ * Items store runs whose later characters have implicit ids (counter + i);
+ * other items' left/right ids point at those, so the sequence can only be
+ * ordered one character at a time (rmscene expand_text_item).
+ */
+function expandTextItem(
+	out: TextChar[],
+	id: ItemId,
+	left: ItemId,
+	right: ItemId,
+	deletedLength: number,
+	value: string | number,
+): void {
+	const units: (string | number | null)[] =
+		deletedLength > 0
+			? new Array<null>(deletedLength).fill(null)
+			: typeof value === "number"
+				? [value]
+				: Array.from(value);
+	let leftId = left;
+	units.forEach((unit, i) => {
+		const charId = { author: id.author, counter: id.counter + i };
+		const rightId = i === units.length - 1 ? right : { author: id.author, counter: id.counter + i + 1 };
+		out.push({ id: charId, left: leftId, right: rightId, value: unit });
+		leftId = charId;
+	});
+}
+
+function readRootText(reader: Reader): RawRootText {
+	reader.id(1);
+	const body = reader.sub(2);
+	const items = body.sub(1).sub(1);
+	const chars: TextChar[] = [];
+	const itemCount = items.varuint();
+	for (let i = 0; i < itemCount; i++) {
+		const item = items.sub(0);
+		const id = item.id(2);
+		const left = item.id(3);
+		const right = item.id(4);
+		const deletedLength = item.int(5);
+		let value: string | number = "";
+		if (item.has(6, TAG_LENGTH4)) {
+			const string = item.sub(6);
+			const length = string.varuint();
+			string.u8();
+			value = string.utf8(length);
+			// A format code rides on an empty string (rmscene read_string_with_format).
+			if (string.has(2, TAG_BYTE4)) value = string.int(2);
+		}
+		expandTextItem(chars, id, left, right, deletedLength, value);
+	}
+	const styles = new Map<string, number>();
+	const formats = body.sub(2).sub(1);
+	const styleCount = formats.varuint();
+	for (let i = 0; i < styleCount; i++) {
+		const charId = formats.crdtId();
+		formats.id(1);
+		const style = formats.sub(2);
+		style.expect(1, TAG_BYTE1);
+		styles.set(idKey(charId), style.u8());
+	}
+	const position = reader.sub(3);
+	const x = position.f64();
+	const y = position.f64();
+	return { chars, styles, x, y, width: reader.float(4) };
+}
+
+/** (0, 0): the start and end of every CRDT sequence, and the first paragraph's key. */
+const SEQUENCE_END: ItemId = { author: 0, counter: 0 };
+
+/**
+ * The CRDT sequence in document order: Kahn's algorithm over left → item →
+ * right, concurrent inserts broken by higher author first, then lower
+ * counter — rmscene's toposort_items, which matches the tablet's own order.
+ * Unknown neighbours count as the sequence ends. Throws on a cycle.
+ */
+function orderTextChars(chars: TextChar[]): TextChar[] {
+	const byKey = new Map(chars.map((char) => [idKey(char.id), char]));
+	const START = "start";
+	const FINISH = "finish";
+	const endKey = idKey(SEQUENCE_END);
+	const side = (id: ItemId, fallback: string): string => {
+		const key = idKey(id);
+		return key !== endKey && byKey.has(key) ? key : fallback;
+	};
+	const inDegree = new Map<string, number>([[START, 0], [FINISH, 0]]);
+	const dependents = new Map<string, string[]>();
+	const edge = (from: string, to: string): void => {
+		const list = dependents.get(from);
+		if (list === undefined) dependents.set(from, [to]);
+		else list.push(to);
+		inDegree.set(to, (inDegree.get(to) ?? 0) + 1);
+	};
+	for (const [key, char] of byKey) {
+		if (!inDegree.has(key)) inDegree.set(key, 0);
+		edge(side(char.left, START), key);
+		edge(key, side(char.right, FINISH));
+	}
+	const rank = (key: string): [number, number, number] => {
+		if (key === START) return [0, 0, 0];
+		if (key === FINISH) return [2, 0, 0];
+		const { id } = byKey.get(key)!;
+		return [1, -id.author, id.counter];
+	};
+	const ready = new MinHeap<string>((a, b) => {
+		const ra = rank(a);
+		const rb = rank(b);
+		return ra[0] - rb[0] || ra[1] - rb[1] || ra[2] - rb[2];
+	});
+	for (const [key, degree] of inDegree) if (degree === 0) ready.push(key);
+	const ordered: TextChar[] = [];
+	for (let key = ready.pop(); key !== undefined; key = ready.pop()) {
+		const char = byKey.get(key);
+		if (char !== undefined) ordered.push(char);
+		if (key === FINISH) break;
+		for (const next of dependents.get(key) ?? []) {
+			const degree = inDegree.get(next)! - 1;
+			inDegree.set(next, degree);
+			if (degree === 0) ready.push(next);
+		}
+	}
+	if (ordered.length !== byKey.size) throw new Error("cyclic text sequence");
+	return ordered;
+}
+
+class MinHeap<T> {
+	private items: T[] = [];
+	constructor(private readonly compare: (a: T, b: T) => number) {}
+	push(item: T): void {
+		const items = this.items;
+		items.push(item);
+		for (let i = items.length - 1; i > 0; ) {
+			const parent = (i - 1) >> 1;
+			if (this.compare(items[i], items[parent]) >= 0) break;
+			[items[i], items[parent]] = [items[parent], items[i]];
+			i = parent;
+		}
+	}
+	pop(): T | undefined {
+		const items = this.items;
+		const top = items[0];
+		const last = items.pop();
+		if (items.length > 0 && last !== undefined) {
+			items[0] = last;
+			for (let i = 0; ; ) {
+				const left = 2 * i + 1;
+				const right = left + 1;
+				let least = i;
+				if (left < items.length && this.compare(items[left], items[least]) < 0) least = left;
+				if (right < items.length && this.compare(items[right], items[least]) < 0) least = right;
+				if (least === i) break;
+				[items[i], items[least]] = [items[least], items[i]];
+				i = least;
+			}
+		}
+		return top;
+	}
+}
+
+/** Inline format codes in the text sequence (firmware 3.3+, rmscene TextDocument). */
+const FORMAT_BOLD_ON = 1;
+const FORMAT_BOLD_OFF = 2;
+const FORMAT_ITALIC_ON = 3;
+const FORMAT_ITALIC_OFF = 4;
+
+/** rmc's text layout, the only published estimate of where paragraphs sit. */
+const TEXT_TOP_Y = -88;
+const LINE_HEIGHTS: Partial<Record<ParagraphStyle, number>> = {
+	plain: 70,
+	bold: 70,
+	heading: 150,
+	bullet: 35,
+	bullet2: 35,
+	checkbox: 35,
+	"checkbox-checked": 35,
+};
+const MARKER_TOP = idKey({ author: 0, counter: 2 ** 48 - 2 });
+const MARKER_BOTTOM = idKey({ author: 0, counter: 2 ** 48 - 1 });
+
+/**
+ * Paragraphs and, for anchored ink, the y of every character id. Every
+ * newline opens a paragraph keyed by its id; the first is keyed (0, 0) — so
+ * text that starts with a newline starts with an empty paragraph (rmscene's
+ * TextDocument folds that one away). Erased characters have no text but keep
+ * a place in the layout, as in rmc: ink anchored to them stays put.
+ */
+function resolveText(raw: RawRootText): { text: SceneText; anchorY: Map<string, number> } {
+	type Draft = { paragraph: TextParagraph; anchorKeys: string[] };
+	const drafts: Draft[] = [];
+	const open = (startId: ItemId): Draft => {
+		const code = raw.styles.get(idKey(startId)) ?? 1;
+		const style: ParagraphStyle = PARAGRAPH_STYLES[code] ?? "plain";
+		const draft: Draft = {
+			paragraph: { style, spans: [], startId, text: "", charIds: [] },
+			anchorKeys: [idKey(startId)],
+		};
+		drafts.push(draft);
+		return draft;
+	};
+	let current: Draft | undefined;
+	let bold = false;
+	let italic = false;
+	let live = false;
+	for (const char of orderTextChars(raw.chars)) {
+		const value = char.value;
+		if (typeof value === "number") {
+			if (value === FORMAT_BOLD_ON) bold = true;
+			else if (value === FORMAT_BOLD_OFF) bold = false;
+			else if (value === FORMAT_ITALIC_ON) italic = true;
+			else if (value === FORMAT_ITALIC_OFF) italic = false;
+			continue;
+		}
+		current ??= open(SEQUENCE_END);
+		if (value === "\n") {
+			current = open(char.id);
+			live = true;
+			continue;
+		}
+		current.anchorKeys.push(idKey(char.id));
+		if (value === null) continue;
+		live = true;
+		const paragraph = current.paragraph;
+		paragraph.text += value;
+		paragraph.charIds.push(char.id);
+		const last = paragraph.spans[paragraph.spans.length - 1];
+		if (last !== undefined && last.bold === bold && last.italic === italic) last.text += value;
+		else paragraph.spans.push({ text: value, bold, italic });
+	}
+
+	const anchorY = new Map<string, number>();
+	let y = raw.y + TEXT_TOP_Y;
+	anchorY.set(MARKER_TOP, y);
+	for (const { paragraph, anchorKeys } of drafts) {
+		for (const key of anchorKeys) anchorY.set(key, y);
+		y += LINE_HEIGHTS[paragraph.style] ?? 70;
+	}
+	anchorY.set(MARKER_BOTTOM, y);
+	const paragraphs = live ? drafts.map((draft) => draft.paragraph) : [];
+	return { text: { paragraphs, x: raw.x, y: raw.y, width: raw.width }, anchorY };
+}
+
 /** Parse a whole page. */
 export function parseRmScene(bytes: Uint8Array): RmScene {
 	const scene: RmScene = { lines: [], deleted: [], authors: new Map(), blockTypes: {} };
@@ -282,6 +599,7 @@ export function parseRmScene(bytes: Uint8Array): RmScene {
 	const groups = new Map<string, GroupInfo>();
 	const groupParent = new Map<string, string>();
 	let hasRootText = false;
+	let textAnchors = new Map<string, number>();
 	/** group item: node id → parent node id, so nested groups resolve. */
 	const pending: { line: SceneLine; parentKey: string; rawX: number[] }[] = [];
 
@@ -336,6 +654,9 @@ export function parseRmScene(bytes: Uint8Array): RmScene {
 				}
 			} else if (blockType === BLOCK_ROOT_TEXT) {
 				hasRootText = true;
+				const { text, anchorY } = resolveText(readRootText(reader));
+				scene.text = text;
+				textAnchors = anchorY;
 			} else if (blockType === BLOCK_LINE_ITEM) {
 				const parent = reader.id(1);
 				const itemId = reader.id(2);
@@ -395,23 +716,31 @@ export function parseRmScene(bytes: Uint8Array): RmScene {
 
 	// Group anchors are known only once every tree node has been read. Walk
 	// up the chain: x origins add up; y is only unknown when some group is
-	// anchored to a real character of typed text.
+	// anchored to a real character of typed text, and then estimated.
 	for (const { line, parentKey } of pending) {
 		let key: string | undefined = parentKey;
 		let offsetX = 0;
 		let anchored = false;
+		let anchorY: number | undefined = 0;
 		for (let depth = 0; key !== undefined && !LAYER_ROOT_KEYS.has(key) && depth < 16; depth++) {
 			const group = groups.get(key);
 			if (group !== undefined) {
 				offsetX += group.anchorOriginX ?? 0;
-				if (group.anchored && !(group.anchorId !== undefined && isMarkerAnchor(group.anchorId) && !hasRootText)) {
+				if (
+					group.anchored &&
+					group.anchorId !== undefined &&
+					!(isMarkerAnchor(group.anchorId) && !hasRootText)
+				) {
 					anchored = true;
+					const y = textAnchors.get(idKey(group.anchorId));
+					anchorY = y === undefined || anchorY === undefined ? undefined : anchorY + y;
 				}
 			}
 			key = groupParent.get(key);
 		}
 		if (offsetX !== 0) for (const point of line.stroke.points) point.x += offsetX;
 		line.anchored = anchored;
+		if (anchored && anchorY !== undefined) line.textAnchorY = anchorY;
 	}
 	return scene;
 }

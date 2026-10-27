@@ -159,7 +159,7 @@ describe("MirrorTransport.ensureFolderPath", () => {
 });
 
 describe("MirrorTransport replace", () => {
-	it("moves the previous device copy to trash, ignoring already-gone docs", async () => {
+	it("moves the previous device copy to trash and reports already-gone docs", async () => {
 		const { api, calls } = fakeApi([
 			{
 				id: "old-doc",
@@ -170,9 +170,24 @@ describe("MirrorTransport replace", () => {
 			},
 		]);
 		const mirror = new MirrorTransport(api, "");
-		await mirror.trashPrevious("old-doc");
-		await mirror.trashPrevious("nonexistent");
+		expect(await mirror.trashPrevious("old-doc", "hash-old")).toBe("trashed");
+		expect(await mirror.trashPrevious("nonexistent")).toBe("not-found");
 		expect(calls.moves).toEqual([["hash-old", "trash"]]);
+	});
+
+	it("reads the account afresh and leaves a notebook that changed since it was read", async () => {
+		const { api, items, calls } = fakeApi([
+			{ id: "old-doc", hash: "hash-old", type: "DocumentType", visibleName: "Nota", parent: "" },
+		]);
+		api.listItems = () => Promise.resolve(items.map((item) => ({ ...item })));
+		const mirror = new MirrorTransport(api, "");
+		await mirror.ensureFolderPath("Notes");
+		// The tablet wrote into the notebook after the listing was cached.
+		items[0] = { ...items[0], hash: "hash-new-ink" };
+		expect(await mirror.trashPrevious("old-doc", "hash-old")).toBe("changed");
+		expect(calls.moves).toEqual([]);
+		expect(await mirror.trashPrevious("old-doc", "hash-new-ink")).toBe("trashed");
+		expect(calls.moves).toEqual([["hash-new-ink", "trash"]]);
 	});
 });
 

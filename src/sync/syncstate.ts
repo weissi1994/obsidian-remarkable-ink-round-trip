@@ -14,7 +14,8 @@
  * skipped and reported, never taken for "nothing was sent".
  */
 
-import type { MappingEntry, MappingTable } from "../id/mapping";
+import { isValidDocId } from "../id/docid";
+import { migrateMapping, type MappingEntry, type MappingTable } from "../id/mapping";
 import type { HandLibrary, PendingSheet } from "../ink/handsheet";
 import type { InkDrawing } from "../ink/inkdrawing";
 import type { InkStrokes, Picture } from "../ink/inkimage";
@@ -36,6 +37,12 @@ export interface StateFs {
 interface NoteFile {
 	mapping?: MappingEntry;
 	sent?: StoredSent;
+	/**
+	 * A send recorded before its upload: the text and the mapping it will
+	 * have. Committed once the upload landed, dropped if it never did — so a
+	 * crash between the two neither loses the notebook nor sends it twice.
+	 */
+	pending?: { sent: StoredSent; mapping: MappingEntry };
 }
 
 /** A send record with its pictures replaced by references to `pictures/`. */
@@ -43,6 +50,21 @@ type StoredSent = Omit<SentRecord, "images" | "drawings"> & {
 	images?: Record<string, string>;
 	drawings?: Record<string, string>;
 };
+
+/**
+ * A note's state file exists but cannot be read — a git or Syncthing merge
+ * left conflict markers in it. Writing over it would lose half its record,
+ * so the note is not synced until someone repairs the file.
+ */
+export class StateFileError extends Error {
+	constructor(readonly path: string) {
+		super(
+			`The sync state file “${path}” cannot be read (a merge may have left conflict markers in it). ` +
+				"Repair or remove it; this note is not synced until then.",
+		);
+		this.name = "StateFileError";
+	}
+}
 
 function hash(text: string): string {
 	let h1 = 0x811c9dc5;
@@ -68,8 +90,14 @@ export class SyncState {
 	private readonly seen = new Map<string, string>();
 	/** handwriting.json as last written or read, likewise. */
 	private seenHandwriting: string | null = null;
+	/** Notes whose file held a send in flight on the last load (settlePending). */
+	private readonly pendingIds = new Set<string>();
 	/** Files that could not be read on the last load, for the log. */
 	unreadable: string[] = [];
+	/** Copies a sync tool left beside a note's file on a conflict; not loaded, for the log. */
+	conflictCopies: string[] = [];
+	/** Note files the last saveMappings left alone because they cannot be read. */
+	unwritable: string[] = [];
 
 	constructor(
 		private readonly fs: StateFs,
@@ -100,6 +128,17 @@ export class SyncState {
 		return this.path("notes", `${docId}.json`);
 	}
 
+	/** A note's file before it is rewritten: absent is empty, unreadable stops the write. */
+	private async readNoteForWrite(docId: string): Promise<NoteFile> {
+		const file = this.noteFile(docId);
+		if (!(await this.fs.exists(file))) return {};
+		try {
+			return JSON.parse(await this.fs.read(file)) as NoteFile;
+		} catch {
+			throw new StateFileError(file);
+		}
+	}
+
 	/** Every note's mapping on disk. */
 	async loadMappings(): Promise<MappingTable> {
 		const table = await this.loadMappingsRaw();
@@ -113,20 +152,45 @@ export class SyncState {
 		return !(await this.fs.exists(dir)) || (await this.fs.list(dir)).length === 0;
 	}
 
-	/** Write the mappings that changed since last seen; drop the ones gone from the table. */
+	/**
+	 * Write the mappings that changed since last seen; drop the ones gone from
+	 * the table. A file that cannot be read is left as it is and listed in
+	 * `unwritable` — it is tried again on the next save.
+	 */
 	async saveMappings(table: MappingTable): Promise<void> {
+		this.unwritable = [];
 		for (const [docId, mapping] of Object.entries(table)) {
 			const text = JSON.stringify(mapping);
 			if (this.seen.get(docId) === text) continue;
-			const file = this.noteFile(docId);
-			const note = (await this.readJson<NoteFile>(file)) ?? {};
-			await this.writeJson(file, { ...note, mapping });
+			let note: NoteFile;
+			try {
+				note = await this.readNoteForWrite(docId);
+			} catch (error) {
+				if (!(error instanceof StateFileError)) throw error;
+				this.unwritable.push(error.path);
+				continue;
+			}
+			await this.writeJson(this.noteFile(docId), { ...note, mapping });
 			this.seen.set(docId, text);
 		}
 		for (const docId of [...this.seen.keys()]) {
 			if (table[docId] !== undefined) continue;
 			const file = this.noteFile(docId);
-			if (await this.fs.exists(file)) await this.fs.remove(file);
+			let note: NoteFile;
+			try {
+				note = await this.readNoteForWrite(docId);
+			} catch (error) {
+				if (!(error instanceof StateFileError)) throw error;
+				this.unwritable.push(error.path);
+				continue;
+			}
+			// A send in flight keeps its file: settlePending decides about it.
+			if (note.pending !== undefined) {
+				delete note.mapping;
+				await this.writeJson(file, note);
+			} else if (await this.fs.exists(file)) {
+				await this.fs.remove(file);
+			}
 			this.seen.delete(docId);
 		}
 	}
@@ -157,15 +221,28 @@ export class SyncState {
 		return merged;
 	}
 
+	/**
+	 * Only `<docId>.json` is a note's file. What a sync tool leaves beside it
+	 * on a conflict — Syncthing's `.sync-conflict-…`, git's or Obsidian Sync's
+	 * `(conflict…)`, a merge's `.orig` — is listed for the owner instead: read
+	 * as a note it would bring back an old mapping.
+	 */
 	private async loadMappingsRaw(): Promise<MappingTable> {
 		this.unreadable = [];
+		this.conflictCopies = [];
+		this.pendingIds.clear();
 		const table: MappingTable = {};
 		const dir = this.path("notes");
 		if (!(await this.fs.exists(dir))) return table;
 		for (const file of await this.fs.list(dir)) {
-			if (!file.endsWith(".json")) continue;
+			const name = file.split("/").pop() ?? file;
+			if (!name.endsWith(".json") || !isValidDocId(name.slice(0, -".json".length))) {
+				if (/\.sync-conflict-|\(conflict|\.orig$/i.test(name)) this.conflictCopies.push(file);
+				continue;
+			}
 			const note = await this.readJson<NoteFile>(file);
-			if (note?.mapping !== undefined) table[note.mapping.docId] = note.mapping;
+			if (note?.mapping !== undefined) table[note.mapping.docId] = migrateMapping(note.mapping);
+			if (note?.pending !== undefined) this.pendingIds.add(name.slice(0, -".json".length));
 		}
 		return table;
 	}
@@ -195,15 +272,73 @@ export class SyncState {
 		return out;
 	}
 
-	async writeSent(docId: string, sent: SentRecord): Promise<void> {
-		const file = this.noteFile(docId);
-		const note = (await this.readJson<NoteFile>(file)) ?? {};
-		const stored: StoredSent = {
+	private async storeSent(sent: SentRecord): Promise<StoredSent> {
+		return {
 			...sent,
 			images: await this.storePictures<Picture>(sent.images),
 			drawings: await this.storePictures<InkDrawing>(sent.drawings),
 		};
-		await this.writeJson(file, { ...note, sent: stored });
+	}
+
+	/** Keep a send record outright (the one-time move from the plugin folder). */
+	async writeSent(docId: string, sent: SentRecord): Promise<void> {
+		const note = await this.readNoteForWrite(docId);
+		await this.writeJson(this.noteFile(docId), { ...note, sent: await this.storeSent(sent) });
+	}
+
+	/**
+	 * Record a send about to be uploaded, beside the committed one: the merge
+	 * base stays what the tablet holds until the upload has landed.
+	 */
+	async writePending(docId: string, sent: SentRecord, mapping: MappingEntry): Promise<void> {
+		const note = await this.readNoteForWrite(docId);
+		await this.writeJson(this.noteFile(docId), { ...note, pending: { sent: await this.storeSent(sent), mapping } });
+	}
+
+	/** The upload landed: its text and mapping become the note's, in one write. */
+	async commitSent(docId: string, sent: SentRecord, mapping: MappingEntry): Promise<void> {
+		const note = await this.readNoteForWrite(docId);
+		delete note.pending;
+		await this.writeJson(this.noteFile(docId), { ...note, sent: await this.storeSent(sent), mapping });
+		this.seen.set(docId, JSON.stringify(mapping));
+	}
+
+	/**
+	 * Settle sends a crash left half-done: one whose notebook is on the account
+	 * (`present`: device document ids) did land and is committed; one whose
+	 * notebook is not never did, and is dropped. An empty listing settles
+	 * nothing — more likely a fresh pairing than every upload lost. Returns
+	 * `table` with the committed mappings.
+	 */
+	async settlePending(
+		table: MappingTable,
+		present: ReadonlySet<string>,
+	): Promise<{ table: MappingTable; committed: string[]; dropped: string[] }> {
+		const out = { table: { ...table }, committed: [] as string[], dropped: [] as string[] };
+		if (present.size === 0) return out;
+		for (const docId of [...this.pendingIds]) {
+			let note: NoteFile;
+			try {
+				note = await this.readNoteForWrite(docId);
+			} catch {
+				continue;
+			}
+			const { pending, ...rest } = note;
+			this.pendingIds.delete(docId);
+			if (pending === undefined) continue;
+			if (present.has(pending.mapping.deviceDocId)) {
+				await this.writeJson(this.noteFile(docId), { ...rest, sent: pending.sent, mapping: pending.mapping });
+				this.seen.set(docId, JSON.stringify(pending.mapping));
+				out.table[docId] = pending.mapping;
+				out.committed.push(docId);
+			} else {
+				// A first send that never landed leaves nothing behind.
+				if (Object.keys(rest).length === 0) await this.fs.remove(this.noteFile(docId));
+				else await this.writeJson(this.noteFile(docId), rest);
+				out.dropped.push(docId);
+			}
+		}
+		return out;
 	}
 
 	async readSent(docId: string): Promise<SentRecord | null> {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	NoteInput,
 	SendDeps,
+	SendResult,
 	SentRecord,
 	notesNeedingUpload,
 	prepareNoteContent,
@@ -12,6 +13,13 @@ import { TYPO_VERSION } from "../convert/pdf";
 import { isValidDocId } from "../id/docid";
 import { MappingTable, contentHash } from "../id/mapping";
 import { DEVICE_PROFILES } from "../ink/inkrender";
+import { SyncState } from "../sync/syncstate";
+import { sendNotebook } from "../transport/notebook";
+import { fakeCloud } from "./helpers/fakecloud";
+import { memoryFs } from "./helpers/memoryfs";
+
+/** What a result has to say: its error, or the warning that came with a send. */
+const messageOf = (result: SendResult): string => (result.ok ? (result.warning ?? "") : result.error);
 
 function makeDeps(overrides: Partial<SendDeps> = {}) {
 	const uploads: { name: string; pages: Uint8Array[] }[] = [];
@@ -37,7 +45,7 @@ function makeDeps(overrides: Partial<SendDeps> = {}) {
 					shape: 1,
 				},
 			}),
-			persistSent: (docId, record) => {
+			commitSent: (docId, record) => {
 				sent[docId] = record;
 				return Promise.resolve();
 			},
@@ -190,7 +198,7 @@ describe("sendNote folder mirroring hooks", () => {
 			},
 			replacePrevious: (id) => {
 				trashed.push(id);
-				return Promise.resolve();
+				return Promise.resolve("trashed");
 			},
 		});
 		const uploadArgs: (string | undefined)[] = [];
@@ -220,7 +228,7 @@ describe("sendNote folder mirroring hooks", () => {
 		expect(trashed).toEqual(["device-1"]);
 	});
 
-	it("treats a failing replacePrevious as non-fatal", async () => {
+	it("sends anyway when the old copy cannot be trashed, and says so", async () => {
 		const { deps } = makeDeps({
 			replacePrevious: () => Promise.reject(new Error("trash faalt")),
 		});
@@ -232,6 +240,16 @@ describe("sendNote folder mirroring hooks", () => {
 			deps,
 		);
 		expect(second.result.ok).toBe(true);
+		expect(messageOf(second.result)).toContain("trash faalt");
+	});
+
+	it("leaves an old copy that changed during the send alone, and says so", async () => {
+		const { deps } = makeDeps({ replacePrevious: () => Promise.resolve("changed") });
+		const first = await sendNote(NOTE, {}, deps);
+		if (!first.result.ok) throw new Error("unexpected failure");
+		const second = await sendNote({ ...NOTE, content: "ander", existingDocId: first.result.docId }, first.table, deps);
+		expect(second.result.ok).toBe(true);
+		expect(messageOf(second.result)).toContain("was kept");
 	});
 });
 
@@ -282,5 +300,157 @@ describe("sendBatch", () => {
 		expect(checkpoints).toHaveLength(45);
 		expect(checkpoints[44]).toBe(45);
 		expect(Object.keys(table)).toHaveLength(45);
+	});
+
+	it("records a single landed send at once too", async () => {
+		const { deps } = makeDeps();
+		const checkpoints: MappingTable[] = [];
+		await sendBatch([NOTE], {}, deps, undefined, async (checkpoint) => {
+			checkpoints.push(checkpoint);
+		});
+		expect(checkpoints).toHaveLength(1);
+		expect(Object.values(checkpoints[0])[0].deviceDocId).toBe("device-1");
+	});
+});
+
+describe("sending without losing tablet ink", () => {
+	const DOC = "0f8fad5b-d9cb-469f-a165-70867728950e";
+	const ROOT = "reMarkable/.sync";
+	const note: NoteInput = { ...NOTE, existingDocId: DOC };
+	const edited: NoteInput = { ...note, content: `${NOTE.content}\nTyped in Obsidian.` };
+	const NO_WAIT = { attempts: 3, backoffMs: () => 0, sleep: async () => undefined };
+
+	/** The production wiring: real upload protocol, shared sync state on a file seam. */
+	function setup() {
+		const cloud = fakeCloud();
+		const disk = memoryFs();
+		const state = new SyncState(disk.fs, ROOT);
+		const { deps } = makeDeps({
+			client: {
+				uploadInk: (name, pages, options) =>
+					sendNotebook(cloud.api, name, pages, {
+						parentId: options.parentId,
+						replaces: options.replaces,
+						expectedHash: options.expectedHash,
+						docId: options.deviceDocId,
+						pageIds: options.pageIds,
+						retry: NO_WAIT,
+					}).then((r) => ({ deviceDocId: r.docId, pageIds: r.pageIds, hash: r.hash, replaced: r.replaced })),
+			},
+			replacePrevious: () => Promise.resolve("not-found"),
+		});
+		deps.ink = {
+			...deps.ink,
+			persistPending: (docId, sent, mapping) => state.writePending(docId, sent, mapping),
+			commitSent: (docId, sent, mapping) => state.commitSent(docId, sent, mapping),
+		};
+		return { cloud, disk, state, deps };
+	}
+
+	async function sentOnce(deps: SendDeps): Promise<MappingTable> {
+		const { result, table } = await sendNote(note, {}, deps);
+		if (!result.ok) throw new Error(result.error);
+		return table;
+	}
+
+	it("does not replace a notebook that could not be read in this run", async () => {
+		const { cloud, deps } = setup();
+		const table = await sentOnce(deps);
+		const before = cloud.rootWrites();
+		const { results } = await sendBatch(
+			[edited, { ...NOTE, path: "other.md", basename: "other" }],
+			table,
+			{ ...deps, unread: new Map([[DOC, "network down"]]) },
+		);
+		expect(results[0].ok).toBe(false);
+		expect(messageOf(results[0])).toContain("could not be read (network down)");
+		expect(results[1].ok).toBe(true);
+		// Only the other note's notebook was written; the unread one is untouched.
+		expect(cloud.rootWrites() - before).toBe(1);
+		expect(cloud.parentOf(table[DOC].deviceDocId)).toBe("");
+	});
+
+	it("reads ink synced after the pull before replacing the notebook, then sends", async () => {
+		const { cloud, state, deps } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		cloud.writeOnTablet(old);
+		const writesBefore = cloud.rootWrites();
+		const rereads: string[] = [];
+		deps.reread = async (current) => {
+			rereads.push(current.path);
+			// The pull merges the new ink and records the hash it read.
+			return {
+				note: { ...current, content: `${current.content}\nWritten on the tablet.` },
+				entry: { ...table[DOC], accountedHash: cloud.hashOf(old) },
+			};
+		};
+		const { result, table: after } = await sendNote(edited, table, deps);
+		expect(result.ok).toBe(true);
+		expect(rereads).toEqual([note.path]);
+		// The refused attempt wrote nothing; the second replaced in one root write.
+		expect(cloud.rootWrites() - writesBefore).toBe(1);
+		expect(cloud.parentOf(old)).toBe("trash");
+		expect(cloud.live()).toEqual([after[DOC].deviceDocId]);
+		expect((await state.readSent(DOC))?.body).toContain("Written on the tablet.");
+	});
+
+	it("holds the note back when the notebook keeps changing, keeping what the re-read recorded", async () => {
+		const { cloud, deps } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		cloud.writeOnTablet(old);
+		deps.reread = async (current) => {
+			const read = cloud.hashOf(old);
+			cloud.writeOnTablet(old); // still being written in
+			return { note: current, entry: { ...table[DOC], accountedHash: read } };
+		};
+		const { result, table: after } = await sendNote(edited, table, deps);
+		expect(result.ok).toBe(false);
+		expect(messageOf(result)).toContain("keeps changing");
+		expect(cloud.live()).toEqual([old]);
+		expect(after[DOC].accountedHash).not.toBe(table[DOC].accountedHash);
+	});
+
+	it("keeps the merge base when the upload fails", async () => {
+		const { disk, state, deps, cloud } = setup();
+		const table = await sentOnce(deps);
+		const base = await state.readSent(DOC);
+		deps.client = { uploadInk: () => Promise.reject(new Error("cloud down")) };
+		const { result } = await sendNote(edited, table, deps);
+		expect(result).toMatchObject({ ok: false, error: "cloud down" });
+		expect(await state.readSent(DOC)).toEqual(base);
+		// The next run finds the send never landed and drops it.
+		const next = new SyncState(disk.fs, ROOT);
+		const loaded = await next.loadMappings();
+		const settled = await next.settlePending(loaded, new Set(cloud.listing().map((item) => item.id)));
+		expect(settled.dropped).toEqual([DOC]);
+		expect(settled.table[DOC]).toEqual(table[DOC]);
+		expect(await next.readSent(DOC)).toEqual(base);
+	});
+
+	it("records a send that landed just before a crash, and does not send it twice", async () => {
+		const { cloud, disk, deps } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		// The plugin dies after the upload, before the send is committed.
+		const crashing = { ...deps, ink: { ...deps.ink, commitSent: () => Promise.reject(new Error("crash")) } };
+		await sendNote(edited, table, crashing);
+		const [landed] = cloud.live();
+		expect(landed).not.toBe(old);
+
+		const next = new SyncState(disk.fs, ROOT);
+		const loaded = await next.loadMappings();
+		expect(loaded[DOC].deviceDocId).toBe(old);
+		const settled = await next.settlePending(loaded, new Set(cloud.listing().map((item) => item.id)));
+		expect(settled.committed).toEqual([DOC]);
+		expect(settled.table[DOC].deviceDocId).toBe(landed);
+		expect((await next.readSent(DOC))?.body).toContain("Typed in Obsidian.");
+
+		const writes = cloud.rootWrites();
+		const again = await sendNote(edited, settled.table, { ...deps, skipUnchanged: true });
+		expect(again.result).toMatchObject({ ok: true, skipped: true });
+		expect(cloud.rootWrites()).toBe(writes);
+		expect(cloud.live()).toEqual([landed]);
 	});
 });

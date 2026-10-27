@@ -100,6 +100,15 @@ export function renderImportReport(input: ImportReportInput): string {
 			if (input.ocrDiagnostics && readers !== "") lines.push(`    ${readers}`);
 		}
 		lines.push(`    ${describeWrite(scan)}`);
+		// Ink fork: what the tablet changed but the note does not show, item by item.
+		const pending = scan.written?.pending ?? [];
+		if (pending.length > 0) {
+			const where = scan.written?.form === "copy" ? " under “Pending from reMarkable”" : "";
+			lines.push(
+				`    not applied (${pending.length}) — listed in the note${where}:`,
+				...pending.map((line) => `      – ${line}`),
+			);
+		}
 		const state = describeSource(scan.sourceState);
 		if (state !== "") lines.push(`    ${state}`);
 	}
@@ -161,8 +170,9 @@ function describeWrite(
 	const written = scan.written;
 	if (written === undefined) return "written as: (not recorded)";
 	if (written.form === "copy") {
+		// Pending changes are listed item by item, unplaced highlights among them.
 		const missed =
-			written.unplaced === undefined || written.unplaced === 0
+			written.unplaced === undefined || written.unplaced === 0 || written.pending !== undefined
 				? ""
 				: `, ${written.unplaced} highlight(s) not placed`;
 		const conflicts =

@@ -6,6 +6,10 @@
  * plugin wrote (inkdiff.ts). What the tablet's owner wrote then goes through
  * the unchanged upstream mark reader; what happened to the plugin's own
  * words comes back as two new kinds, "erased" and "moved".
+ * Whatever cannot be read or applied — a page that no longer matches what
+ * was sent, a word only partly erased, a remark while handwriting import is
+ * off — comes back as a "skipped" mark saying so, for the note to list:
+ * dropping it would lose the owner's change without a word.
  *
  * Page numbers come from the page ids recorded at send time rather than from
  * `.content`: a notebook page has no PDF page behind it to redirect to, and
@@ -152,21 +156,22 @@ function highlightOf(line: SceneLine, layout: PdfLayout, page: number): Highligh
 	const device = strokeBounds([line.stroke]);
 	if (device === null) return null;
 	const pdf = deviceBoundsToPdf(device, layout);
-	const covered: string[] = [];
+	const covered: { id: number; text: string }[] = [];
 	for (const row of rowsOf(layout, page)) {
 		const low = row.y - row.size * 0.3;
 		const high = row.y + row.size * 0.85;
 		if (pdf.maxY < low || pdf.minY > high) continue;
 		for (const word of row.words) {
 			const overlap = Math.min(pdf.maxX, word.x + word.width) - Math.max(pdf.minX, word.x);
-			if (overlap >= word.width * 0.5) covered.push(word.text);
+			if (overlap >= word.width * 0.5) covered.push(word);
 		}
 	}
 	if (covered.length === 0) return null;
 	return {
-		text: covered.join(" "),
+		text: covered.map((word) => word.text).join(" "),
 		page,
 		rgb: line.rgb ?? HIGHLIGHTER_RGB[line.stroke.color] ?? "#ffed75",
+		words: covered.map((word) => word.id),
 	};
 }
 
@@ -238,7 +243,7 @@ async function pictureOf(
 	quote: string | undefined,
 	deps: PullDeps,
 	scan: DocumentScan,
-): Promise<{ id: string; path?: string; transcript?: string } | null> {
+): Promise<{ id: string; path?: string; transcript?: string; strokes: { x: number; y: number }[][] } | null> {
 	const path = deps.renderStrokes ? await deps.renderStrokes(request) : null;
 	let transcript: string | undefined;
 	if (deps.transcribe !== undefined) {
@@ -264,7 +269,13 @@ async function pictureOf(
 	}
 	if (path === null && transcript === undefined) return null;
 	const keepImage = deps.keepImageWithTranscript !== false || transcript === undefined;
-	return { id: remarkId(request.strokes), path: keepImage && path !== null ? path : undefined, transcript };
+	return {
+		id: remarkId(request.strokes),
+		path: keepImage && path !== null ? path : undefined,
+		transcript,
+		// The ink itself, so a remark the owner adds to is known for the same remark (sync/twoway.ts).
+		strokes: request.strokes.map((stroke) => stroke.points.map((point) => ({ x: point.x, y: point.y }))),
+	};
 }
 
 /**
@@ -319,6 +330,11 @@ export async function collectInkAnnotations(
 
 	const collected: { page: number | undefined; order: number; mark: ImportedMark }[] = [];
 	const highlights: Highlight[] = [];
+	// A change that cannot be read or applied is listed in the note, never dropped.
+	const skip = (page: number | undefined, order: number, unapplied: string) =>
+		collected.push({ page, order, mark: { kind: "skipped", ...(page === undefined ? {} : { page }), unapplied } });
+	const notImported = (what: string) =>
+		`${what} — ${deps.transcribe === undefined ? "not imported: handwriting import is off" : "could not be read, and handwriting images are off"}`;
 
 	// Pages in our order first, added pages after the page they follow (by
 	// the device's own order when .content has one, else at the end).
@@ -326,7 +342,10 @@ export async function collectInkAnnotations(
 		const pageId = pageIdOfFile(file.id);
 		const page = pageId === null ? undefined : pageOf.get(pageId);
 		try {
-			if (!deps.readBytes) break;
+			if (!deps.readBytes) {
+				skip(undefined, 0, `${strokeFiles.length - index} page(s) not read — they could not be downloaded`);
+				break;
+			}
 			const bytes = await deps.readBytes(file);
 			const scene = parseRmScene(bytes);
 			if (page === undefined) {
@@ -341,7 +360,11 @@ export async function collectInkAnnotations(
 					deps,
 					scan,
 				);
-				if (picture === null) continue;
+				if (picture === null) {
+					// Without images, nothing else can show it; with them, it held no ink worth a picture.
+					if (deps.renderStrokes === undefined) skip(pageIds.length, 1000 + index, notImported(`the page you added (page ${position})`));
+					continue;
+				}
 				collected.push({
 					page: pageIds.length,
 					order: 1000 + index,
@@ -366,6 +389,7 @@ export async function collectInkAnnotations(
 				deps.log?.(
 					`    skipped: the regenerated handwriting does not match this page (${diff.stats.idConflicts} id conflicts)`,
 				);
+				skip(page, -1, "not read — its handwriting no longer matches what was sent, so your changes on it cannot be told apart");
 				continue;
 			}
 			if (scan.ink) {
@@ -376,6 +400,7 @@ export async function collectInkAnnotations(
 			}
 			for (const partial of diff.partialWords) {
 				deps.log?.(`    partly erased (${Math.round(partial.erased * 100)}%): “${wordText(layout, [partial.wordId])}”`);
+				skip(page, partial.wordId, `“${wordText(layout, [partial.wordId])}” partly erased — erase the whole word to remove it`);
 			}
 
 			// Erased words: one mark per consecutive run.
@@ -438,9 +463,13 @@ export async function collectInkAnnotations(
 			);
 			let onThisPage = 0;
 			for (const [position, mark] of marks.entries()) {
-				let picture: { id: string; path?: string; transcript?: string } | null = null;
+				let picture: { id: string; path?: string; transcript?: string; strokes: { x: number; y: number }[][] } | null = null;
 				if (!TEXT_ONLY_KINDS.has(mark.kind)) {
-					if (deps.renderStrokes === undefined && deps.transcribe === undefined) continue;
+					const remark = `a handwritten remark${mark.quote === undefined ? "" : ` near “${mark.quote}”`}`;
+					if (deps.renderStrokes === undefined && deps.transcribe === undefined) {
+						skip(page, (mark.words?.[0] ?? 0) + position / 1000, notImported(remark));
+						continue;
+					}
 					const column = mark.kind === "note" ? tableColumnUnder(layout, page, mark.strokes) : undefined;
 					const inkHighlights = mark.kind === "note" ? highlightsOver(overInk, mark.strokes) : [];
 					picture = await pictureOf(
@@ -457,7 +486,10 @@ export async function collectInkAnnotations(
 						deps,
 						scan,
 					);
-					if (picture === null) continue;
+					if (picture === null) {
+						if (deps.renderStrokes === undefined) skip(page, (mark.words?.[0] ?? 0) + position / 1000, notImported(remark));
+						continue;
+					}
 				} else {
 					scan.interpretedMarks++;
 				}
@@ -483,7 +515,9 @@ export async function collectInkAnnotations(
 			}
 		} catch (error) {
 			scan.unreadableFiles++;
-			deps.log?.(`  could not read ${file.id}: ${error instanceof Error ? error.message : String(error)}`);
+			const message = error instanceof Error ? error.message : String(error);
+			deps.log?.(`  could not read ${file.id}: ${message}`);
+			skip(page, -1, `not read — ${message}`);
 		}
 	}
 

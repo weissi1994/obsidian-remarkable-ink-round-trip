@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { DeviceItem, findNewNotebooks, importedNote, noteFileName, writtenByPlugin } from "../sync/deviceimport";
+import {
+	DeviceItem,
+	findNewNotebooks,
+	importedNote,
+	importNotebooks,
+	noteFileName,
+	writtenByPlugin,
+	type NewNotebook,
+} from "../sync/deviceimport";
 import { buildInkPageRm } from "../ink/rmwrite";
 import { parseRmScene } from "../incoming/rmscene";
 import { remarkText } from "../ocr/samples";
@@ -7,6 +15,8 @@ import { parseFrontmatter } from "../preprocess/preprocess";
 import { notesNeedingUpload, sendNote, type SendDeps } from "../sync/send";
 import type { MappingTable } from "../id/mapping";
 import { DEVICE_PROFILES } from "../ink/inkrender";
+import { sendNotebook, uploadNotebook } from "../transport/notebook";
+import { fakeCloud } from "./helpers/fakecloud";
 
 const NOW = 1_800_000_000_000;
 const OLD = String(NOW - 60 * 60_000);
@@ -113,40 +123,91 @@ describe("the imported note", () => {
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
 
 describe("adopting it", () => {
-	it("is sent as handwriting in place of the tablet's notebook", async () => {
-		const content = importedNote(ID, [{ text: "Buy seeds" }]);
-		const table: MappingTable = {
-			[ID]: {
-				docId: ID,
-				notePath: "Projects/Ideas.md",
-				deviceDocId: "new-1",
-				uploadedAt: "2026-10-19T00:00:00Z",
-				contentHash: "",
-				format: "device",
-			},
-		};
-		const note = { path: "Projects/Ideas.md", basename: "Ideas", content, existingDocId: ID };
+	const render = () => ({
+		pages: [new Uint8Array([1])],
+		snapshot: { font: "readability", fallbackFont: "readability", pen: "medium" as const, color: 0, jitter: 0, profile: DEVICE_PROFILES.rm2, shape: 1 },
+	});
+	const content = importedNote(ID, [{ text: "Buy seeds" }]);
+	const note = { path: "Projects/Ideas.md", basename: "Ideas", content, existingDocId: ID };
+	const adopted = (deviceDocId: string, accountedHash: string): MappingTable => ({
+		[ID]: {
+			docId: ID,
+			notePath: "Projects/Ideas.md",
+			deviceDocId,
+			uploadedAt: "2026-10-19T00:00:00Z",
+			contentHash: "",
+			format: "device",
+			accountedHash,
+		},
+	});
+
+	it("is sent as handwriting in place of the tablet's notebook, as it was read", async () => {
+		const table = adopted("new-1", "h-at-import");
 		expect(notesNeedingUpload([note], table, () => ({ kind: "missing" }))).toHaveLength(1);
-		const replaced: (string | undefined)[] = [];
+		const replaced: (string | undefined)[][] = [];
 		const deps: SendDeps = {
 			client: {
 				uploadInk: (_name, _pages, options) => {
-					replaced.push(options.replaces);
+					replaced.push([options.replaces, options.expectedHash]);
 					return Promise.resolve({ deviceDocId: "ink-1", pageIds: ["p"], replaced: true });
 				},
 			},
-			ink: {
-				render: () => ({
-					pages: [new Uint8Array([1])],
-					snapshot: { font: "readability", fallbackFont: "readability", pen: "medium", color: 0, jitter: 0, profile: DEVICE_PROFILES.rm2, shape: 1 },
-				}),
-			},
+			ink: { render },
 			resolveEmbed: () => ({ kind: "missing" }),
 			persistDocId: () => Promise.resolve(),
-			replacePrevious: () => Promise.resolve(),
+			replacePrevious: () => Promise.resolve("trashed"),
 		};
 		const { table: after } = await sendNote(note, table, deps);
-		expect(replaced).toEqual(["new-1"]);
+		expect(replaced).toEqual([["new-1", "h-at-import"]]);
 		expect(after[ID]).toMatchObject({ format: "ink", deviceDocId: "ink-1" });
+	});
+
+	it("leaves the tablet's notebook alone when it was written in after the import", async () => {
+		const cloud = fakeCloud();
+		const original = await uploadNotebook(cloud.api, "Ideas", [new Uint8Array([5])]);
+		const table = adopted(original.docId, original.hash);
+		cloud.writeOnTablet(original.docId);
+		const deps: SendDeps = {
+			client: {
+				uploadInk: (name, pages, options) =>
+					sendNotebook(cloud.api, name, pages, { ...options, docId: options.deviceDocId }).then((r) => ({
+						deviceDocId: r.docId,
+						pageIds: r.pageIds,
+						hash: r.hash,
+						replaced: r.replaced,
+					})),
+			},
+			ink: { render },
+			resolveEmbed: () => ({ kind: "missing" }),
+			persistDocId: () => Promise.resolve(),
+			replacePrevious: () => Promise.resolve("not-found"),
+		};
+		const { result } = await sendNote(note, table, deps);
+		expect(result.ok).toBe(false);
+		expect(result.ok ? "" : result.error).toContain("changed on the reMarkable");
+		expect(cloud.live()).toEqual([original.docId]);
+	});
+});
+
+describe("bringing several in", () => {
+	const notebook = (id: string): NewNotebook => ({ id, hash: `h-${id}`, name: id, folder: "" });
+
+	it("reports a notebook that cannot be read and brings in the rest, saving after each", async () => {
+		const saved: number[] = [];
+		let done = 0;
+		const { created, failed } = await importNotebooks(
+			[notebook("a"), notebook("corrupt"), notebook("pdf"), notebook("c")],
+			async (item) => {
+				if (item.id === "corrupt") throw new Error("unreadable page");
+				done++;
+				return item.id === "pdf" ? null : `${item.id}.md`;
+			},
+			async () => {
+				saved.push(done);
+			},
+		);
+		expect(created).toEqual(["a.md", "c.md"]);
+		expect(failed).toEqual([{ notebook: notebook("corrupt"), error: "unreadable page" }]);
+		expect(saved).toEqual([1, 1, 2, 3]);
 	});
 });

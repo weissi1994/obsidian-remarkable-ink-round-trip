@@ -38,7 +38,10 @@ export type MarkKind =
 	| "checkbox-cancel"
 	// Ink fork: what happened to the plugin's own handwriting on the tablet.
 	| "erased"
-	| "moved";
+	| "moved"
+	// Ink fork: a change the import could not read or apply (a page it had
+	// to skip, a word only partly erased); listed, never silently dropped.
+	| "skipped";
 
 export interface Mark {
 	kind: MarkKind;

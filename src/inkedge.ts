@@ -194,11 +194,6 @@ export class InkEdge {
 		return { pages: inkPagesToRm(render, options), snapshot };
 	}
 
-	/** Keep what was sent, so the import can regenerate it after edits. */
-	async persistSent(docId: string, sent: SentRecord): Promise<void> {
-		await this.host.state.writeSent(docId, sent);
-	}
-
 	/** What a send kept, or null when it is gone. */
 	readSent(docId: string): Promise<SentRecord | null> {
 		return this.host.state
@@ -206,10 +201,16 @@ export class InkEdge {
 			.then((sent) => sent ?? this.readJson<SentRecord>(`${this.dir}/sent/${docId}.json`));
 	}
 
-	upload(api: RawSyncApi, name: string, pages: Uint8Array[], parentId?: string, replaces?: string) {
-		return sendNotebook(api, name, pages, { parentId, replaces }).then((result) => ({
+	upload(
+		api: RawSyncApi,
+		name: string,
+		pages: Uint8Array[],
+		options: { parentId?: string; replaces?: string; expectedHash?: string; docId?: string; pageIds?: string[] },
+	) {
+		return sendNotebook(api, name, pages, options).then((result) => ({
 			deviceDocId: result.docId,
 			pageIds: result.pageIds,
+			hash: result.hash,
 			replaced: result.replaced === true,
 		}));
 	}
@@ -288,7 +289,13 @@ export class InkEdge {
 				const docId = (file.split("/").pop() ?? "").replace(/\.json$/, "");
 				const sent = await this.readJson<SentRecord>(file);
 				if (sent === null || (await state.readSent(docId)) !== null) continue;
-				await state.writeSent(docId, sent);
+				try {
+					await state.writeSent(docId, sent);
+				} catch (error) {
+					// A damaged state file stays as it is (StateFileError); the old copy stays too.
+					console.warn(`reMarkable Ink Round-Trip: ${error instanceof Error ? error.message : String(error)}`);
+					continue;
+				}
 				moved++;
 			}
 		}

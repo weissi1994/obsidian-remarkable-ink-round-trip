@@ -1,67 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { RawEntry, RawSyncApi } from "../transport/notebook";
-import { readNotebook, sendNotebook, uploadNotebook } from "../transport/notebook";
+import { NotebookChangedError, readNotebook, sendNotebook, uploadNotebook } from "../transport/notebook";
 import { ocrBody, ocrPrompt, parseOcrResponse, transcribe } from "../transport/ocr";
 import type { HttpRequest } from "../transport/http";
 import { sendNote, type SendDeps } from "../sync/send";
 import { DEVICE_PROFILES } from "../ink/inkrender";
+import { fakeCloud } from "./helpers/fakecloud";
 
-/** In-memory raw sync api (same shape as the text-notebook tests use). */
-function fakeApi(failRootHashTimes = 0) {
-	const files = new Map<string, Uint8Array>();
-	const lists = new Map<string, RawEntry[]>();
-	const texts = new Map<string, string>();
-	let root: RawEntry | null = null;
-	let generation = 1;
-	let failures = failRootHashTimes;
-	let counter = 0;
-	const entry = (id: string): RawEntry => ({ id, hash: `h${++counter}` });
-	const api: RawSyncApi = {
-		getRootHash: () => Promise.resolve([root?.hash ?? "root0", generation, 3]),
-		getEntries: (_id, hash) => Promise.resolve({ entries: lists.get(hash) ?? [] }),
-		getHash: (_id, hash) => {
-			const bytes = files.get(hash);
-			if (!bytes) throw new Error(`no file for ${hash}`);
-			return Promise.resolve(bytes);
-		},
-		putFile: (id, bytes) => {
-			const e = entry(id);
-			files.set(e.hash, bytes);
-			return Promise.resolve([e, Promise.resolve()]);
-		},
-		putText: (id, content) => {
-			const e = entry(id);
-			files.set(e.hash, new TextEncoder().encode(content));
-			texts.set(id, content);
-			return Promise.resolve([e, Promise.resolve()]);
-		},
-		putEntries: (id, entries) => {
-			const e = entry(id);
-			lists.set(e.hash, [...entries]);
-			return Promise.resolve([e, Promise.resolve()]);
-		},
-		putRootHash: (hash, gen) => {
-			if (failures > 0) {
-				failures--;
-				return Promise.reject(new Error("precondition failed"));
-			}
-			expect(gen).toBe(generation);
-			root = { id: "root", hash };
-			generation++;
-			return Promise.resolve([hash, generation]);
-		},
-	};
-	return {
-		api,
-		texts,
-		rootList: () => (root ? (lists.get(root.hash) ?? []) : []),
-		rootWrites: () => generation - 1,
-	};
-}
+const NO_WAIT = { attempts: 3, backoffMs: () => 0, sleep: async () => undefined };
 
 describe("notebook upload", () => {
 	it("uploads every page and reads them back by page id", async () => {
-		const { api, texts } = fakeApi();
+		const { api, texts } = fakeCloud();
 		const pages = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5])];
 		const { docId, pageIds } = await uploadNotebook(api, "Wochenplan", pages, { now: () => 1 });
 		expect(pageIds).toHaveLength(2);
@@ -81,11 +30,22 @@ describe("notebook upload", () => {
 		expect([...read.pages[1].bytes]).toEqual([4, 5]);
 	});
 
+	it("reports the new document's hash exactly as the account listing shows it", async () => {
+		const cloud = fakeCloud();
+		const { docId, hash } = await uploadNotebook(cloud.api, "Plan", [new Uint8Array([1])]);
+		expect(cloud.hashOf(docId)).toBe(hash);
+		expect((await readNotebook(cloud.api, docId)).hash).toBe(hash);
+	});
+
 	it("trashes the notebook it replaces in the same root update", async () => {
-		const { api, texts, rootList, rootWrites } = fakeApi();
+		const { api, texts, rootList, rootWrites } = fakeCloud();
 		const old = await uploadNotebook(api, "Plan", [new Uint8Array([1])], { now: () => 1 });
 		const before = rootWrites();
-		const next = await uploadNotebook(api, "Plan", [new Uint8Array([2])], { now: () => 2, replaces: old.docId });
+		const next = await uploadNotebook(api, "Plan", [new Uint8Array([2])], {
+			now: () => 2,
+			replaces: old.docId,
+			expectedHash: old.hash,
+		});
 		expect(next.replaced).toBe(true);
 		expect(rootWrites() - before).toBe(1);
 		expect(JSON.parse(texts.get(`${old.docId}.metadata`)!)).toMatchObject({ parent: "trash", visibleName: "Plan" });
@@ -97,11 +57,48 @@ describe("notebook upload", () => {
 		expect(third.replaced).toBe(false);
 	});
 
-	it("retries a generation conflict onto the same document", async () => {
-		const { api, rootList } = fakeApi(1);
-		const result = await sendNotebook(api, "x", [new Uint8Array([9])], {
-			retry: { attempts: 3, backoffMs: () => 0, sleep: async () => undefined },
+	it("writes nothing when the notebook to replace changed on the tablet since it was read", async () => {
+		const cloud = fakeCloud();
+		const old = await uploadNotebook(cloud.api, "Plan", [new Uint8Array([1])]);
+		const edited = cloud.writeOnTablet(old.docId);
+		const before = cloud.rootWrites();
+		const attempt = uploadNotebook(cloud.api, "Plan", [new Uint8Array([2])], { replaces: old.docId, expectedHash: old.hash });
+		await expect(attempt).rejects.toBeInstanceOf(NotebookChangedError);
+		await expect(attempt).rejects.toMatchObject({ expectedHash: old.hash, actualHash: edited });
+		expect(cloud.rootWrites()).toBe(before);
+		expect(cloud.live()).toEqual([old.docId]);
+	});
+
+	it("checks again on a retry: ink synced while the cloud was busy stops the replace", async () => {
+		const cloud = fakeCloud();
+		const old = await uploadNotebook(cloud.api, "Plan", [new Uint8Array([1])]);
+		// The first root write is refused because the tablet is syncing — new ink.
+		cloud.onRootWrite(() => {
+			cloud.onRootWrite(null);
+			cloud.writeOnTablet(old.docId);
+			return new Error("precondition failed");
 		});
+		await expect(
+			sendNotebook(cloud.api, "Plan", [new Uint8Array([2])], { replaces: old.docId, expectedHash: old.hash, retry: NO_WAIT }),
+		).rejects.toBeInstanceOf(NotebookChangedError);
+		expect(cloud.live()).toEqual([old.docId]);
+		expect(cloud.parentOf(old.docId)).toBe("");
+	});
+
+	it("fails instead of leaving two notebooks when the one to replace cannot be read", async () => {
+		const cloud = fakeCloud();
+		const old = await uploadNotebook(cloud.api, "Plan", [new Uint8Array([1])]);
+		const getHash = cloud.api.getHash.bind(cloud.api);
+		cloud.api.getHash = (id, hash) => (id.endsWith(".metadata") ? Promise.reject(new Error("network down")) : getHash(id, hash));
+		await expect(
+			uploadNotebook(cloud.api, "Plan", [new Uint8Array([2])], { replaces: old.docId, expectedHash: old.hash }),
+		).rejects.toThrow("network down");
+		expect(cloud.live()).toEqual([old.docId]);
+	});
+
+	it("retries a generation conflict onto the same document", async () => {
+		const { api, rootList } = fakeCloud(1);
+		const result = await sendNotebook(api, "x", [new Uint8Array([9])], { retry: NO_WAIT });
 		const ids = rootList().map((e) => e.id);
 		expect(ids.filter((id) => id === result.docId)).toHaveLength(1);
 	});
@@ -169,10 +166,11 @@ describe("OCR", () => {
 
 describe("ink send", () => {
 	it("renders, uploads and records everything the import needs", async () => {
-		const persisted: string[] = [];
+		const pending: string[] = [];
+		const committed: string[] = [];
 		const deps: SendDeps = {
 			client: {
-				uploadInk: async (_name, pages) => ({ deviceDocId: "dev-9", pageIds: pages.map((_, i) => `p${i}`) }),
+				uploadInk: async (_name, _pages, options) => ({ deviceDocId: options.deviceDocId, pageIds: options.pageIds, hash: "h-new" }),
 			},
 			ink: {
 				render: () => ({
@@ -187,8 +185,11 @@ describe("ink send", () => {
 						shape: 1,
 					},
 				}),
-				persistSent: async (docId) => {
-					persisted.push(docId);
+				persistPending: async (docId) => {
+					pending.push(docId);
+				},
+				commitSent: async (docId) => {
+					committed.push(docId);
 				},
 			},
 			resolveEmbed: () => ({ kind: "missing" }),
@@ -204,9 +205,11 @@ describe("ink send", () => {
 		if (!result.ok) return;
 		const entry = table[result.docId];
 		expect(entry.format).toBe("ink");
-		expect(entry.ink?.pageIds).toEqual(["p0", "p1"]);
+		expect(entry.ink?.pageIds).toHaveLength(2);
 		expect(entry.ink?.profile).toEqual(DEVICE_PROFILES.move);
 		expect(entry.pdfLayout?.margin).toBe(32);
-		expect(persisted).toEqual([result.docId]);
+		expect(entry.accountedHash).toBe("h-new");
+		expect(pending).toEqual([result.docId]);
+		expect(committed).toEqual([result.docId]);
 	});
 });

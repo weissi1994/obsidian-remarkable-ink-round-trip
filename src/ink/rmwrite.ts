@@ -152,8 +152,27 @@ export function buildInkPageRm(lines: InkLine[], options: InkPageOptions): Uint8
 	);
 }
 
-/** The general writer behind buildInkPageRm (see SceneItemSpec). */
-export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions): Uint8Array {
+/**
+ * Typed text for a page (roottext.ts encodes it). The tablet keeps count of
+ * the page's text in the page info block, so the counts travel with it.
+ */
+export interface PageTextBlock {
+	chars: number;
+	lines: number;
+	/** Writes the whole RootText block, envelope included. */
+	write(w: ByteWriter): void;
+}
+
+/**
+ * The general writer behind buildInkPageRm (see SceneItemSpec), with typed
+ * text placed where the tablet writes it: after the scene tree, before the
+ * tree nodes.
+ */
+export function buildScenePageRm(
+	items: SceneItemSpec[],
+	options: InkPageOptions,
+	text?: PageTextBlock,
+): Uint8Array {
 	const w = new ByteWriter();
 	w.raw(new TextEncoder().encode(HEADER));
 
@@ -181,8 +200,8 @@ export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions
 	w.block(BLOCK_PAGE_INFO, 0, 1, (b) => {
 		b.taggedInt(1, 1); // loads
 		b.taggedInt(2, 0); // merges
-		b.taggedInt(3, 0); // text chars
-		b.taggedInt(4, 0); // text lines
+		b.taggedInt(3, text?.chars ?? 0);
+		b.taggedInt(4, text?.lines ?? 0);
 		b.taggedInt(5, 0); // type folio use count
 	});
 
@@ -214,6 +233,7 @@ export function buildScenePageRm(items: SceneItemSpec[], options: InkPageOptions
 			b.subblock(4, (s) => s.taggedId(1, ROOT));
 		});
 	}
+	text?.write(w);
 
 	w.block(BLOCK_TREE_NODE, 1, 2, (b) => {
 		b.taggedId(1, ROOT);

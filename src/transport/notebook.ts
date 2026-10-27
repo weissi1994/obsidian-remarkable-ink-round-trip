@@ -37,8 +37,26 @@ export interface RawEntry {
 export interface NotebookUploadResult {
 	docId: string;
 	pageIds: string[];
+	/** The new document's entry hash in the account root, as the listing will show it. */
+	hash: string;
 	/** The replaced notebook was found and moved to the trash. */
 	replaced?: boolean;
+}
+
+/**
+ * The notebook to be replaced changed on the account since the plugin last
+ * read it — ink the note does not have yet. Raised before anything is
+ * written, so the caller can read that ink first and try again.
+ */
+export class NotebookChangedError extends Error {
+	constructor(
+		readonly deviceDocId: string,
+		readonly expectedHash: string,
+		readonly actualHash: string,
+	) {
+		super(`The notebook changed on the reMarkable since it was last read (${deviceDocId}), so it was not replaced.`);
+		this.name = "NotebookChangedError";
+	}
 }
 
 /** RFC4122-v4-shaped id from crypto randomness (same approach as docid.ts). */
@@ -62,6 +80,13 @@ export interface NotebookUploadOptions {
 	 * update, instead of a second write of the account's whole root index.
 	 */
 	replaces?: string;
+	/**
+	 * The root entry hash of `replaces` the caller last fully read (or wrote
+	 * itself). Checked against the root this attempt writes over: a different
+	 * hash means ink the note lacks, and nothing is written. Absent = no check
+	 * (a document the plugin never reads, such as an old PDF copy).
+	 */
+	expectedHash?: string;
 }
 
 /** The content JSON for a notebook of `pageIds` (fields modern firmware writes). */
@@ -116,24 +141,30 @@ export async function uploadNotebook(
 	};
 	const template = options.template ?? "Blank";
 
-	const [content, meta, pagedata, rootInfo, ...files] = await Promise.all([
+	// The root first: a notebook that changed since it was read must stop the
+	// upload before anything of it lands.
+	const [rootHash, generation, schemaVersion] = await api.getRootHash();
+	const { entries: rootEntries } = await api.getEntries("root.docSchema", rootHash);
+	if (options.replaces !== undefined && options.expectedHash !== undefined) {
+		const current = rootEntries.find((entry) => entry.id === options.replaces);
+		if (current !== undefined && current.hash !== options.expectedHash) {
+			throw new NotebookChangedError(options.replaces, options.expectedHash, current.hash);
+		}
+	}
+
+	const [content, meta, pagedata, ...files] = await Promise.all([
 		api.putText(`${docId}.content`, JSON.stringify(notebookContent(pageIds, size))),
 		api.putText(`${docId}.metadata`, JSON.stringify(metadata)),
 		api.putText(`${docId}.pagedata`, pageIds.map(() => template).join("\n") + "\n"),
-		api.getRootHash(),
 		...pages.map((bytes, index) => api.putFile(`${docId}/${pageIds[index]}.rm`, bytes)),
 	]);
-	const [rootHash, generation, schemaVersion] = rootInfo;
 	const fileUploads = files as [{ id: string; hash: string }, Promise<void>][];
 
-	const [[collectionEntry, uploadCollection], { entries: rootEntries }] = await Promise.all([
-		api.putEntries(
-			docId,
-			[content[0], meta[0], pagedata[0], ...fileUploads.map(([entry]) => entry)],
-			schemaVersion,
-		),
-		api.getEntries("root.docSchema", rootHash),
-	]);
+	const [collectionEntry, uploadCollection] = await api.putEntries(
+		docId,
+		[content[0], meta[0], pagedata[0], ...fileUploads.map(([entry]) => entry)],
+		schemaVersion,
+	);
 
 	const trashed =
 		options.replaces === undefined ? null : await trashedEntry(api, rootEntries, options.replaces, timestamp, schemaVersion);
@@ -156,12 +187,14 @@ export async function uploadNotebook(
 		...(trashed === null ? [] : trashed.uploads),
 	]);
 	await api.putRootHash(rootEntry.hash, generation);
-	return { docId, pageIds, replaced: trashed !== null };
+	return { docId, pageIds, hash: collectionEntry.hash, replaced: trashed !== null };
 }
 
 /**
  * The root entry of `docId` with its metadata moved to the trash, or null when
- * the document is not on the account (already gone) or unreadable.
+ * the document is not on the account (already gone). A document that is there
+ * but cannot be read fails the whole upload: replacing it blind could leave
+ * two notebooks for one note.
  */
 async function trashedEntry(
 	api: RawSyncApi,
@@ -172,41 +205,46 @@ async function trashedEntry(
 ): Promise<{ entry: RawEntry; uploads: Promise<void>[] } | null> {
 	const current = rootEntries.find((entry) => entry.id === docId);
 	if (current === undefined) return null;
-	try {
-		const { entries } = await api.getEntries(`${docId}.docSchema`, current.hash);
-		const metaEntry = entries.find((entry) => entry.id === `${docId}.metadata`);
-		if (metaEntry === undefined) return null;
-		const metadata = JSON.parse(new TextDecoder().decode(await api.getHash(metaEntry.id, metaEntry.hash))) as Record<
-			string,
-			unknown
-		>;
-		const [newMeta, uploadMeta] = await api.putText(
-			`${docId}.metadata`,
-			JSON.stringify({ ...metadata, parent: "trash", lastModified: timestamp }),
-		);
-		const [entry, uploadEntries] = await api.putEntries(
-			docId,
-			entries.map((e) => (e.id === metaEntry.id ? newMeta : e)),
-			schemaVersion,
-		);
-		return { entry, uploads: [uploadMeta, uploadEntries] };
-	} catch {
-		return null;
-	}
+	const { entries } = await api.getEntries(`${docId}.docSchema`, current.hash);
+	const metaEntry = entries.find((entry) => entry.id === `${docId}.metadata`);
+	if (metaEntry === undefined) throw new Error(`The notebook to replace (${docId}) has no metadata; nothing was sent.`);
+	const metadata = JSON.parse(new TextDecoder().decode(await api.getHash(metaEntry.id, metaEntry.hash))) as Record<
+		string,
+		unknown
+	>;
+	const [newMeta, uploadMeta] = await api.putText(
+		`${docId}.metadata`,
+		JSON.stringify({ ...metadata, parent: "trash", lastModified: timestamp }),
+	);
+	const [entry, uploadEntries] = await api.putEntries(
+		docId,
+		entries.map((e) => (e.id === metaEntry.id ? newMeta : e)),
+		schemaVersion,
+	);
+	return { entry, uploads: [uploadMeta, uploadEntries] };
 }
 
 /**
  * Production upload: ids fixed before the first attempt so a retry after a
  * half-landed attempt updates the same document (idempotent re-send, N3).
+ * A caller that records the send before uploading passes the ids it recorded.
  */
 export async function sendNotebook(
 	api: RawSyncApi,
 	visibleName: string,
 	pages: Uint8Array[],
-	options: { parentId?: string; retry?: RetryOptions; now?: () => number; replaces?: string } = {},
+	options: {
+		parentId?: string;
+		retry?: RetryOptions;
+		now?: () => number;
+		replaces?: string;
+		expectedHash?: string;
+		docId?: string;
+		pageIds?: string[];
+	} = {},
 ): Promise<NotebookUploadResult> {
-	const docId = uuid4();
-	const pageIds = pages.map(() => uuid4());
+	const docId = options.docId ?? uuid4();
+	const pageIds = options.pageIds ?? pages.map(() => uuid4());
 	return withGenerationRetry(
 		() =>
 			uploadNotebook(api, visibleName, pages, {
@@ -215,6 +253,7 @@ export async function sendNotebook(
 				pageIds,
 				now: options.now,
 				replaces: options.replaces,
+				expectedHash: options.expectedHash,
 			}),
 		options.retry,
 	);
@@ -227,14 +266,15 @@ export interface NotebookPageFile {
 }
 
 /**
- * Read every `.rm` page of a document plus its content JSON. Used by the
- * handwriting capture and the page-size detection; the annotation import has
- * its own reader in the pull orchestration.
+ * Read every `.rm` page of a document plus its content JSON, and the root
+ * entry hash they were read at. Used by the handwriting capture, the
+ * page-size detection and the import of notebooks started on the tablet; the
+ * annotation import has its own reader in the pull orchestration.
  */
 export async function readNotebook(
 	api: RawSyncApi & { getText?: (id: string, hash: string) => Promise<string> },
 	docId: string,
-): Promise<{ pages: NotebookPageFile[]; content: string | null }> {
+): Promise<{ pages: NotebookPageFile[]; content: string | null; hash: string }> {
 	const [rootHash] = await api.getRootHash();
 	const { entries: rootEntries } = await api.getEntries("root.docSchema", rootHash);
 	const docEntry = rootEntries.find((entry) => entry.id === docId);
@@ -251,5 +291,5 @@ export async function readNotebook(
 			content = new TextDecoder().decode(bytes);
 		}
 	}
-	return { pages, content };
+	return { pages, content, hash: docEntry.hash };
 }

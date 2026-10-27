@@ -47,3 +47,15 @@ describe("classifyFailure", () => {
 		expect(advice).toContain("Settings → About");
 	});
 });
+
+describe("rate limits", () => {
+	it("classifies a 429 as rate-limit, not server or mirroring trouble", async () => {
+		expect(classifyFailure(new Error("HTTP 429 Too Many Requests"))).toBe("rate-limit");
+		expect(classifyFailure(new Error("too many requests"))).toBe("rate-limit");
+		const { toTransportError } = await import("../transport/mirror");
+		const message = toTransportError(new Error("status 429")).message;
+		expect(message).toContain("limits how fast it accepts uploads");
+		expect(message).toContain("next sync");
+		expect(message).not.toMatch(/mirror/i);
+	});
+});

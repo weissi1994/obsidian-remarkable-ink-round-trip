@@ -134,6 +134,10 @@ export interface ImportedMark {
 	moveAfter?: number;
 	/** …or before this one, when they landed at the start of a line. */
 	moveBefore?: number;
+	/** Ink fork: a remark's strokes, device units, so a remark the owner added strokes to is recognised (sync/twoway.ts). */
+	strokes?: { x: number; y: number }[][];
+	/** Ink fork, kind "skipped": why this tablet change could not be read or applied — listed in the note's “Pending from reMarkable” callout. */
+	unapplied?: string;
 }
 
 /** What the edge needs to paint one remark. */
@@ -255,7 +259,7 @@ export type PullResult = PullSuccess | PullFailure;
 
 /**
  * Apply pull-owned mapping changes without overwriting a push that completed
- * while an account-wide pull yielded. Pulls only update importedHash or remove
+ * while an account-wide pull yielded. Pulls only update accountedHash or remove
  * a mapping whose device document disappeared.
  */
 export function mergePullMappings(
@@ -271,7 +275,7 @@ export function mergePullMappings(
 		if (result === undefined) {
 			delete merged[docId];
 		} else {
-			merged[docId] = { ...latest, importedHash: result.importedHash };
+			merged[docId] = { ...latest, accountedHash: result.accountedHash };
 		}
 	}
 	return merged;
@@ -383,7 +387,7 @@ export async function pullAnnotations(
 					skipped: true,
 					skipReason: "legacy",
 				};
-			} else if (!deps.force && entry.importedHash === hash) {
+			} else if (!deps.force && entry.accountedHash === hash) {
 				deps.log?.(
 					`  unchanged since last import (${hash.slice(0, 8)}…) — skipped`,
 				);
@@ -404,9 +408,15 @@ export async function pullAnnotations(
 					scan.sourceState,
 				);
 				if (written) scan.written = written;
+				if (written?.reason === "no-source") {
+					// The note is not in the vault (moved out, deleted, not synced
+					// here yet): its ink went nowhere. The hash stays, so the
+					// notebook is read again once the note is back.
+					throw new Error("Its note is not in the vault, so the ink on the tablet was not brought in; it is read again once the note is back.");
+				}
 				updated = {
 					...updated,
-					[entry.docId]: { ...entry, importedHash: hash },
+					[entry.docId]: { ...entry, accountedHash: hash },
 				};
 				result = {
 					ok: true,

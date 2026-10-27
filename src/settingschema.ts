@@ -396,7 +396,7 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 					"still see what went.",
 				control: {
 					type: "dropdown",
-					options: { delete: "Removed (default)", strikethrough: "Struck through" },
+					options: { delete: "Removed", strikethrough: "Struck through (default)" },
 				},
 			},
 		],

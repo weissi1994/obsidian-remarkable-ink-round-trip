@@ -12,7 +12,7 @@ import { projectOntoSource } from "./sourceprojection";
 import { Highlight, colorName, rgbName } from "./highlights";
 import { DEFAULT_MARK_STYLES, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
-import { CONFIRM_MARK, remarkIdLine } from "./remarkid";
+import { blockIdLine, CONFIRM_MARK, PENDING_ID, remarkIdLine } from "./remarkid";
 
 export const BEGIN_MARKER = "<!-- remarkable-round-trip:begin -->";
 export const END_MARKER = "<!-- remarkable-round-trip:end -->";
@@ -63,6 +63,11 @@ export interface AnnotationOutcome {
 	conflicts?: number;
 	/** Ink fork: remarks whose untouched earlier reading gave way to a new one. */
 	rereadRemarks?: number;
+	/**
+	 * Ink fork: tablet changes the note does not show, as its “Pending from
+	 * reMarkable” callout (or summary block) lists them.
+	 */
+	pending?: string[];
 }
 
 export interface RenderedAnnotations {
@@ -134,7 +139,7 @@ export function renderAnnotationBlock(input: AnnotationRenderInput): RenderedAnn
 				lines.push(mark.page === undefined ? "**Page unknown**" : `**Page ${mark.page}**`, "");
 				first = false;
 			}
-			lines.push(...renderMark(mark, input.styles ?? DEFAULT_MARK_STYLES), "");
+			lines.push(...renderMark(mark, input.styles ?? DEFAULT_MARK_STYLES, input.erasedAs ?? "delete"), "");
 		}
 	}
 
@@ -161,7 +166,7 @@ function fallbackReason(input: AnnotationRenderInput): AnnotationOutcome["reason
  * and link; only ink whose meaning lives in the ink itself stays a picture
  * (GP_E3_S9).
  */
-function renderMark(mark: ImportedMark, styles: MarkStyles): string[] {
+function renderMark(mark: ImportedMark, styles: MarkStyles, erasedAs: "delete" | "strikethrough"): string[] {
 	const check = mark.confirmed === true ? ` ${CONFIRM_MARK}` : "";
 	const image = [
 		...(mark.path === undefined ? [] : [`![[${mark.path}]]`]),
@@ -191,7 +196,15 @@ function renderMark(mark: ImportedMark, styles: MarkStyles): string[] {
 		case "checkbox-cancel":
 			return [`Struck off on the reMarkable: “${mark.target ?? mark.quote ?? "task"}”`];
 		case "erased":
-			return [`~~${mark.target ?? ""}~~ — erased on the reMarkable`];
+			// As the copy would show it, gone or struck through — and named,
+			// so it is not taken for a strike-through drawn with the pen.
+			return [
+				erasedAs === "strikethrough"
+					? `~~${mark.target ?? ""}~~ — erased on the reMarkable`
+					: `“${mark.target ?? ""}” — erased on the reMarkable`,
+			];
+		case "skipped":
+			return [`Not in the note: ${mark.unapplied ?? "a change that could not be read"}`];
 		case "moved":
 			return [
 				`“${mark.target ?? ""}” — moved on the reMarkable` +
@@ -247,4 +260,57 @@ export function upsertAnnotationBlock(existing: string, block: string): string {
 	if (existing.trim() === "") return `${block}\n`;
 	const separator = existing.endsWith("\n") ? "\n" : "\n\n";
 	return `${existing}${separator}${block}\n`;
+}
+
+/** A tablet change the note does not show, for its “Pending from reMarkable” callout. */
+export interface PendingChange {
+	page?: number;
+	/** What happened on the tablet and why the note does not show it, in the owner's words. */
+	text: string;
+}
+
+export const PENDING_TITLE = "> [!info] Pending from reMarkable";
+
+/** One line of the pending list, as the callout and the import report show it. */
+export function pendingLine(change: PendingChange): string {
+	return `${change.page === undefined ? "" : `Page ${change.page}: `}${change.text}`;
+}
+
+/**
+ * The note without its pending callout: from the title to the
+ * `^ink-pending` line, with the blank line it came after.
+ */
+export function withoutPendingCallout(note: string): string {
+	const lines = note.split("\n");
+	const idLine = blockIdLine(PENDING_ID);
+	for (let at = lines.indexOf(idLine); at !== -1; at = lines.indexOf(idLine)) {
+		let start = at;
+		while (start > 0 && !/^>\s*\[!/.test(lines[start]) && lines[start - 1].startsWith(">")) start--;
+		const from = start > 0 && lines[start - 1].trim() === "" ? start - 1 : start;
+		lines.splice(from, at + 1 - from);
+	}
+	return lines.join("\n");
+}
+
+/**
+ * The note with its pending callout replaced wholesale: one per note, at the
+ * end of its text, gone when nothing is pending. It carries a fixed block id
+ * (`^ink-pending`), so every import of the notebook finds and replaces it.
+ */
+export function withPendingCallout(note: string, changes: PendingChange[]): string {
+	const bare = withoutPendingCallout(note);
+	if (changes.length === 0) return bare;
+	const lines = bare.split("\n");
+	let last = lines.length - 1;
+	while (last >= 0 && lines[last].trim() === "") last--;
+	lines.splice(
+		last + 1,
+		0,
+		...(last >= 0 ? [""] : []),
+		PENDING_TITLE,
+		"> Changed on the reMarkable, but not in this note yet — make these changes here, or redo them on the tablet:",
+		...changes.map((change) => `> - ${pendingLine(change)}`),
+		blockIdLine(PENDING_ID),
+	);
+	return lines.join("\n");
 }

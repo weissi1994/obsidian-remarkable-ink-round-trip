@@ -42,3 +42,32 @@ export function ensureDocId(existing: unknown): { docId: string; isNew: boolean 
 	if (isValidDocId(existing)) return { docId: existing, isNew: false };
 	return { docId: generateDocId(), isNew: true };
 }
+
+/**
+ * Notes that share a document id with another and must get a fresh one.
+ * Obsidian's "Make a copy" copies the frontmatter, id included; two notes on
+ * one id would each replace the other's notebook. The note at the mapping's
+ * path (`ownerPath`) keeps the id, else the oldest; the rest are returned.
+ */
+export function duplicateIdLosers(
+	notes: { path: string; docId: unknown; ctime: number }[],
+	ownerPath: (docId: string) => string | undefined,
+): string[] {
+	const byId = new Map<string, { path: string; ctime: number }[]>();
+	for (const note of notes) {
+		if (!isValidDocId(note.docId)) continue;
+		const group = byId.get(note.docId) ?? [];
+		group.push(note);
+		byId.set(note.docId, group);
+	}
+	const losers: string[] = [];
+	for (const [docId, group] of byId) {
+		if (group.length < 2) continue;
+		const owner = ownerPath(docId);
+		const keeper =
+			group.find((note) => note.path === owner) ??
+			group.reduce((oldest, note) => (note.ctime < oldest.ctime ? note : oldest));
+		for (const note of group) if (note !== keeper) losers.push(note.path);
+	}
+	return losers;
+}

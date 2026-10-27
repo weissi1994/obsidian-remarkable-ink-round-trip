@@ -62,7 +62,7 @@ On every sync the plugin first reads the notebooks back, then sends what changed
 
 | On the tablet | In the note |
 |---|---|
-| **Erase** a word | The word is removed (or struck through — *A word you erase … becomes*) |
+| **Erase** a word | The word is struck through (or removed — *A word you erase … becomes*) |
 | **Move** words with the lasso | The words move to where you dropped them |
 | A line **through** words | `~~struck~~` |
 | A line **under** words | `<u>underlined</u>` |

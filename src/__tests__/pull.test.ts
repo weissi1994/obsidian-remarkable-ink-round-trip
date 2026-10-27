@@ -63,7 +63,23 @@ describe("pullAnnotations", () => {
 		expect(results).toHaveLength(1);
 		expect(results[0]).toMatchObject({ ok: true });
 		expect(written[0].notePath).toBe("map/Nota.md");
-		expect(table["doc-a"].importedHash).toBe("hash-1");
+		expect(table["doc-a"].accountedHash).toBe("hash-1");
+	});
+
+	it("keeps the hash when the note is not in the vault, so the ink is read once it is back", async () => {
+		const { deps } = makeDeps({
+			writeAnnotations: () => Promise.resolve({ form: "summary", reason: "no-source" }),
+		});
+		const seen: MappingTable = { "doc-a": { ...TABLE["doc-a"], accountedHash: "hash-0" } };
+		const { results, table } = await pullAnnotations(seen, deps);
+		expect(results[0].ok).toBe(false);
+		expect(results[0].ok ? "" : results[0].error).toContain("not in the vault");
+		expect(table["doc-a"].accountedHash).toBe("hash-0");
+		// Once the note is back, the same notebook is read and recorded.
+		const { deps: back, written } = makeDeps();
+		const again = await pullAnnotations(table, back);
+		expect(written).toHaveLength(1);
+		expect(again.table["doc-a"].accountedHash).toBe("hash-1");
 	});
 
 	it("offers the coordinator a safe yield before each document", async () => {
@@ -102,13 +118,13 @@ describe("pullAnnotations", () => {
 			skipReason: "legacy",
 		});
 		expect(written).toHaveLength(0);
-		expect(after["doc-a"].importedHash).toBeUndefined();
+		expect(after["doc-a"].accountedHash).toBeUndefined();
 	});
 
 	it("skips a document whose device hash is unchanged", async () => {
 		const { deps, written } = makeDeps();
 		const seen: MappingTable = {
-			"doc-a": { ...TABLE["doc-a"], importedHash: "hash-1" },
+			"doc-a": { ...TABLE["doc-a"], accountedHash: "hash-1" },
 		};
 		const { results } = await pullAnnotations(seen, deps);
 		expect(results[0]).toMatchObject({ ok: true, skipped: true });
@@ -118,7 +134,7 @@ describe("pullAnnotations", () => {
 	it("re-imports an unchanged document when forced", async () => {
 		const { deps, written } = makeDeps({ force: true });
 		const seen: MappingTable = {
-			"doc-a": { ...TABLE["doc-a"], importedHash: "hash-1" },
+			"doc-a": { ...TABLE["doc-a"], accountedHash: "hash-1" },
 		};
 		await pullAnnotations(seen, deps);
 		expect(written).toHaveLength(1);
@@ -223,8 +239,8 @@ describe("pullAnnotations", () => {
 		});
 		const { results, table: updated } = await pullAnnotations(table, deps);
 		expect(results.map((r) => r.ok)).toEqual([true, false]);
-		expect(updated["doc-a"].importedHash).toBe("hash-1");
-		expect(updated["doc-b"].importedHash).toBeUndefined();
+		expect(updated["doc-a"].accountedHash).toBe("hash-1");
+		expect(updated["doc-b"].accountedHash).toBeUndefined();
 	});
 
 	it("imports both documents of a mixed tree when one has foreign content JSON (GP_E5_S13)", async () => {
@@ -272,7 +288,7 @@ describe("pullAnnotations", () => {
 		const { results, table: updated } = await pullAnnotations(table, deps);
 		expect(results.map((r) => r.ok)).toEqual([true, true]);
 		expect(written).toHaveLength(2);
-		expect(updated["doc-b"].importedHash).toBe("hash-2");
+		expect(updated["doc-b"].accountedHash).toBe("hash-2");
 	});
 
 	it("records how the source note relates to what was sent (F14)", async () => {
@@ -335,7 +351,7 @@ describe("mergePullMappings", () => {
 			},
 		};
 		const pulled: MappingTable = {
-			"doc-a": { ...TABLE["doc-a"], importedHash: "old-device-hash" },
+			"doc-a": { ...TABLE["doc-a"], accountedHash: "old-device-hash" },
 		};
 
 		expect(mergePullMappings(current, TABLE, pulled)).toEqual(current);
@@ -346,12 +362,12 @@ describe("mergePullMappings", () => {
 			"doc-a": { ...TABLE["doc-a"], notePath: "moved/Nota.md" },
 		};
 		const pulled: MappingTable = {
-			"doc-a": { ...TABLE["doc-a"], importedHash: "device-hash" },
+			"doc-a": { ...TABLE["doc-a"], accountedHash: "device-hash" },
 		};
 
 		expect(mergePullMappings(current, TABLE, pulled)["doc-a"]).toMatchObject({
 			notePath: "moved/Nota.md",
-			importedHash: "device-hash",
+			accountedHash: "device-hash",
 		});
 	});
 });
