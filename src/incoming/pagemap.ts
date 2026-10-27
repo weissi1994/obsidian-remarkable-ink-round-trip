@@ -84,11 +84,18 @@ export function parsePageOrder(contentJson: string): string[] {
 	if (typeof parsed !== "object" || parsed === null) return [];
 	const root = parsed as Record<string, unknown>;
 
-	// Current format (v6 sync): { cPages: { pages: [{ id, deleted?, … }] } }
+	// Current format (v6 sync): { cPages: { pages: [{ id, idx: { value }, deleted?, … }] } }.
+	// A page's place is its idx key, not its slot in the array: a page the
+	// tablet inserted between two others is stored at the end (rmapi sorts
+	// by idx too).
 	const cPages = root.cPages;
 	if (typeof cPages === "object" && cPages !== null) {
 		const pages = (cPages as Record<string, unknown>).pages;
 		if (Array.isArray(pages)) {
+			const idxOf = (page: Record<string, unknown>): string | null => {
+				const idx = page.idx as { value?: unknown } | undefined;
+				return typeof idx?.value === "string" ? idx.value : null;
+			};
 			return (
 				pages
 					.filter(
@@ -98,7 +105,11 @@ export function parsePageOrder(contentJson: string): string[] {
 					// A deleted page keeps its slot in the array but is not shown on
 					// the device, so counting it would shift every later page.
 					.filter((page) => page.deleted === undefined)
-					.map((page) => page.id)
+					.map((page, at) => ({ page, at, idx: idxOf(page) }))
+					.sort((a, b) =>
+						a.idx !== null && b.idx !== null && a.idx !== b.idx ? (a.idx < b.idx ? -1 : 1) : a.at - b.at,
+					)
+					.map(({ page }) => page.id)
 					.filter((id): id is string => typeof id === "string")
 			);
 		}
@@ -109,6 +120,21 @@ export function parsePageOrder(contentJson: string): string[] {
 		return root.pages.filter((id): id is string => typeof id === "string");
 	}
 	return [];
+}
+
+/** Pages the device deleted: their records stay in `cPages`, marked, and so may their files. */
+export function deletedPageIds(contentJson: string): Set<string> {
+	const deleted = new Set<string>();
+	try {
+		const pages = (JSON.parse(contentJson) as { cPages?: { pages?: unknown } } | null)?.cPages?.pages;
+		if (!Array.isArray(pages)) return deleted;
+		for (const page of pages as ({ id?: unknown; deleted?: unknown } | null)[]) {
+			if (typeof page?.id === "string" && page.deleted !== undefined) deleted.add(page.id);
+		}
+	} catch {
+		// Unreadable: nothing known to be deleted.
+	}
+	return deleted;
 }
 
 /** The page id a document file belongs to, or null for files without one. */

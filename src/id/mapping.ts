@@ -61,6 +61,12 @@ export interface MappingEntry {
 	/** The notebook's folder (collection id, "" = root) as last synced; absent = not known yet. */
 	deviceParent?: string;
 	/**
+	 * The notebook's folder path on the tablet ("a/b", "" = root) as last
+	 * synced: a folder renamed or moved on the tablet keeps its id, so only
+	 * the path tells. Absent = not known yet (taken from the tablet).
+	 */
+	devicePath?: string;
+	/**
 	 * "archived": the note or the notebook went (vault delete, tablet trash);
 	 * nothing is synced until one of them comes back. Absent = active.
 	 */
@@ -72,6 +78,20 @@ export interface MappingEntry {
 	 * was deleted": reported once per change, not on every sync.
 	 */
 	unappliedHash?: string;
+	/**
+	 * The tags the notebook and the note last agreed on: the base of the
+	 * next three-way merge of the two (sync/tags.ts). Absent = never brought
+	 * together; both sides' tags then count as added.
+	 */
+	tags?: string[];
+	/** The notebook hash at which its tags were last `tags`; any other hash means they are read again. */
+	tagsHash?: string;
+	/**
+	 * The note was not in the vault on the last sync, without a delete seen:
+	 * maybe deleted, maybe not arrived yet (a vault still syncing in). Its
+	 * notebook is only trashed when it is still missing on the next sync.
+	 */
+	noteMissing?: true;
 	pdfLayout?: {
 		fontSize: number;
 		lineHeight: number;
@@ -111,6 +131,12 @@ export interface MappingEntry {
 /** Everything a handwritten send depends on (ink fork). */
 export interface InkSnapshot {
 	pageIds: string[];
+	/**
+	 * "typed": a typed-text notebook — one page of keyboard text holding the
+	 * note body (sync/typednote.ts); the ink settings only record the
+	 * settings of that send. Absent = handwriting.
+	 */
+	mode?: "typed";
 	/** Built-in font id, or "hand" for the owner's captured handwriting. */
 	font: string;
 	/** Version hash of the handwriting library when font is "hand". */

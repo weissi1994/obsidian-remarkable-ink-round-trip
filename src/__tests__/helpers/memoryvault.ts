@@ -7,18 +7,27 @@
 import { DOCID_FRONTMATTER_KEY } from "../../id/docid";
 import { parseFrontmatter, splitNote } from "../../preprocess/preprocess";
 import type { VaultPort } from "../../sync/engine";
+import { isOptOut, OPT_OUT_FRONTMATTER_KEY } from "../../sync/selection";
+import { frontmatterTags } from "../../sync/tags";
 
-export function withDocId(content: string, docId: string | null): string {
+/** The note with one frontmatter key set to a raw YAML value, or removed (null). */
+export function withField(content: string, key: string, value: string | null): string {
 	const { head, body } = splitNote(content);
 	const lines = head === "" ? [] : head.replace(/^---\r?\n/, "").replace(/\r?\n---(\r?\n)?$/, "").split("\n");
-	const kept = lines.filter((line) => !line.startsWith(`${DOCID_FRONTMATTER_KEY}:`));
-	if (docId !== null) kept.unshift(`${DOCID_FRONTMATTER_KEY}: ${docId}`);
+	const kept = lines.filter((line) => !line.startsWith(`${key}:`));
+	if (value !== null) kept.unshift(`${key}: ${value}`);
 	return kept.length === 0 ? body : `---\n${kept.join("\n")}\n---\n${body}`;
+}
+
+export function withDocId(content: string, docId: string | null): string {
+	return withField(content, DOCID_FRONTMATTER_KEY, docId);
 }
 
 export function memoryVault() {
 	const files = new Map<string, { content: string; ctime: number }>();
 	const trash = new Map<string, { content: string; ctime: number }>();
+	/** Document ids of notes the owner deleted (Obsidian's delete event); the note coming back clears it. */
+	const deleted = new Set<string>();
 	let clock = 0;
 	let writes = 0;
 	/** Runs before every write; throw from it to fail the write (a crash). */
@@ -36,10 +45,24 @@ export function memoryVault() {
 		const value = parseFrontmatter(content).fields[DOCID_FRONTMATTER_KEY];
 		return typeof value === "string" && value !== "" ? value : undefined;
 	};
+	const arrived = (content: string): void => {
+		const docId = docIdOf(content);
+		if (docId !== undefined) deleted.delete(docId);
+	};
 	const port: VaultPort = {
 		notes: () =>
 			Promise.resolve(
-				[...files.entries()].map(([path, file]) => ({ path, docId: docIdOf(file.content), ctime: file.ctime })),
+				[...files.entries()].map(([path, file]) => {
+					const fields = parseFrontmatter(file.content).fields;
+					const tags = frontmatterTags(fields.tags);
+					return {
+						path,
+						docId: docIdOf(file.content),
+						ctime: file.ctime,
+						...(tags.length > 0 ? { tags } : {}),
+						...(isOptOut(fields[OPT_OUT_FRONTMATTER_KEY]) ? { optOut: true } : {}),
+					};
+				}),
 			),
 		move: (from, to) => {
 			const file = files.get(from);
@@ -58,6 +81,20 @@ export function memoryVault() {
 			files.set(path, { ...file, content: withDocId(file.content, docId) });
 			return Promise.resolve();
 		},
+		setOptOut: (path, optOut) => {
+			const file = files.get(path);
+			if (file === undefined) return Promise.reject(new Error(`no ${path}`));
+			write();
+			files.set(path, { ...file, content: withField(file.content, OPT_OUT_FRONTMATTER_KEY, optOut ? "false" : null) });
+			return Promise.resolve();
+		},
+		setTags: (path, tags) => {
+			const file = files.get(path);
+			if (file === undefined) return Promise.reject(new Error(`no ${path}`));
+			write();
+			files.set(path, { ...file, content: withField(file.content, "tags", tags.length === 0 ? null : `[${tags.join(", ")}]`) });
+			return Promise.resolve();
+		},
 		load: (path) => {
 			const file = files.get(path);
 			if (file === undefined) return Promise.resolve(null);
@@ -71,6 +108,7 @@ export function memoryVault() {
 				resolveEmbed: () => ({ kind: "missing" as const }),
 			});
 		},
+		deleted: (docId) => deleted.has(docId),
 	};
 	return {
 		port,
@@ -83,6 +121,7 @@ export function memoryVault() {
 		read: (path: string) => files.get(path)?.content,
 		docIdOf,
 		create(path: string, content: string): void {
+			arrived(content);
 			files.set(path, { content, ctime: ++clock });
 		},
 		modify(path: string, change: (content: string) => string): void {
@@ -104,6 +143,9 @@ export function memoryVault() {
 			if (file === undefined) throw new Error(`no ${path}`);
 			files.delete(path);
 			trash.set(path, file);
+			// As Obsidian's delete event, under whatever name the note has now.
+			const docId = docIdOf(file.content);
+			if (docId !== undefined) deleted.add(docId);
 		},
 		restore(path: string): string {
 			const file = trash.get(path);
@@ -111,7 +153,10 @@ export function memoryVault() {
 			trash.delete(path);
 			const at = free(path);
 			files.set(at, file);
+			arrived(file.content);
 			return at;
 		},
 	};
 }
+
+export type MemoryVault = ReturnType<typeof memoryVault>;

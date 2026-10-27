@@ -333,4 +333,13 @@ describe("mergePullMappings", () => {
 			accountedHash: "device-hash",
 		});
 	});
+
+	it("keeps the hash of an update in place that landed while the pull ran: same notebook, newer hash", () => {
+		const scope: MappingTable = { "doc-a": { ...TABLE["doc-a"], accountedHash: "read-at-start" } };
+		// The send updated the notebook in place (same id) and recorded its new hash.
+		const current: MappingTable = { "doc-a": { ...scope["doc-a"], accountedHash: "after-send", contentHash: "new" } };
+		// The pull had read the notebook as it was before the send.
+		const pulled: MappingTable = { "doc-a": { ...scope["doc-a"], accountedHash: "before-send" } };
+		expect(mergePullMappings(current, scope, pulled)["doc-a"].accountedHash).toBe("after-send");
+	});
 });

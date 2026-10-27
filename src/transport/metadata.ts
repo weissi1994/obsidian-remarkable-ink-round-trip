@@ -20,6 +20,7 @@ interface Metadata {
 	parent?: string;
 	type?: string;
 	lastModified?: string;
+	createdTime?: string;
 	[key: string]: unknown;
 }
 
@@ -59,6 +60,7 @@ export async function readListing(api: RawSyncApi, cache: Record<string, DeviceI
 					parent: String(meta.parent ?? ""),
 					visibleName: String(meta.visibleName ?? ""),
 					lastModified: String(meta.lastModified ?? "0"),
+					...(meta.createdTime === undefined ? {} : { createdTime: String(meta.createdTime) }),
 				};
 			} catch {
 				// Tried again next time; the stale cache entry is not trusted meanwhile.
@@ -109,6 +111,73 @@ export function editMetadata(
 		await Promise.all([uploadMeta, uploadEntries, uploadRoot]);
 		await api.putRootHash(rootEntry.hash, generation);
 		return entry.hash;
+	}, options.retry);
+}
+
+/** A document's tags as its `.content` holds them (`tags`: [{ name, timestamp }]). */
+interface ContentTag {
+	name: string;
+	timestamp?: number;
+	[key: string]: unknown;
+}
+
+function tagsOf(content: Record<string, unknown>): ContentTag[] {
+	const tags = content.tags;
+	return Array.isArray(tags)
+		? tags.filter((tag): tag is ContentTag => typeof tag === "object" && tag !== null && typeof (tag as ContentTag).name === "string")
+		: [];
+}
+
+async function readContent(api: RawSyncApi, docId: string, hash: string): Promise<{ entries: RawEntry[]; entry: RawEntry | undefined; content: Record<string, unknown> }> {
+	const { entries } = await api.getEntries(`${docId}.docSchema`, hash);
+	const entry = entries.find((one) => one.id === `${docId}.content`);
+	if (entry === undefined) return { entries, entry, content: {} };
+	const parsed: unknown = JSON.parse(new TextDecoder().decode(await api.getHash(entry.id, entry.hash)));
+	return { entries, entry, content: typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {} };
+}
+
+/** A document's tags (not its pages' tags) at root entry hash `hash`. */
+export async function readTags(api: RawSyncApi, docId: string, hash: string): Promise<string[]> {
+	return tagsOf((await readContent(api, docId, hash)).content).map((tag) => tag.name);
+}
+
+/**
+ * Set a document's tags while its root entry still has `expectedHash`;
+ * resolves to its new entry hash. Only `.content`'s document tags change:
+ * a tag kept keeps its timestamp, page tags and everything else stay.
+ * NotebookChangedError / NotebookGoneError as editMetadata.
+ */
+export function editTags(
+	api: RawSyncApi,
+	docId: string,
+	expectedHash: string,
+	tags: readonly string[],
+	options: { retry?: RetryOptions; now?: () => number } = {},
+): Promise<string> {
+	return withGenerationRetry(async () => {
+		const [rootHash, generation, schemaVersion] = await api.getRootHash();
+		const { entries: root } = await api.getEntries("root.docSchema", rootHash);
+		const current = root.find((entry) => entry.id === docId);
+		if (current === undefined) throw new NotebookGoneError(docId);
+		if (current.hash !== expectedHash) throw new NotebookChangedError(docId, expectedHash, current.hash);
+		const { entries, entry, content } = await readContent(api, docId, current.hash);
+		const now = (options.now ?? Date.now)();
+		const had = tagsOf(content);
+		const next = tags.map((name) => had.find((tag) => tag.name === name) ?? { name, timestamp: now });
+		const [newContent, uploadContent] = await api.putText(`${docId}.content`, JSON.stringify({ ...content, tags: next }));
+		const [docEntry, uploadEntries] = await api.putEntries(
+			docId,
+			entry === undefined ? [...entries, newContent] : entries.map((e) => (e.id === entry.id ? newContent : e)),
+			schemaVersion,
+		);
+		const [rootEntry, uploadRoot] = await api.putEntries(
+			"root",
+			root.map((e) => (e.id === docId ? docEntry : e)),
+			4,
+		);
+		await Promise.all([uploadContent, uploadEntries, uploadRoot]);
+		await api.putRootHash(rootEntry.hash, generation);
+		return docEntry.hash;
 	}, options.retry);
 }
 

@@ -55,6 +55,8 @@ export interface SceneLine {
 	 * Absent when the anchor is not a character this page's text has.
 	 */
 	textAnchorY?: number;
+	/** The character of the page's typed text the line's group is anchored to, when it is one. */
+	anchorId?: ItemId;
 }
 
 export interface DeletedRange {
@@ -94,6 +96,8 @@ export interface TextParagraph extends TypedParagraph {
 	text: string;
 	/** Item id of each code point of `text`; erased characters are not in either. */
 	charIds: ItemId[];
+	/** Where the paragraph starts in page units, by rmc's layout (see textAnchorY): an estimate. */
+	y: number;
 }
 
 /** The page's typed text: paragraphs in document order, and the text box in page units. */
@@ -331,17 +335,29 @@ function readTreeNode(reader: Reader): { id: ItemId; group: GroupInfo } {
 }
 
 /** One code point, format code or erased character (value null) of the text sequence. */
-interface TextChar {
+export interface TextChar {
 	id: ItemId;
 	left: ItemId;
 	right: ItemId;
 	value: string | number | null;
+	/** Index of the stored item the character was expanded from. */
+	item: number;
 }
 
-interface RawRootText {
+/** A paragraph style entry: keyed by the newline that opens the paragraph, last writer wins by timestamp. */
+export interface StyleEntry {
+	key: ItemId;
+	timestamp: ItemId;
+	code: number;
+}
+
+export interface RawRootText {
+	/** The block's own id field. */
+	blockId: ItemId;
 	chars: TextChar[];
 	/** Newline id → paragraph style code. */
 	styles: Map<string, number>;
+	styleEntries: StyleEntry[];
 	x: number;
 	y: number;
 	width: number;
@@ -354,6 +370,7 @@ interface RawRootText {
  */
 function expandTextItem(
 	out: TextChar[],
+	item: number,
 	id: ItemId,
 	left: ItemId,
 	right: ItemId,
@@ -370,13 +387,13 @@ function expandTextItem(
 	units.forEach((unit, i) => {
 		const charId = { author: id.author, counter: id.counter + i };
 		const rightId = i === units.length - 1 ? right : { author: id.author, counter: id.counter + i + 1 };
-		out.push({ id: charId, left: leftId, right: rightId, value: unit });
+		out.push({ id: charId, left: leftId, right: rightId, value: unit, item });
 		leftId = charId;
 	});
 }
 
 function readRootText(reader: Reader): RawRootText {
-	reader.id(1);
+	const blockId = reader.id(1);
 	const body = reader.sub(2);
 	const items = body.sub(1).sub(1);
 	const chars: TextChar[] = [];
@@ -396,26 +413,72 @@ function readRootText(reader: Reader): RawRootText {
 			// A format code rides on an empty string (rmscene read_string_with_format).
 			if (string.has(2, TAG_BYTE4)) value = string.int(2);
 		}
-		expandTextItem(chars, id, left, right, deletedLength, value);
+		expandTextItem(chars, i, id, left, right, deletedLength, value);
 	}
 	const styles = new Map<string, number>();
+	const styleEntries: StyleEntry[] = [];
 	const formats = body.sub(2).sub(1);
 	const styleCount = formats.varuint();
 	for (let i = 0; i < styleCount; i++) {
 		const charId = formats.crdtId();
-		formats.id(1);
+		const timestamp = formats.id(1);
 		const style = formats.sub(2);
 		style.expect(1, TAG_BYTE1);
-		styles.set(idKey(charId), style.u8());
+		const code = style.u8();
+		styles.set(idKey(charId), code);
+		styleEntries.push({ key: charId, timestamp, code });
 	}
 	const position = reader.sub(3);
 	const x = position.f64();
 	const y = position.f64();
-	return { chars, styles, x, y, width: reader.float(4) };
+	return { blockId, chars, styles, styleEntries, x, y, width: reader.float(4) };
+}
+
+/** Read the body of a RootText block (`start`–`end` of `bytes`); throws when it is malformed. */
+export function readRootTextBlock(bytes: Uint8Array, start: number, end: number): RawRootText {
+	return readRootText(new Reader(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), start, end));
+}
+
+/**
+ * The highest counter of `author` in any id of a block body, walking every
+ * tagged field and every subblock that reads as tagged fields; a byte that
+ * starts no field (a list count, an item type) is stepped over. Over-counts
+ * rather than misses: a payload that happens to parse adds its own ids.
+ */
+export function maxCounterInBlock(bytes: Uint8Array, start: number, end: number, author: number): number {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	let max = 0;
+	const walk = (from: number, to: number, depth: number): void => {
+		const reader = new Reader(view, from, to);
+		while (reader.remaining > 0) {
+			const at = reader.offset;
+			try {
+				const tag = reader.tag();
+				if (tag.type === TAG_ID) {
+					const id = reader.crdtId();
+					if (id.author === author && id.counter < 2 ** 40) max = Math.max(max, id.counter);
+				} else if (tag.type === TAG_LENGTH4) {
+					const length = reader.u32();
+					if (length > reader.remaining) throw new Error("not a subblock");
+					if (depth < 8) walk(reader.offset, reader.offset + length, depth + 1);
+					reader.offset += length;
+				} else if (tag.type === TAG_BYTE1 || tag.type === TAG_BYTE4 || tag.type === TAG_BYTE8) {
+					reader.offset += tag.type;
+				} else {
+					throw new Error("not a field");
+				}
+				if (reader.offset > to) return;
+			} catch {
+				reader.offset = at + 1;
+			}
+		}
+	};
+	walk(start, end, 0);
+	return max;
 }
 
 /** (0, 0): the start and end of every CRDT sequence, and the first paragraph's key. */
-const SEQUENCE_END: ItemId = { author: 0, counter: 0 };
+export const SEQUENCE_END: ItemId = { author: 0, counter: 0 };
 
 /**
  * The CRDT sequence in document order: Kahn's algorithm over left → item →
@@ -423,7 +486,7 @@ const SEQUENCE_END: ItemId = { author: 0, counter: 0 };
  * counter — rmscene's toposort_items, which matches the tablet's own order.
  * Unknown neighbours count as the sequence ends. Throws on a cycle.
  */
-function orderTextChars(chars: TextChar[]): TextChar[] {
+export function orderTextChars(chars: TextChar[]): TextChar[] {
 	const byKey = new Map(chars.map((char) => [idKey(char.id), char]));
 	const START = "start";
 	const FINISH = "finish";
@@ -540,7 +603,7 @@ function resolveText(raw: RawRootText): { text: SceneText; anchorY: Map<string, 
 		const code = raw.styles.get(idKey(startId)) ?? 1;
 		const style: ParagraphStyle = PARAGRAPH_STYLES[code] ?? "plain";
 		const draft: Draft = {
-			paragraph: { style, spans: [], startId, text: "", charIds: [] },
+			paragraph: { style, spans: [], startId, text: "", charIds: [], y: 0 },
 			anchorKeys: [idKey(startId)],
 		};
 		drafts.push(draft);
@@ -580,6 +643,7 @@ function resolveText(raw: RawRootText): { text: SceneText; anchorY: Map<string, 
 	let y = raw.y + TEXT_TOP_Y;
 	anchorY.set(MARKER_TOP, y);
 	for (const { paragraph, anchorKeys } of drafts) {
+		paragraph.y = y;
 		for (const key of anchorKeys) anchorY.set(key, y);
 		y += LINE_HEIGHTS[paragraph.style] ?? 70;
 	}
@@ -732,6 +796,7 @@ export function parseRmScene(bytes: Uint8Array): RmScene {
 					!(isMarkerAnchor(group.anchorId) && !hasRootText)
 				) {
 					anchored = true;
+					if (!isMarkerAnchor(group.anchorId)) line.anchorId ??= group.anchorId;
 					const y = textAnchors.get(idKey(group.anchorId));
 					anchorY = y === undefined || anchorY === undefined ? undefined : anchorY + y;
 				}

@@ -21,6 +21,10 @@ import { isInWatchFolder } from "./watcher";
 export interface VaultNote {
 	path: string;
 	docId?: string;
+	/** Its frontmatter `tags` (sync/tags.ts frontmatterTags); absent = none. */
+	tags?: string[];
+	/** `remarkable: false` in its frontmatter: never sent on its own, not even from a sync folder. */
+	optOut?: boolean;
 }
 
 export interface ReconcilePolicy {
@@ -58,9 +62,10 @@ export type Action =
 	| { kind: "trash-notebook"; docId: string; deviceDocId: string; expectedHash: string; log: string }
 	/**
 	 * The notebook was trashed or is gone: its unread ink in first (when
-	 * `readFirst`), then the note into the archive folder.
+	 * `readFirst`), then the note into the archive folder; `archivedFrom` is
+	 * where it goes back to.
 	 */
-	| { kind: "archive-note"; docId: string; from: string; to: string; readFirst: boolean; log: string };
+	| { kind: "archive-note"; docId: string; from: string; to: string; archivedFrom: string; readFirst: boolean; log: string };
 
 const stripMd = (path: string): string => path.replace(/\.md$/i, "");
 export const baseName = (path: string): string => stripMd(path.split("/").pop() ?? path);
@@ -101,18 +106,59 @@ export function archivePathOf(notePath: string, archiveFolder: string): string {
 	return archive === "" || isInWatchFolder(notePath, archive) ? notePath : `${archive}/${notePath}`;
 }
 
+const syncedRecords = (records: MappingTable): MappingEntry[] =>
+	Object.values(records).filter((record) => record.state !== "archived" && (record.format === "ink" || record.format === "device"));
+
+/**
+ * Whether the listing is of another account (an endpoint or account
+ * switch) rather than the one the notes were synced with: none — or, with
+ * many synced notes, hardly any — of their notebooks are on it, trashed ones
+ * included, and none of the device folders they were in either (notebooks
+ * erased on the tablet leave their folders). Nothing missing from it is
+ * then taken as deleted.
+ */
+export function foreignListing(records: MappingTable, device: readonly DeviceItem[] | null): boolean {
+	if (device === null || device.length === 0) return false;
+	const ids = new Set(device.map((item) => item.id));
+	const synced = syncedRecords(records);
+	const present = synced.filter((record) => ids.has(record.deviceDocId)).length;
+	const folders = synced.flatMap((record) => (record.deviceParent === undefined || record.deviceParent === "" ? [] : [record.deviceParent]));
+	if (folders.some((folder) => ids.has(folder))) return false;
+	// Notebooks in folders that are all gone too, or many notebooks gone at once.
+	return (folders.length > 0 && present === 0) || (synced.length >= 2 && present === 0) || (synced.length >= 5 && present * 5 < synced.length);
+}
+
+/**
+ * Whether most synced notes went from the vault at once, with no delete
+ * seen: more likely a vault still arriving on this device (its sync state
+ * came before its notes) than the owner deleting them. None is then taken
+ * as deleted.
+ */
+export function vanishedAtOnce(records: MappingTable, vault: readonly VaultNote[], deleted?: (docId: string) => boolean): boolean {
+	const ids = new Set(vault.map((note) => note.docId));
+	const synced = syncedRecords(records);
+	const missing = synced.filter((record) => !ids.has(record.docId) && deleted?.(record.docId) !== true).length;
+	return missing >= 3 && missing * 2 > synced.length;
+}
+
 /**
  * The actions that bring every record's note and notebook back together.
  * `device` null: the account could not be listed — nothing on the tablet
- * side is judged. An empty listing (a fresh pairing, an endpoint switch) and
- * an empty vault (not loaded yet) are never read as "everything was
- * deleted".
+ * side is judged. An empty listing (a fresh pairing), another account's
+ * listing (foreignListing), an empty vault (not loaded yet) and a vault
+ * most of whose synced notes vanished at once (vanishedAtOnce) are never
+ * read as "everything was deleted". A note missing without a delete seen
+ * (`deleted`) counts as deleted only when still missing on the next sync.
+ * A notebook another copy of the vault replaced by a send whose record has
+ * not arrived yet is not taken as trashed; nothing is decided for it until
+ * the record has arrived.
  */
 export function plan(
 	records: MappingTable,
 	vault: readonly VaultNote[],
 	device: readonly DeviceItem[] | null,
 	policy: ReconcilePolicy,
+	deleted?: (docId: string) => boolean,
 ): Action[] {
 	const notesById = new Map<string, VaultNote[]>();
 	for (const note of vault) {
@@ -122,8 +168,13 @@ export function plan(
 		notesById.set(note.docId, list);
 	}
 	const byId = new Map((device ?? []).map((item) => [item.id, item]));
-	const listed = device !== null && device.length > 0;
-	const vaultSeen = vault.length > 0;
+	// Another account's listing says nothing about these notebooks: as if it could not be read.
+	const judged = device !== null && !foreignListing(records, device);
+	const listed = judged && device.length > 0;
+	const vaultSeen = vault.length > 0 && !vanishedAtOnce(records, vault, deleted);
+	const known = new Set(Object.values(records).map((record) => record.deviceDocId));
+	const archive = clean(policy.archiveFolder);
+	const inArchive = (path: string) => archive !== "" && isInWatchFolder(path, archive);
 	const actions: Action[] = [];
 
 	for (const record of Object.values(records)) {
@@ -138,7 +189,8 @@ export function plan(
 			}
 			continue;
 		}
-		if (device === null) continue;
+		if (note !== undefined && record.noteMissing === true) actions.push({ kind: "record", docId: record.docId, patch: { noteMissing: undefined } });
+		if (!judged) continue;
 		const dev = byId.get(record.deviceDocId);
 		if (dev?.unreadable === true) continue;
 		const trashed = dev !== undefined && inTrash(dev.parent, byId);
@@ -148,13 +200,23 @@ export function plan(
 			actions.push(...out);
 			continue;
 		}
+		// A send that replaces a notebook trashes it in the root write that makes the new one, stamping both with one time
+		// (the new one may since have been replaced in turn).
+		const trashedAt = trashed ? dev?.lastModified : undefined;
+		if (trashedAt !== undefined && device?.some((item) => item.type === "DocumentType" && item.createdTime === trashedAt && !known.has(item.id)) === true) {
+			continue;
+		}
 		if (note === undefined) {
 			if (!vaultSeen) continue;
+			if (deleted?.(record.docId) !== true && record.noteMissing !== true) {
+				actions.push({ kind: "record", docId: record.docId, patch: { noteMissing: true } });
+				continue;
+			}
 			if (gone || trashed) {
 				actions.push({
 					kind: "record",
 					docId: record.docId,
-					patch: { state: "archived", archivedFrom: undefined },
+					patch: { state: "archived", archivedFrom: undefined, noteMissing: undefined },
 					log: `${record.notePath}: deleted in the vault, and its notebook is ${gone ? "gone from" : "in the trash on"} the reMarkable — archived`,
 				});
 			} else if (dev === undefined) {
@@ -180,17 +242,28 @@ export function plan(
 			continue;
 		}
 		if (dev === undefined || trashed) {
-			if (dev === undefined && !gone) {
-				if (note.path !== record.notePath) actions.push({ kind: "record", docId: record.docId, patch: { notePath: note.path } });
-				continue;
-			}
+			// Its notebook is not listed (yet): a rename or move waits for it, so the record keeps the old path.
+			if (dev === undefined && !gone) continue;
 			actions.push({
 				kind: "archive-note",
 				docId: record.docId,
 				from: note.path,
 				to: archivePathOf(note.path, policy.archiveFolder),
+				archivedFrom: inArchive(note.path) && !inArchive(record.notePath) ? record.notePath : note.path,
 				readFirst: dev !== undefined && dev.hash !== record.accountedHash,
 				log: `${note.path}: notebook ${dev === undefined ? "gone from" : "moved to the trash on"} the reMarkable — note archived`,
+			});
+			continue;
+		}
+		if (inArchive(note.path) && !inArchive(record.notePath)) {
+			// Into the archive is not a move the notebook follows: while it is live, the note goes back where it was synced.
+			actions.push({
+				kind: "move-note",
+				docId: record.docId,
+				from: note.path,
+				to: record.notePath,
+				patch: {},
+				log: `${note.path}: its notebook “${dev.visibleName}” is still on the reMarkable — note moved back out of the archive`,
 			});
 			continue;
 		}
@@ -214,7 +287,11 @@ function planNames(
 	const vaultMoved = folder !== folderOf(record.notePath);
 	// A record from before these were kept takes the tablet as it is.
 	const tabletRenamed = dev.visibleName !== (record.deviceName ?? dev.visibleName);
-	const tabletMoved = dev.parent !== (record.deviceParent ?? dev.parent);
+	// A folder renamed or moved on the tablet keeps its id: its path tells.
+	const devicePath = devicePathOf(dev.parent, byId);
+	const tabletMoved =
+		dev.parent !== (record.deviceParent ?? dev.parent) ||
+		(record.devicePath !== undefined && devicePath !== null && devicePath !== record.devicePath);
 	const mirrored = policy.baseFolder === null ? null : mirroredVaultFolder(dev.parent, byId, policy.baseFolder);
 
 	const lines: string[] = [];
@@ -256,7 +333,10 @@ function planNames(
 			docId,
 			from: note.path,
 			to,
-			patch: { deviceName: visibleName ?? dev.visibleName, ...(toFolder === undefined ? { deviceParent: dev.parent } : {}) },
+			patch: {
+				deviceName: visibleName ?? dev.visibleName,
+				...(toFolder === undefined ? { deviceParent: dev.parent, devicePath: devicePath ?? undefined } : {}),
+			},
 			log: `${note.path}: ${noteName !== name ? `renamed on the tablet to “${dev.visibleName}”` : ""}${
 				noteName !== name && noteFolder !== folder ? " and " : ""
 			}${noteFolder !== folder ? `moved on the tablet to “${noteFolder || "/"}”` : ""} — note follows`,
@@ -269,6 +349,7 @@ function planNames(
 	if (note.path !== record.notePath) patch.notePath = note.path;
 	if (record.deviceName !== dev.visibleName) patch.deviceName = dev.visibleName;
 	if (record.deviceParent !== dev.parent) patch.deviceParent = dev.parent;
+	if (devicePath !== null && record.devicePath !== devicePath) patch.devicePath = devicePath;
 	if (Object.keys(patch).length === 0) return [];
 	const detached =
 		policy.baseFolder !== null && tabletMoved && mirrored === null
@@ -319,7 +400,7 @@ function planArchived(
 				{
 					kind: "record",
 					docId,
-					patch: { ...resumed, notePath: note.path, contentHash: "", deviceName: undefined, deviceParent: undefined },
+					patch: { ...resumed, notePath: note.path, contentHash: "", deviceName: undefined, deviceParent: undefined, devicePath: undefined },
 					log: `${note.path}: back in the vault; its notebook is gone from the reMarkable, so a new one is sent`,
 				},
 			];
@@ -328,8 +409,14 @@ function planArchived(
 		const folder = folderOf(note.path);
 		const rename = dev.visibleName === name ? {} : { visibleName: name };
 		if (trashed) {
+			// Back where it was — unless that folder mirrors another vault folder by now (renamed or moved on the tablet).
+			const parent = record.deviceParent;
+			const mirroredNow = parent === undefined || policy.baseFolder === null ? null : mirroredVaultFolder(parent, byId, policy.baseFolder);
 			const keepParent =
-				note.path === record.notePath && record.deviceParent !== undefined && (record.deviceParent === "" || devicePathOf(record.deviceParent, byId) !== null);
+				note.path === record.notePath &&
+				parent !== undefined &&
+				(parent === "" || devicePathOf(parent, byId) !== null) &&
+				(mirroredNow === null || mirroredNow === folderOf(note.path));
 			return [
 				{
 					kind: "edit-notebook",
@@ -364,7 +451,7 @@ function planArchived(
 			{
 				kind: "record",
 				docId,
-				patch: { ...resumed, notePath: note.path, deviceName: dev.visibleName, deviceParent: dev.parent },
+				patch: { ...resumed, notePath: note.path, deviceName: dev.visibleName, deviceParent: dev.parent, devicePath: devicePathOf(dev.parent, byId) ?? undefined },
 				log: `${note.path}: back in the vault — synced again`,
 			},
 		];
@@ -379,7 +466,7 @@ function planArchived(
 				docId,
 				from: note.path,
 				to,
-				patch: { ...resumed, deviceName: dev.visibleName, deviceParent: dev.parent },
+				patch: { ...resumed, deviceName: dev.visibleName, deviceParent: dev.parent, devicePath: devicePathOf(dev.parent, byId) ?? undefined },
 				log: `${to}: notebook restored on the reMarkable — note moved back from the archive`,
 			},
 		];

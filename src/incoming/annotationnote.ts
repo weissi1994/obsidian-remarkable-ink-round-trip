@@ -211,6 +211,7 @@ function renderMark(mark: ImportedMark, styles: MarkStyles, erasedAs: "delete" |
 					(mark.quote === undefined ? "" : ` into the line “${mark.quote}”`),
 			];
 		default:
+			if (mark.typed !== undefined) return ["Typed on the reMarkable:", "", ...mark.typed.split("\n")];
 			if (mark.addedPage !== undefined) {
 				return [`**Page added on the reMarkable** (page ${mark.addedPage})${check}`, ...image];
 			}

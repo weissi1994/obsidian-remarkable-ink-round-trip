@@ -94,3 +94,5 @@ export function fakeCloud(failRootHashTimes = 0) {
 		},
 	};
 }
+
+export type FakeCloud = ReturnType<typeof fakeCloud>;

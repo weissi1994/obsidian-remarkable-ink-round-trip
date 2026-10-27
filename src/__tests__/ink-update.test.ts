@@ -206,7 +206,9 @@ describe("updating a notebook in place", () => {
 		});
 		read = await contentOf(cloud, docId);
 		expect(read.order).toEqual([p1, p2]);
-		expect(read.files.has(`${docId}/owner.rm`)).toBe(false);
+		// Gone as the tablet deletes a page: record and files stay, the record marked with a later stamp.
+		expect(read.content.cPages?.pages.find((one) => one.id === "owner")?.deleted).toEqual({ timestamp: "2:2", value: 1 });
+		expect(read.files.get(`${docId}/owner.rm`)).toEqual(ownerPage);
 		expect(read.content.pageTags?.map((tag) => tag.pageId)).toEqual([p2]);
 	});
 
@@ -227,28 +229,109 @@ describe("updating a notebook in place", () => {
 		expect(result.pageIds).toEqual([p1]);
 		const { files, content, order } = await contentOf(cloud, docId);
 		expect(order).toEqual([p1, "owner"]);
-		expect(files.has(`${docId}/${p2}.rm`)).toBe(false);
+		expect(content.cPages?.pages.find((one) => one.id === p2)?.deleted).toEqual({ timestamp: "1:3", value: 1 });
+		expect(files.has(`${docId}/${p2}.rm`)).toBe(true);
 		expect(content.pageTags).toEqual([]);
 		// The page it was open on is gone: it opens on the first page.
 		expect(content.lastOpenedPage).toBe(0);
 		expect(content.cPages?.lastOpened.value).toBe(p1);
 	});
 
-	it("brings back a page of ours the owner deleted", async () => {
+	it("brings back a page of ours the owner deleted under a new id, leaving the tablet's delete as it was", async () => {
 		const { cloud, docId, p1, p2, pageIds } = await openedOnTablet();
 		const deleted = await onTablet(cloud, docId, (files) => {
 			const content = decodeJson<Content>(files.get(`${docId}.content`));
 			const pages = content.cPages!.pages.map((p) => (p.id === p2 ? { ...p, deleted: { timestamp: "1:6", value: 1 } } : p));
 			files.set(`${docId}.content`, encodeJson({ ...content, cPages: { ...content.cPages, pages } }));
 		});
-		await sendNotebookUpdate(cloud.api, docId, "Plan", [page(100), page(320)], {
+		const result = await sendNotebookUpdate(cloud.api, docId, "Plan", [page(100), page(320)], {
 			expectedHash: deleted,
 			pageIds,
 			retry: NO_WAIT,
 		});
-		const { content, order } = await contentOf(cloud, docId);
-		expect(order).toEqual([p1, p2]);
-		expect(content.cPages?.pages[1].deleted).toBeUndefined();
+		const back = result.pageIds[1];
+		expect(result.pageIds[0]).toBe(p1);
+		expect(back).not.toBe(p2);
+		const { files, content, order } = await contentOf(cloud, docId);
+		expect(order).toEqual([p1, back]);
+		expect(content.cPages?.pages.find((one) => one.id === p2)?.deleted).toEqual({ timestamp: "1:6", value: 1 });
+		expect(files.get(`${docId}/${back}.rm`)).toEqual(page(320));
+	});
+
+	it("keeps an owner's page where its order key puts it, not where its record is stored", async () => {
+		const { cloud, docId, p1, p2, pageIds } = await openedOnTablet();
+		const added = await onTablet(cloud, docId, (files) => {
+			const content = decodeJson<Content>(files.get(`${docId}.content`));
+			// Inserted between our pages on the tablet, stored at the end of the list.
+			const owner = { id: "owner", idx: { timestamp: "2:1", value: "baa" } };
+			files.set(`${docId}.content`, encodeJson({ ...content, cPages: { ...content.cPages, pages: [...content.cPages!.pages, owner] } }));
+			files.set(`${docId}/owner.rm`, ownerPage);
+		});
+		const first = await sendNotebookUpdate(cloud.api, docId, "Plan", [page(100), page(320)], {
+			expectedHash: added,
+			pageIds,
+			noteText: "",
+			retry: NO_WAIT,
+		});
+		expect((await contentOf(cloud, docId)).order).toEqual([p1, "owner", p2]);
+		await sendNotebookUpdate(cloud.api, docId, "Plan", [page(100), page(340)], {
+			expectedHash: first.hash,
+			pageIds: first.pageIds,
+			noteText: "",
+			retry: NO_WAIT,
+		});
+		expect((await contentOf(cloud, docId)).order).toEqual([p1, "owner", p2]);
+	});
+
+	it("hands back the pending record of an update whose root write provably never landed", async () => {
+		const { cloud, docId, pageIds, hash } = await openedOnTablet();
+		const announced: string[] = [];
+		const abandoned: string[] = [];
+		const hooks = {
+			beforeCommit: async (newHash: string, _ids: string[], written: string[]) => {
+				expect(written.length).toBeGreaterThan(0);
+				announced.push(newHash);
+			},
+			abandoned: async (newHash: string) => {
+				abandoned.push(newHash);
+			},
+		};
+		// The account changes under every attempt: nothing landed.
+		cloud.onRootWrite(() => new Error("precondition failed"));
+		await expect(
+			sendNotebookUpdate(cloud.api, docId, "Plan", [page(100), page(330)], { expectedHash: hash, pageIds, retry: NO_WAIT, ...hooks }),
+		).rejects.toThrow(/precondition/);
+		expect(announced).toHaveLength(3);
+		expect(abandoned).toEqual([announced[2]]);
+
+		// The tablet wrote into the notebook while the root write was on its way: it
+		// is refused, and the retry finds the notebook changed.
+		abandoned.length = 0;
+		cloud.onRootWrite(null);
+		let edited = false;
+		const changing: typeof hooks = {
+			...hooks,
+			beforeCommit: async (newHash, ids, written) => {
+				await hooks.beforeCommit(newHash, ids, written);
+				if (edited) return;
+				edited = true;
+				await onTablet(cloud, docId, (files) => files.set(`${docId}.pagedata`, new TextEncoder().encode("Lined\n")));
+			},
+		};
+		await expect(
+			sendNotebookUpdate(cloud.api, docId, "Plan", [page(100), page(331)], { expectedHash: hash, pageIds, retry: NO_WAIT, ...changing }),
+		).rejects.toBeInstanceOf(NotebookChangedError);
+		expect(abandoned).toEqual([announced[announced.length - 1]]);
+
+		// A root write that failed on the way may have landed: it is left for the next run to settle.
+		abandoned.length = 0;
+		const current = cloud.hashOf(docId)!;
+		cloud.onRootWrite(() => new Error("socket hang up"));
+		await expect(
+			sendNotebookUpdate(cloud.api, docId, "Plan", [page(100), page(332)], { expectedHash: current, pageIds, retry: NO_WAIT, ...hooks }),
+		).rejects.toThrow(/socket/);
+		expect(abandoned).toEqual([]);
+		cloud.onRootWrite(null);
 	});
 
 	it("refuses to overwrite a page of ours the owner typed text on, or one it cannot read", async () => {

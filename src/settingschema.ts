@@ -178,7 +178,7 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 		note:
 			"Notes travel as handwritten notebooks and come back the same way: what you " +
 			"erase, move, mark or write on the tablet is merged into the note itself, " +
-			"and what you change in the note is written into a fresh notebook. Edits " +
+			"and what you change in the note is written into its notebook in place. Edits " +
 			"made on both sides are merged; where both changed the same words, the " +
 			"note keeps yours and shows the tablet's next to it.",
 		items: [
@@ -211,10 +211,18 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 				key: "autoSync",
 				name: "Sync automatically from this device",
 				desc:
-					"At startup, on the interval above and when a note changes. Several copies " +
-					"of the vault on one tablet (laptop and desktop, synced by git)? Leave this on " +
-					"for one of them only; the others sync when you run “Sync with reMarkable now”.",
+					"At startup, on the interval above and when a note changes. Several copies of the " +
+					"vault on one tablet (laptop and desktop, synced by git)? The copy that syncs keeps a " +
+					"lease in the shared sync state folder and the others leave the automatic syncs to it " +
+					"until it stops syncing; a sync you start by hand asks first. Off: this device only " +
+					"syncs when you ask.",
 				control: { type: "toggle" },
+			},
+			{
+				key: "deviceLabel",
+				name: "This device's name",
+				desc: "How the other copies of the vault name this one when it is the copy syncing on its own. Empty: a generic name.",
+				control: { type: "text", placeholder: "Laptop" },
 			},
 			{
 				key: "syncStateFolder",
@@ -223,6 +231,8 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 					"Vault folder holding what ties notes to their notebooks, synced along with your " +
 					"notes — so every copy of the vault knows what was sent and none sends a " +
 					"duplicate. A folder starting with a dot stays out of Obsidian's file list. " +
+					"Files no note uses any more go to its “trash” subfolder after a week; delete " +
+					"that subfolder (with your file manager) to empty it. " +
 					"Move its contents along if you change it.",
 				control: { type: "text", placeholder: "reMarkable/.sync", sanitise: "path" },
 			},
@@ -242,6 +252,19 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 					"and is no longer synced. Restore the notebook on the tablet, or move the note out of this " +
 					"folder, to sync it again. Not inside a sync folder.",
 				control: { type: "text", placeholder: "reMarkable/Archive", sanitise: "path" },
+			},
+			{
+				key: "notebookMode",
+				name: "Notes go to the tablet as (experimental)",
+				desc:
+					"Handwriting, or the tablet's own typed text — which you can edit with the " +
+					"reMarkable keyboard and comes back word for word. Typed text shows headings, " +
+					"bullets, checkboxes and bold/italic; everything else stays as plain text. " +
+					"Applies to notes sent from now on.",
+				control: {
+					type: "dropdown",
+					options: { handwriting: "Handwriting (default)", typed: "Typed text (experimental)" },
+				},
 			},
 		],
 	},

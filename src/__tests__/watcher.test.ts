@@ -107,10 +107,10 @@ describe("WatchQueue", () => {
 		queue.noteChanged("out/nota.md");
 		queue.noteChanged("out/nota.md");
 		expect(timers.pending()).toBe(1);
-		expect(queue.status()).toEqual({ pendingChanges: 1 });
+		expect(queue.status()).toEqual({ pendingChanges: 1, pendingPaths: ["out/nota.md"] });
 		timers.fire();
 		expect(ready).toEqual([["out/nota.md"]]);
-		expect(queue.status()).toEqual({ pendingChanges: 0 });
+		expect(queue.status()).toEqual({ pendingChanges: 0, pendingPaths: [] });
 	});
 
 	it("coalesces different notes into one deduplicated batch", () => {
@@ -158,10 +158,10 @@ describe("WatchQueue", () => {
 		});
 		queue.noteChanged("out/a.md");
 		queue.noteRemoved("out/a.md");
-		expect(queue.status()).toEqual({ pendingChanges: 0 });
+		expect(queue.status()).toEqual({ pendingChanges: 0, pendingPaths: [] });
 		queue.noteChanged("out/b.md");
 		queue.dispose();
-		expect(queue.status()).toEqual({ pendingChanges: 0 });
+		expect(queue.status()).toEqual({ pendingChanges: 0, pendingPaths: [] });
 		timers.fire();
 		expect(ready).toEqual([]);
 	});

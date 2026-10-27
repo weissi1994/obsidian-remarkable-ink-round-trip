@@ -4,6 +4,24 @@
  * this runs in tests without Obsidian — same seam as the rest of the core.
  */
 
+import { parseFrontmatter } from "../preprocess/preprocess";
+
+/**
+ * Frontmatter key whose `false` keeps a note out of the sync even inside a
+ * sync folder ("Stop syncing" writes it, "Sync with reMarkable" removes it).
+ */
+export const OPT_OUT_FRONTMATTER_KEY = "remarkable";
+
+/** Whether a frontmatter value of OPT_OUT_FRONTMATTER_KEY opts the note out. */
+export function isOptOut(value: unknown): boolean {
+	return value === false || (typeof value === "string" && value.trim().toLowerCase() === "false");
+}
+
+/** Whether a note's text opts it out of the sync. */
+export function optedOut(content: string): boolean {
+	return isOptOut(parseFrontmatter(content).fields[OPT_OUT_FRONTMATTER_KEY]);
+}
+
 export type SelectionKind<T> =
 	| { kind: "note" }
 	| { kind: "folder"; children: T[] }

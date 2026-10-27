@@ -21,13 +21,18 @@ import {
 import {
 	ProgressHandle,
 	ProgressStatus,
+	SyncAlertStatus,
 	notify,
 	progressNotice,
 	updateProgress,
 } from "./notify";
 import type { ProgressCount } from "./status";
-import { StopSyncingModal, SyncStatusModal } from "./syncstatusmodal";
-import { buildSyncStatusSummary } from "./sync/statussummary";
+import { LeaseConfirmModal, StopSyncingModal, SyncStatusModal } from "./syncstatusmodal";
+import { buildSyncStatusSummary, classifyNotes, type NoteFacts, type NoteStatus } from "./sync/statussummary";
+import { leaseDecision, leaseDuration, leaseStanding, renewedLease } from "./sync/lease";
+import { FailureStreak, NOTICE_AFTER, runFailure, type RunFailure } from "./sync/failures";
+import { frontmatterTags } from "./sync/tags";
+import type { VaultNote } from "./sync/reconcile";
 import {
 	DEFAULT_SETTINGS,
 	RoundTripSettings,
@@ -46,7 +51,7 @@ import {
 } from "./transport/cloud";
 import { installFetchShim, ShimTransport } from "./transport/fetchshim";
 import { toTransportError } from "./transport/mirror";
-import { ensureFolderPath, editMetadata, readListing } from "./transport/metadata";
+import { ensureFolderPath, editMetadata, editTags, readListing, readTags } from "./transport/metadata";
 import {
 	describeByteCompat,
 	describeDiagnosis,
@@ -64,6 +69,7 @@ import {
 	importedNote,
 	importNotebooks,
 	noteFileName,
+	pageTypedText,
 	reimportNotebook,
 	writtenByPlugin,
 	type DeviceItem,
@@ -139,7 +145,7 @@ import { WatchQueue, isInWatchFolder, parseFolderList, renameInFolderList } from
 import { PullQueue, PushQueue, SyncQueueCoordinator } from "./sync/queues";
 import type { RawSyncApi } from "./transport/notebook";
 import type { Highlight } from "./incoming/highlights";
-import { flattenSelection } from "./sync/selection";
+import { flattenSelection, isOptOut, OPT_OUT_FRONTMATTER_KEY } from "./sync/selection";
 import { shouldAnnounceUpdate } from "./updatenotice";
 import { InkEdge } from "./inkedge";
 import { gridSizeFor, InkImage, InkStrokes, inkStrokesOf, Picture, quantizeImage } from "./ink/inkimage";
@@ -195,6 +201,28 @@ export default class RoundTripPlugin extends Plugin {
 	private samplesDirty = false;
 	private syncTimer: number | null = null;
 	private remarkOverlays: RemarkOverlays | null = null;
+	/** Background sync failures in a row, and the last run's (sync/failures.ts). */
+	private readonly failures = new FailureStreak();
+	/** Failures of the engine run going on now; null between runs. */
+	private runFailures: RunFailure[] | null = null;
+	/** Desktop status-bar warning for failing syncs, send errors and clashes. */
+	private alertStatus: SyncAlertStatus | null = null;
+	/** The last send error of a note, by path, until it goes through. */
+	private readonly noteErrors = new Map<string, string>();
+	/** Likewise a note whose notebook could not be read, until a read goes through. */
+	private readonly noteReadErrors = new Map<string, string>();
+	/** Notes the last sends held back, with why (SyncEngine.held). */
+	private readonly heldNotes = new Map<string, string>();
+	/**
+	 * Document ids of notes seen deleted in this session: a delete seen is
+	 * taken at once, a note merely missing only on a second sync
+	 * (sync/reconcile.ts). `docIdAt`: each note's id by path, as last listed,
+	 * to know whose note a deleted path was.
+	 */
+	private readonly deletedDocIds = new Set<string>();
+	private docIdAt = new Map<string, string>();
+	/** When the shared state folder was last cleaned up (garbage collection), this session. */
+	private lastGcAt = 0;
 	/** What every copy of the vault shares (sync/syncstate.ts); set up on load. */
 	state: SyncState = new SyncState(vaultFs(this.app), DEFAULT_SETTINGS.syncStateFolder);
 	/** Ink fork: handwritten notebooks, the handwriting library, OCR. */
@@ -233,6 +261,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.byteCompat = installByteCompat();
 		if (!Platform.isMobile) {
 			this.progressStatus = new ProgressStatus(this.addStatusBarItem());
+			this.alertStatus = new SyncAlertStatus(this.addStatusBarItem(), () => void this.openSyncStatus());
 		}
 		this.addSettingTab(new RoundTripSettingTab(this.app, this));
 		this.setupWatcher();
@@ -250,13 +279,16 @@ export default class RoundTripPlugin extends Plugin {
 			),
 		);
 		this.registerEvent(
-			this.app.vault.on("create", (file) =>
-				this.watchQueue?.noteChanged(file.path),
-			),
+			this.app.vault.on("create", (file) => this.watchQueue?.noteChanged(file.path)),
 		);
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
 				const structural = file instanceof TFolder || this.isTracked(oldPath);
+				const docId = this.docIdAt.get(oldPath);
+				if (docId !== undefined) {
+					this.docIdAt.delete(oldPath);
+					this.docIdAt.set(file.path, docId);
+				}
 				this.watchQueue?.noteRemoved(oldPath);
 				this.watchQueue?.noteChanged(file.path);
 				if (file instanceof TFolder) void this.folderRenamed(oldPath, file.path);
@@ -265,6 +297,9 @@ export default class RoundTripPlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on("delete", (file) => {
+				const cached = file instanceof TFile ? getFrontmatterValue(this.app.metadataCache.getFileCache(file)?.frontmatter, DOCID_FRONTMATTER_KEY) : undefined;
+				if (isValidDocId(cached)) this.deletedDocIds.add(cached);
+				for (const [path, docId] of this.docIdAt) if (isInWatchFolder(path, file.path)) this.deletedDocIds.add(docId);
 				this.watchQueue?.noteRemoved(file.path);
 				if (file instanceof TFolder || this.isTracked(file.path)) this.watchQueue?.structureChanged();
 			}),
@@ -282,7 +317,7 @@ export default class RoundTripPlugin extends Plugin {
 				item
 					.setTitle("Sync status")
 					.setIcon("activity")
-					.onClick(() => this.openSyncStatus()),
+					.onClick(() => void this.openSyncStatus()),
 			);
 			menu.showAtMouseEvent(event);
 		});
@@ -301,7 +336,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.addCommand({
 			id: "show-sync-status",
 			name: "Show sync status",
-			callback: () => this.openSyncStatus(),
+			callback: () => void this.openSyncStatus(),
 		});
 		this.addCommand({
 			id: "check-cloud-status",
@@ -314,7 +349,7 @@ export default class RoundTripPlugin extends Plugin {
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md") return false;
-				if (!checking) void this.sendFiles([file]);
+				if (!checking) void this.sendFiles([file], { optIn: true });
 				return true;
 			},
 		});
@@ -457,7 +492,7 @@ export default class RoundTripPlugin extends Plugin {
 						item
 							.setTitle("Sync with reMarkable")
 							.setIcon("refresh-cw")
-							.onClick(() => void this.sendFiles([file])),
+							.onClick(() => void this.sendFiles([file], { optIn: true })),
 					);
 					if (this.recordOf(file) !== undefined) {
 						menu.addItem((item) =>
@@ -502,7 +537,7 @@ export default class RoundTripPlugin extends Plugin {
 									: `Sync ${notes.length} notes with reMarkable`,
 							)
 							.setIcon("refresh-cw")
-							.onClick(() => void this.sendFiles(notes)),
+							.onClick(() => void this.sendFiles(notes, { optIn: true })),
 					);
 				},
 			),
@@ -514,7 +549,7 @@ export default class RoundTripPlugin extends Plugin {
 		this.setupSyncTimer();
 	}
 
-	private openSyncStatus(): void {
+	private async openSyncStatus(): Promise<void> {
 		const localPaths = new Set(
 			this.app.vault.getMarkdownFiles().map((file) => file.path),
 		);
@@ -529,6 +564,8 @@ export default class RoundTripPlugin extends Plugin {
 					watchPaths.add(file.path);
 			}
 		}
+		const lease = await this.state.readLease();
+		const standing = leaseStanding(lease, this.settings.installId, Date.now());
 		new SyncStatusModal(this.app, {
 			mode: this.settings.mirrorFolders ? "On" : "Off (flat uploads)",
 			watchFolder: watchFolders.length > 0 ? watchFolders.join(", ") : "Disabled",
@@ -542,7 +579,56 @@ export default class RoundTripPlugin extends Plugin {
 					uploading: this.uploading ?? undefined,
 				},
 			}),
+			notes: await this.noteStatuses(),
+			...(lease === null || standing === "expired"
+				? {}
+				: {
+						lease:
+							standing === "ours"
+								? `This device${this.settings.autoSync ? "" : " (automatic sync is off here)"}`
+								: `“${lease.device}”, until ${new Date(lease.expiresAt).toLocaleTimeString()} — this device only syncs when you ask`,
+					}),
+			failures: this.failures.last.map((failure) => `${failure.what}: ${failure.message}`),
+			openNote: (path) => void this.app.workspace.openLinkText(path, "", false),
 		}).open();
+	}
+
+	/** Every synced note, and every note of a sync folder, by state (sync/statussummary.ts). */
+	private async noteStatuses(): Promise<NoteStatus[]> {
+		const folders = this.settings.watchFolderEnabled ? parseFolderList(this.settings.watchFolderPath) : [];
+		const excluded = [this.settings.backupFolder.replace(/^\/+|\/+$/g, "") || "previous"];
+		const facts: NoteFacts[] = [];
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+			const docId = getFrontmatterValue(frontmatter, DOCID_FRONTMATTER_KEY);
+			const inSyncFolder =
+				folders.some((folder) => isInWatchFolder(file.path, folder)) && !excluded.some((folder) => isInWatchFolder(file.path, folder));
+			const synced = isValidDocId(docId) && this.settings.mappings[docId] !== undefined;
+			if (!synced && !inSyncFolder) continue;
+			facts.push({
+				path: file.path,
+				...(isValidDocId(docId) ? { docId } : {}),
+				...(isOptOut(getFrontmatterValue(frontmatter, OPT_OUT_FRONTMATTER_KEY)) ? { optOut: true } : {}),
+				inSyncFolder,
+				text: await this.app.vault.cachedRead(file),
+			});
+		}
+		const waiting = new Map<string, string | undefined>(this.heldNotes);
+		for (const path of this.watchQueue?.status().pendingPaths ?? []) if (!waiting.has(path)) waiting.set(path, "changed, about to be sent");
+		const errors = new Map([...this.noteReadErrors, ...this.noteErrors]);
+		return classifyNotes({ notes: facts, mappings: this.settings.mappings, errors, waiting });
+	}
+
+	/** The status-bar warning after a run: failing syncs, notes not sent, open clashes. */
+	private async refreshAlert(): Promise<void> {
+		if (this.alertStatus === null) return;
+		const statuses = await this.noteStatuses();
+		const last = this.failures.last[0];
+		this.alertStatus.show({
+			failing: last === undefined ? null : `the last sync failed: ${last.what}`,
+			errors: statuses.filter((note) => note.state === "error").length,
+			clashes: statuses.filter((note) => note.state === "clash").length,
+		});
 	}
 
 	private progress(message: string, count?: ProgressCount): ProgressHandle {
@@ -617,8 +703,12 @@ export default class RoundTripPlugin extends Plugin {
 	 * account listing: done before anything reads or sends, so a landed
 	 * notebook is known before its note could be sent a second time.
 	 */
-	private async settlePendingSends(present: ReadonlyMap<string, string>, log: (line: string) => void): Promise<void> {
-		const settled = await this.state.settlePending(this.settings.mappings, present);
+	private async settlePendingSends(
+		present: ReadonlyMap<string, string>,
+		log: (line: string) => void,
+		entriesAt?: (deviceDocId: string, hash: string) => Promise<ReadonlySet<string>>,
+	): Promise<void> {
+		const settled = await this.state.settlePending(this.settings.mappings, present, entriesAt);
 		if (settled.committed.length === 0 && settled.dropped.length === 0) return;
 		this.settings.mappings = settled.table;
 		for (const docId of settled.committed) log(`interrupted send of ${docId} had landed — recorded`);
@@ -681,7 +771,9 @@ export default class RoundTripPlugin extends Plugin {
 		// The mappings live in the shared state folder, not with this device's settings.
 		await this.saveData(storedFrom({ ...this.settings, mappings: {} }, this.extraData));
 		if (this.state.root !== this.settings.syncStateFolder) {
+			// What is there already (the folder renamed along with its parent) is known, not rewritten or lost.
 			this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder, this.settings.installId);
+			this.settings.mappings = { ...this.settings.mappings, ...(await this.state.loadMappings()) };
 		}
 		await this.state.saveMappings(this.settings.mappings);
 		await this.state.saveHandwriting(handwritingOf(this.settings));
@@ -772,12 +864,17 @@ export default class RoundTripPlugin extends Plugin {
 			// Through the same one-at-a-time engine as a full sync: names and
 			// folders are brought together first, then the notes are sent.
 			onReady: (paths) => {
-				void this.runEngine((engine) =>
-					engine.send(
-						paths.filter((path) => this.app.vault.getFileByPath(path) !== null),
-						{ auto: true, background: true },
-					),
-				);
+				void this.leaseAllows("auto").then((allowed) => {
+					if (!allowed) return;
+					return this.runEngine(
+						(engine) =>
+							engine.send(
+								paths.filter((path) => this.app.vault.getFileByPath(path) !== null),
+								{ auto: true, background: true },
+							),
+						{ background: true },
+					);
+				});
 			},
 		});
 	}
@@ -825,8 +922,9 @@ export default class RoundTripPlugin extends Plugin {
 	 * Two-way sync (the whole round trip in one go): read every synced
 	 * notebook and merge what changed on the tablet into its note, then send
 	 * every note in the sync folders or with a notebook already that is new
-	 * or out of date — the merged ones included. In the background it stays silent unless
-	 * something actually happened.
+	 * or out of date — the merged ones included. In the background it stays
+	 * silent unless something actually happened, and it leaves the syncing
+	 * to another copy of the vault holding the sync lease.
 	 */
 	syncNow(options: { background?: boolean } = {}): Promise<void> {
 		if (this.settings.deviceToken === "") {
@@ -836,33 +934,129 @@ export default class RoundTripPlugin extends Plugin {
 			return Promise.resolve();
 		}
 		if (this.syncRunning !== null) return this.syncRunning;
-		this.syncRunning = this.runEngine((engine) => engine.sync({ background: options.background })).finally(() => {
+		const background = options.background === true;
+		this.syncRunning = (async () => {
+			if (!(await this.leaseAllows(background ? "auto" : "manual"))) return;
+			await this.runEngine((engine) => engine.sync({ background }), { background });
+		})().finally(() => {
 			this.syncRunning = null;
 		});
 		return this.syncRunning;
 	}
 
+	/** How other copies of the vault name this one in the sync lease. */
+	private deviceLabel(): string {
+		const label = this.settings.deviceLabel.trim();
+		return label !== "" ? label : `${Platform.isMobile ? "a phone or tablet" : "a computer"} (${this.settings.installId.slice(0, 8)})`;
+	}
+
+	/**
+	 * Whether a sync may go ahead (sync/lease.ts): an automatic one only
+	 * while no other copy of the vault holds the lease, one started by hand
+	 * once the owner confirmed. A lease that cannot be read stops nothing.
+	 */
+	private async leaseAllows(trigger: "auto" | "manual"): Promise<boolean> {
+		const lease = await this.state.readLease().catch(() => null);
+		const decision = leaseDecision(leaseStanding(lease, this.settings.installId, Date.now()), trigger);
+		if (decision === "run" || lease === null) return true;
+		if (decision === "skip") return false;
+		return new Promise((resolve) => new LeaseConfirmModal(this.app, { device: lease.device, until: new Date(lease.expiresAt) }, resolve).open());
+	}
+
+	/** Take or renew the sync lease for this copy, while it syncs. */
+	private async renewLease(): Promise<void> {
+		const lease = await this.state.readLease();
+		const next = renewedLease(
+			lease,
+			{ installId: this.settings.installId, device: this.deviceLabel() },
+			Date.now(),
+			leaseDuration(this.settings.syncIntervalMinutes),
+		);
+		if (next !== null) await this.state.writeLease(next);
+	}
+
 	/**
 	 * Run one engine pass once the ones before it are done. What it did to
-	 * names, folders and the archive goes to the sync log note.
+	 * names, folders and the archive goes to the sync log note. What failed
+	 * is kept for the status panel and bar; background runs failing
+	 * NOTICE_AFTER times in a row say so (sync/failures.ts).
 	 */
-	private runEngine(run: (engine: SyncEngine) => Promise<void>): Promise<void> {
+	private runEngine(run: (engine: SyncEngine) => Promise<void>, options: { background: boolean }): Promise<void> {
 		const next = this.engineTail.then(async () => {
 			const lines: string[] = [];
+			const failures: RunFailure[] = [];
+			this.runFailures = failures;
+			const engine = this.createEngine(lines);
+			await this.renewLease().catch(() => undefined);
+			const renewing = window.setInterval(() => void this.renewLease().catch(() => undefined), 5 * 60_000);
 			try {
-				await run(this.createEngine(lines));
+				await run(engine);
 			} catch (error) {
-				console.warn(`reMarkable Ink Round-Trip: sync failed — ${toTransportError(error).message}`);
+				failures.push(runFailure("sync failed", toTransportError(error)));
 			} finally {
+				window.clearInterval(renewing);
+				this.runFailures = null;
+				this.heldNotes.clear();
+				for (const [path, why] of engine.held) this.heldNotes.set(path, why);
 				if (lines.length > 0) {
 					const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
 					await this.appendReport(`reMarkable Ink Round-Trip — notes and notebooks (${stamp})\n${lines.join("\n")}`);
 					notify(`reMarkable sync:\n${lines.slice(0, 3).join("\n")}${lines.length > 3 ? "\n… see the sync log" : ""}`, 10000);
 				}
+				await this.runEnded(failures, options.background);
 			}
 		});
 		this.engineTail = next;
 		return next;
+	}
+
+	/** After a run: count its failures, tell the owner when it is time, clean up the state folder now and then. */
+	private async runEnded(failures: RunFailure[], background: boolean): Promise<void> {
+		const first = failures[0];
+		if (this.failures.ended(failures, background) && first !== undefined) {
+			notify(
+				`Syncing with the reMarkable failed ${NOTICE_AFTER} times in a row — ${first.what}: ${first.message} ` +
+					"It keeps trying; “Show sync status” has the details.",
+				15000,
+			);
+		} else if (!background && first !== undefined) {
+			notify(`${first.what}: ${first.message}`, 10000);
+		}
+		if (failures.length > 0) {
+			const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+			await this.appendReport(`reMarkable Ink Round-Trip — sync failed (${stamp})\n${failures.map((f) => `${f.what}: ${f.message}`).join("\n")}`);
+		} else if (Date.now() - this.lastGcAt > 24 * 60 * 60_000) {
+			this.lastGcAt = Date.now();
+			await this.collectStateGarbage();
+		}
+		await this.refreshAlert();
+	}
+
+	/**
+	 * Move files of the shared state folder no note uses any more into its
+	 * trash subfolder (SyncState.collectGarbage) — never deleted here.
+	 */
+	private async collectStateGarbage(): Promise<void> {
+		const inUse = new Set<string>();
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const cache = this.app.metadataCache.getFileCache(file);
+			const links =
+				cache === null
+					? [...(await this.app.vault.cachedRead(file)).matchAll(EMBED_SCAN_RE)].map((match) => match[1])
+					: (cache.embeds ?? []).map((embed) => embed.link);
+			for (const link of links) inUse.add(link.split(/[#|]/)[0].split("/").pop()?.trim() ?? "");
+		}
+		try {
+			const result = await this.state.collectGarbage({ inkInUse: inUse });
+			if (result.moved.length > 0) {
+				await this.appendReport(
+					`reMarkable Ink Round-Trip — ${result.moved.length} file(s) no note uses any more moved to “${this.state.root}/trash”; ` +
+						`delete that folder (with your file manager) to empty it:\n${result.moved.join("\n")}`,
+				);
+			}
+		} catch (error) {
+			console.warn(`reMarkable Ink Round-Trip: cleaning up the sync state folder failed — ${String(error)}`);
+		}
 	}
 
 	/** The engine on this vault and account, for one run: one cloud session, one listing cache. */
@@ -882,6 +1076,9 @@ export default class RoundTripPlugin extends Plugin {
 				notes: () => this.vaultNotes(),
 				move: (from, to) => this.moveNote(from, to),
 				setDocId: (path, docId) => this.setDocId(path, docId),
+				setOptOut: (path, optOut) => this.setFrontmatter(path, OPT_OUT_FRONTMATTER_KEY, optOut ? false : undefined),
+				setTags: (path, tags) => this.setFrontmatter(path, "tags", tags.length === 0 ? undefined : [...tags]),
+				deleted: (docId) => this.deletedDocIds.has(docId),
 				load: async (path) => {
 					const file = this.app.vault.getFileByPath(path);
 					if (file === null || file.extension !== "md") return null;
@@ -903,6 +1100,8 @@ export default class RoundTripPlugin extends Plugin {
 				},
 				ensureFolder: async (path, listing) => ensureFolderPath(await raw(), listing, path).catch(passThrough),
 				editMetadata: async (id, expectedHash, update) => editMetadata(await raw(), id, expectedHash, update).catch(passThrough),
+				readTags: async (id, hash) => readTags(await raw(), id, hash).catch(passThrough),
+				editTags: async (id, expectedHash, tags) => editTags(await raw(), id, expectedHash, tags).catch(passThrough),
 				uploadInk: async (visibleName, pages, options) =>
 					this.ink
 						.upload(await raw(), visibleName, pages, {
@@ -925,11 +1124,16 @@ export default class RoundTripPlugin extends Plugin {
 				refresh: () => this.refreshState(),
 				settle: async (present) => {
 					const out: string[] = [];
-					await this.settlePendingSends(present, (line) => out.push(line));
+					await this.settlePendingSends(present, (line) => out.push(line), async (id, hash) => {
+						const { entries } = await (await raw()).getEntries(`${id}.docSchema`, hash);
+						return new Set(entries.map((entry) => entry.hash));
+					});
 					return out;
 				},
-				persistPending: (docId, sent, mapping, previousHash) => this.state.writePending(docId, sent, mapping, previousHash),
+				persistPending: (...args) => this.state.writePending(...args),
 				commitSent: (docId, sent, mapping) => this.state.commitSent(docId, sent, mapping),
+				dropPending: (docId, hash) => this.state.dropPending(docId, hash),
+				sendingElsewhere: () => this.state.sendingElsewhere(),
 			},
 			content: {
 				pull: async (docIds, options) => {
@@ -947,6 +1151,8 @@ export default class RoundTripPlugin extends Plugin {
 					this.ink.renderForSend(blocks, title, docId, layout, images, drawings),
 				loadImages: (note) => this.noteImages(note),
 				loadDrawings: (markdown) => this.noteDrawings(markdown),
+				renderTyped: (paragraphs) => this.ink.renderTyped(paragraphs),
+				notebookMode: this.settings.notebookMode,
 				prepare: () => this.ink.prepareSend(),
 				layout: sendLayout(this.settings),
 				frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
@@ -960,9 +1166,17 @@ export default class RoundTripPlugin extends Plugin {
 					notice = null;
 					this.uploading = null;
 					if (failure !== undefined) {
-						if (background) console.warn(`reMarkable Ink Round-Trip: ${failure}`);
+						if (background) this.runFailures?.push(runFailure("sending failed", new Error(failure)));
 						else notify(failure.startsWith("No markdown") ? failure : `${failure} No notes were uploaded.`, 10000);
 						return;
+					}
+					for (const result of results) {
+						if (result.ok) this.noteErrors.delete(result.path);
+						else this.noteErrors.set(result.path, result.error);
+					}
+					const failed = results.filter((result) => !result.ok);
+					if (background && failed.length > 0 && failed.length === results.length) {
+						this.runFailures?.push(runFailure("no note could be sent", new Error(failed[0].ok ? "" : failed[0].error)));
 					}
 					reportResults(results, { quietWhenAllSkipped: auto, quiet: background });
 					const attention = [
@@ -983,26 +1197,38 @@ export default class RoundTripPlugin extends Plugin {
 				excludeFolders: [this.settings.backupFolder.replace(/^\/+|\/+$/g, "") || "previous"],
 			}),
 			log: (line) => lines.push(line),
+			failed: (what, error) => {
+				this.runFailures?.push(runFailure(what, error));
+			},
 			push: (work) => this.pushQueue.enqueue(work),
 		};
 		return new SyncEngine(ports);
 	}
 
 	/**
-	 * Every note with the document id in its frontmatter. A note the metadata
-	 * cache has not indexed yet is read: taking it for one without an id would
-	 * make its notebook look deleted in the vault.
+	 * Every note with the document id, tags and opt-out in its frontmatter. A
+	 * note the metadata cache has not indexed yet is read: taking it for one
+	 * without an id would make its notebook look deleted in the vault.
 	 */
-	private async vaultNotes(): Promise<{ path: string; docId?: string; ctime: number }[]> {
-		const out: { path: string; docId?: string; ctime: number }[] = [];
+	private async vaultNotes(): Promise<(VaultNote & { ctime: number })[]> {
+		const out: (VaultNote & { ctime: number })[] = [];
 		for (const file of this.app.vault.getMarkdownFiles()) {
 			const cache = this.app.metadataCache.getFileCache(file);
-			const value =
-				cache === null
-					? parseFrontmatter(await this.app.vault.cachedRead(file)).fields[DOCID_FRONTMATTER_KEY]
-					: getFrontmatterValue(cache.frontmatter, DOCID_FRONTMATTER_KEY);
-			out.push({ path: file.path, ctime: file.stat.ctime, ...(isValidDocId(value) ? { docId: value } : {}) });
+			const fields: Record<string, unknown> =
+				cache === null ? parseFrontmatter(await this.app.vault.cachedRead(file)).fields : (cache.frontmatter ?? {});
+			const value = fields[DOCID_FRONTMATTER_KEY];
+			const tags = frontmatterTags(fields.tags);
+			out.push({
+				path: file.path,
+				ctime: file.stat.ctime,
+				...(isValidDocId(value) ? { docId: value } : {}),
+				...(tags.length > 0 ? { tags } : {}),
+				...(isOptOut(fields[OPT_OUT_FRONTMATTER_KEY]) ? { optOut: true } : {}),
+			});
 		}
+		this.docIdAt = new Map(out.flatMap((note) => (note.docId === undefined ? [] : [[note.path, note.docId] as const])));
+		// A note seen again (restored from the trash) is no longer deleted.
+		for (const docId of this.docIdAt.values()) this.deletedDocIds.delete(docId);
 		return out;
 	}
 
@@ -1030,22 +1256,39 @@ export default class RoundTripPlugin extends Plugin {
 		});
 	}
 
+	/** Set (or, with undefined, remove) one frontmatter key, without the watcher taking the write for an edit. */
+	private async setFrontmatter(path: string, key: string, value: unknown): Promise<void> {
+		const file = this.app.vault.getFileByPath(path);
+		if (file === null) return;
+		this.watchQueue?.suppress(path, 5000);
+		await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+			if (value === undefined) delete fm[key];
+			else fm[key] = value;
+		});
+	}
+
 	/** Whether a path is a synced note, or a folder holding one. */
 	private isTracked(path: string): boolean {
 		return Object.values(this.settings.mappings).some((entry) => isInWatchFolder(entry.notePath, path));
 	}
 
 	/**
-	 * A vault folder was renamed: the sync folders and the archive folder
-	 * follow it (a renamed archive must not read as every archived note taken
-	 * out of it). The notes inside follow on the next run, as moved notes.
+	 * A vault folder was renamed: the sync folders, the archive folder and
+	 * the plugin's own folders inside it follow — a renamed archive must not
+	 * read as every archived note taken out of it, and a sync state folder
+	 * left behind would read as nothing ever sent. The notes inside follow on
+	 * the next run, as moved notes.
 	 */
 	private async folderRenamed(from: string, to: string): Promise<void> {
-		const watched = renameInFolderList(this.settings.watchFolderPath, from, to);
-		const archive = renameInFolderList(this.settings.archiveFolder, from, to);
-		if (watched !== null) this.settings.watchFolderPath = watched;
-		if (archive !== null) this.settings.archiveFolder = archive;
-		if (watched !== null || archive !== null) await this.saveSettings();
+		const keys = ["watchFolderPath", "archiveFolder", "syncStateFolder", "backupFolder", "handwritingFolder"] as const;
+		let changed = false;
+		for (const key of keys) {
+			const renamed = renameInFolderList(this.settings[key], from, to);
+			if (renamed === null) continue;
+			this.settings[key] = renamed;
+			changed = true;
+		}
+		if (changed) await this.saveSettings();
 		this.watchQueue?.structureChanged();
 	}
 
@@ -1076,7 +1319,7 @@ export default class RoundTripPlugin extends Plugin {
 								: `“${file.basename}” is no longer synced; its notebook stays on the reMarkable.`,
 						8000,
 					);
-				}),
+				}, { background: false }),
 		}).open();
 	}
 
@@ -1100,8 +1343,9 @@ export default class RoundTripPlugin extends Plugin {
 			.then(() => created)
 			.catch((error: unknown) => {
 				const message = toTransportError(error).message;
-				if (background) console.warn(`reMarkable Ink Round-Trip: importing new notebooks failed — ${message}`);
-				else notify(`Importing new notebooks failed: ${message}`, 10000);
+				if (!background) notify(`Importing new notebooks failed: ${message}`, 10000);
+				else if (this.runFailures !== null) this.runFailures.push(runFailure("importing new notebooks failed", new Error(message)));
+				else console.warn(`reMarkable Ink Round-Trip: importing new notebooks failed — ${message}`);
 				return created;
 			});
 	}
@@ -1195,12 +1439,16 @@ export default class RoundTripPlugin extends Plugin {
 		return { pages, hash };
 	}
 
-	/** Each written page as the imported note shows it: its ink as an image, its text as read. */
-	private async pagesAsNote(deviceDocId: string, pages: NotebookPageFile[]): Promise<{ image?: string; text?: string }[]> {
-		const written: { image?: string; text?: string }[] = [];
+	/** Each written page as the imported note shows it: its ink as an image, its text as read, its typed text. */
+	private async pagesAsNote(deviceDocId: string, pages: NotebookPageFile[]): Promise<{ image?: string; text?: string; typed?: string }[]> {
+		const written: { image?: string; text?: string; typed?: string }[] = [];
 		for (const [index, page] of pages.entries()) {
 			const strokes = parseRmPage(page.bytes).strokes;
-			if (strokes.length === 0) continue;
+			const typed = pageTypedText(page.bytes);
+			if (strokes.length === 0) {
+				if (typed !== undefined) written.push({ typed });
+				continue;
+			}
 			const request: StrokeRenderRequest = { deviceDocId, strokes, page: index + 1, remark: 1, wholePage: true };
 			const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
 			const read =
@@ -1210,7 +1458,7 @@ export default class RoundTripPlugin extends Plugin {
 						? await this.transcribeStrokes(request).catch(() => null)
 						: null;
 			const text = read?.text ?? null;
-			written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
+			written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }), ...(typed === undefined ? {} : { typed }) });
 		}
 		return written;
 	}
@@ -1289,18 +1537,21 @@ export default class RoundTripPlugin extends Plugin {
 	 * Send notes as handwritten notebooks, through the engine (sync/engine.ts):
 	 * names and folders are brought together first, a note's notebook is read
 	 * before it is written. In `auto` mode unchanged notes are skipped and an
-	 * all-skipped run stays silent — errors always surface.
+	 * all-skipped run stays silent — errors always surface. `optIn`: the
+	 * owner picked these notes, so an opt-out in them is lifted.
 	 */
-	sendFiles(files: TFile[], options: { auto?: boolean; structureRoot?: string; background?: boolean } = {}): Promise<void> {
+	async sendFiles(files: TFile[], options: { auto?: boolean; structureRoot?: string; background?: boolean; optIn?: boolean } = {}): Promise<void> {
+		const background = options.background === true;
 		if (files.length === 0) {
-			if (options.background !== true) notify("No markdown notes to send.");
-			return Promise.resolve();
+			if (!background) notify("No markdown notes to send.");
+			return;
 		}
 		if (!this.createClient().isRegistered) {
-			if (options.background !== true) notify("Not paired with a reMarkable account yet — open the plugin settings first.");
-			return Promise.resolve();
+			if (!background) notify("Not paired with a reMarkable account yet — open the plugin settings first.");
+			return;
 		}
-		return this.runEngine((engine) => engine.send(files.map((file) => file.path), options));
+		if (!(await this.leaseAllows(background ? "auto" : "manual"))) return;
+		await this.runEngine((engine) => engine.send(files.map((file) => file.path), options), { background });
 	}
 
 	/**
@@ -1547,7 +1798,10 @@ export default class RoundTripPlugin extends Plugin {
 		try {
 			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
 			const listing = await api.listIds(true);
-			await this.settlePendingSends(new Map(listing.map((item) => [item.id, item.hash])), (line) => log.push(line));
+			await this.settlePendingSends(new Map(listing.map((item) => [item.id, item.hash])), (line) => log.push(line), async (id, hash) => {
+				const { entries } = await api.raw.getEntries(`${id}.docSchema`, hash);
+				return new Set(entries.map((entry) => entry.hash));
+			});
 			scope = scopeOf();
 			for (const problem of this.stateProblems()) log.push(`sync state: ${problem}`);
 			const { results, table } = await pullAnnotations(
@@ -1555,8 +1809,11 @@ export default class RoundTripPlugin extends Plugin {
 				{
 					force: options.force,
 					yieldToPush: options.nested === true ? undefined : () => this.syncCoordinator.yieldToPush(),
-					isCurrent: (entry) =>
-						this.settings.mappings[entry.docId]?.deviceDocId === entry.deviceDocId,
+					// The record read from is still the latest: same notebook, not read or written since.
+					isCurrent: (entry) => {
+						const latest = this.settings.mappings[entry.docId];
+						return latest?.deviceDocId === entry.deviceDocId && latest.accountedHash === entry.accountedHash;
+					},
 					log: (line) => log.push(line),
 					listDocumentHashes: async () => {
 						const items = await api.listIds(true);
@@ -1599,7 +1856,13 @@ export default class RoundTripPlugin extends Plugin {
 				await this.ink.saveSamples();
 				this.samplesDirty = false;
 			}
-			for (const result of results) if (!result.ok) unread.set(result.docId, result.error);
+			for (const result of results) {
+				if (!result.ok) unread.set(result.docId, result.error);
+				const path = this.settings.mappings[result.docId]?.notePath;
+				if (path === undefined) continue;
+				if (result.ok) this.noteReadErrors.delete(path);
+				else this.noteReadErrors.set(path, `its notebook could not be read: ${result.error}`);
+			}
 			if (options.nested === true) {
 				if (results.some((r) => !r.ok)) await this.appendReport(log.join("\n"));
 				return;
@@ -1624,7 +1887,8 @@ export default class RoundTripPlugin extends Plugin {
 			const failure = toTransportError(error).message;
 			for (const docId of Object.keys(scope)) unread.set(docId, failure);
 			if (quiet) {
-				console.warn(`reMarkable Ink Round-Trip: sync failed — ${failure}`);
+				if (this.runFailures !== null) this.runFailures.push(runFailure("reading the reMarkable failed", new Error(failure)));
+				else console.warn(`reMarkable Ink Round-Trip: sync failed — ${failure}`);
 				return;
 			}
 			await this.deliverReport(

@@ -128,9 +128,9 @@ export class WatchQueue {
 		this.schedule(now);
 	}
 
-	/** Read-only count of the sends waiting for the debounce timer. */
-	status(): { pendingChanges: number } {
-		return { pendingChanges: this.pending.size };
+	/** Read-only view of the sends waiting for the debounce timer. */
+	status(): { pendingChanges: number; pendingPaths: string[] } {
+		return { pendingChanges: this.pending.size, pendingPaths: [...this.pending] };
 	}
 
 	/** Cancel everything (plugin unload or settings change). */

@@ -54,10 +54,17 @@ export interface RoundTripSettings {
 	installId: string;
 	/**
 	 * This device syncs on its own: at startup, on the interval and when a
-	 * note changes. Off on all but one device when several copies of the
-	 * vault share a tablet, so two never send the same note at once.
+	 * note changes — while no other copy of the vault holds the sync lease
+	 * (sync/lease.ts). Off: only syncs started by hand.
 	 */
 	autoSync: boolean;
+	/** The name other copies of the vault see this one by when it holds the sync lease; "" = a generic one. */
+	deviceLabel: string;
+	/**
+	 * How a note goes onto the tablet: handwriting (pen strokes), or — an
+	 * experiment — the tablet's own typed text, which round-trips exactly.
+	 */
+	notebookMode: "handwriting" | "typed";
 	/** Import handwritten annotations as PNG images (F12). */
 	importHandwriting: boolean;
 	/** Vault folder for the rendered handwriting images. */
@@ -153,6 +160,8 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	archiveFolder: "reMarkable/Archive",
 	installId: "",
 	autoSync: true,
+	deviceLabel: "",
+	notebookMode: "handwriting",
 	importHandwriting: true,
 	markStyles: { ...DEFAULT_MARK_STYLES },
 	handwritingFolder: "reMarkable-in/handwriting",

@@ -20,6 +20,7 @@ import type { HandLibrary, PendingSheet } from "../ink/handsheet";
 import type { InkDrawing } from "../ink/inkdrawing";
 import type { InkStrokes, Picture } from "../ink/inkimage";
 import type { SampleStore } from "../ocr/samples";
+import { parseLease, type SyncLease } from "./lease";
 import type { SentRecord } from "./send";
 
 /** The file operations the state needs; the plugin edge adapts the vault adapter. */
@@ -56,6 +57,8 @@ interface PendingSend {
 	mapping: MappingEntry;
 	/** An update in place: the notebook's hash before it, which it still has if the update never landed. */
 	previousHash?: string;
+	/** An update in place: entry hashes of the files it writes — the notebook holds them once it landed. */
+	written?: string[];
 	/** The vault copy that is sending, and since when (ms): another copy's send may still be on its way. */
 	device?: string;
 	at?: number;
@@ -96,6 +99,17 @@ function hash(text: string): string {
 /** A send in flight this long is no longer on its way: another copy of the vault may drop it. */
 const PENDING_STALE_MS = 60 * 60 * 1000;
 
+/** An unused file in the state folder is moved to its trash after this long unused. */
+export const GC_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** What a garbage collection did: files moved to the trash, files still in their grace period. */
+export interface GcResult {
+	moved: string[];
+	waiting: number;
+	/** Set when nothing was collected because a note's file could not be read. */
+	skipped?: string;
+}
+
 /** Which learned hand is in use, and the sheets waiting on the tablet. */
 export interface SharedHandwriting {
 	handVersion: string;
@@ -111,6 +125,8 @@ export class SyncState {
 	private seenHandwriting: string | null = null;
 	/** Notes whose file held a send in flight on the last load (settlePending). */
 	private readonly pendingIds = new Set<string>();
+	/** Notes another copy of the vault is sending right now, as of the last load. */
+	private readonly foreignPending = new Set<string>();
 	/** Files that could not be read on the last load, for the log. */
 	unreadable: string[] = [];
 	/** Copies a sync tool left beside a note's file on a conflict; not loaded, for the log. */
@@ -221,8 +237,12 @@ export class SyncState {
 	 * Take in what another device wrote since: a mapping whose file changed on
 	 * disk (a pull brought it) replaces ours; a new file adds one; a file
 	 * that went away removes it. Mappings this device changed since are kept.
+	 * The notes folder gone altogether (the state folder moved or renamed
+	 * along with its parent) is not "every mapping removed": nothing is taken
+	 * in then.
 	 */
 	async refresh(table: MappingTable): Promise<MappingTable> {
+		if (this.seen.size > 0 && !(await this.fs.exists(this.path("notes")))) return table;
 		const onDisk = await this.loadMappingsRaw();
 		const merged: MappingTable = { ...table };
 		for (const [docId, mapping] of Object.entries(onDisk)) {
@@ -253,6 +273,7 @@ export class SyncState {
 		this.unreadable = [];
 		this.conflictCopies = [];
 		this.pendingIds.clear();
+		this.foreignPending.clear();
 		const table: MappingTable = {};
 		const dir = this.path("notes");
 		if (!(await this.fs.exists(dir))) return table;
@@ -264,9 +285,27 @@ export class SyncState {
 			}
 			const note = await this.readJson<NoteFile>(file);
 			if (note?.mapping !== undefined) table[note.mapping.docId] = migrateMapping(note.mapping);
-			if (note?.pending !== undefined) this.pendingIds.add(name.slice(0, -".json".length));
+			if (note?.pending !== undefined) {
+				const docId = name.slice(0, -".json".length);
+				this.pendingIds.add(docId);
+				if (!this.ownOrStale(note.pending)) this.foreignPending.add(docId);
+			}
 		}
 		return table;
+	}
+
+	private ownOrStale(pending: PendingSend): boolean {
+		const own = this.deviceId !== undefined && pending.device === this.deviceId;
+		return own || pending.device === undefined || pending.at === undefined || this.now() - pending.at > PENDING_STALE_MS;
+	}
+
+	/**
+	 * Notes another copy of the vault has a send in flight for, as of the last
+	 * load: not sent from here meanwhile, or both copies would write a notebook
+	 * for them. Cleared once the send lands or goes stale.
+	 */
+	sendingElsewhere(): ReadonlySet<string> {
+		return this.foreignPending;
 	}
 
 	/* ------------------------------ sends ------------------------------ */
@@ -321,18 +360,33 @@ export class SyncState {
 	/**
 	 * Record a send about to be uploaded, beside the committed one: the merge
 	 * base stays what the tablet holds until the upload has landed.
-	 * `previousHash`: for an update in place, the notebook's hash before it.
+	 * `previousHash`: for an update in place, the notebook's hash before it;
+	 * `written`: the entry hashes of the files it writes.
 	 */
-	async writePending(docId: string, sent: SentRecord, mapping: MappingEntry, previousHash?: string): Promise<void> {
+	async writePending(docId: string, sent: SentRecord, mapping: MappingEntry, previousHash?: string, written?: string[]): Promise<void> {
 		const note = await this.readNoteForWrite(docId);
 		const pending: PendingSend = {
 			sent: await this.storeSent(sent),
 			mapping,
 			...(previousHash === undefined ? {} : { previousHash }),
+			...(written === undefined ? {} : { written }),
 			...(this.deviceId === undefined ? {} : { device: this.deviceId }),
 			at: this.now(),
 		};
 		await this.writeJson(this.noteFile(docId), { ...note, pending });
+	}
+
+	/**
+	 * The upload recorded as pending was refused before it could land: the
+	 * pending goes, but only while it is still the one that writes `hash`
+	 * (a later send may have recorded its own since).
+	 */
+	async dropPending(docId: string, hash: string): Promise<void> {
+		const note = await this.readNoteForWrite(docId);
+		if (note.pending === undefined || note.pending.mapping.accountedHash !== hash) return;
+		delete note.pending;
+		if (Object.keys(note).length === 0) await this.fs.remove(this.noteFile(docId));
+		else await this.writeJson(this.noteFile(docId), note);
 	}
 
 	/** The upload landed: its text and mapping become the note's, in one write. */
@@ -347,18 +401,22 @@ export class SyncState {
 	/**
 	 * Settle sends a crash left half-done against the account listing
 	 * (`present`: device document id → root entry hash). A new notebook
-	 * landed when it is listed. An update in place (its mapping names the
-	 * hash it writes) landed when the notebook has that hash — or any hash but
-	 * the one it had before: written on since. A landed send is committed,
-	 * unless the note's record is from a later send already. One that did not
-	 * land is dropped if it is this copy's, or stale: another copy of the vault
-	 * may still be sending it. An empty listing settles nothing — more likely
-	 * a fresh pairing than every upload lost. Returns `table` with the
-	 * committed mappings.
+	 * landed when it is listed. An update in place landed when the notebook
+	 * has the hash it writes, did not when it still has the one before; at
+	 * any other hash the tablet wrote since, and only the notebook's files
+	 * tell: it landed when they hold one the update wrote (`entriesAt`: the
+	 * entry hashes of a document at a hash). Without them, or when they
+	 * cannot be read, it stays undecided until a later run. A landed send is
+	 * committed, unless the note's record is from a later send already. One
+	 * that did not land is dropped if it is this copy's, or stale: another
+	 * copy of the vault may still be sending it. An empty listing settles
+	 * nothing — more likely a fresh pairing than every upload lost. Returns
+	 * `table` with the committed mappings.
 	 */
 	async settlePending(
 		table: MappingTable,
 		present: ReadonlyMap<string, string>,
+		entriesAt?: (deviceDocId: string, hash: string) => Promise<ReadonlySet<string>>,
 	): Promise<{ table: MappingTable; committed: string[]; dropped: string[] }> {
 		const out = { table: { ...table }, committed: [] as string[], dropped: [] as string[] };
 		if (present.size === 0) return out;
@@ -371,14 +429,27 @@ export class SyncState {
 			}
 			const { pending, ...rest } = note;
 			this.pendingIds.delete(docId);
-			if (pending === undefined) continue;
+			if (pending === undefined) {
+				this.foreignPending.delete(docId);
+				continue;
+			}
 			const listed = present.get(pending.mapping.deviceDocId);
-			const landed =
-				listed !== undefined &&
-				(pending.mapping.accountedHash === undefined ||
-					listed === pending.mapping.accountedHash ||
-					listed !== pending.previousHash);
+			let landed: boolean;
+			if (listed === undefined) landed = false;
+			else if (pending.previousHash === undefined || pending.mapping.accountedHash === undefined || listed === pending.mapping.accountedHash) landed = true;
+			else if (listed === pending.previousHash) landed = false;
+			else {
+				const written = pending.written ?? [];
+				if (entriesAt === undefined || written.length === 0) continue;
+				try {
+					const entries = await entriesAt(pending.mapping.deviceDocId, listed);
+					landed = written.some((hash) => entries.has(hash));
+				} catch {
+					continue;
+				}
+			}
 			if (landed) {
+				this.foreignPending.delete(docId);
 				if (rest.mapping !== undefined && rest.mapping.uploadedAt > pending.mapping.uploadedAt) {
 					await this.writeJson(this.noteFile(docId), rest);
 					out.dropped.push(docId);
@@ -391,9 +462,8 @@ export class SyncState {
 				out.committed.push(docId);
 				continue;
 			}
-			const own = this.deviceId !== undefined && pending.device === this.deviceId;
-			const stale = pending.device === undefined || pending.at === undefined || this.now() - pending.at > PENDING_STALE_MS;
-			if (!own && !stale) continue;
+			if (!this.ownOrStale(pending)) continue;
+			this.foreignPending.delete(docId);
 			// A first send that never landed leaves nothing behind.
 			if (Object.keys(rest).length === 0) await this.fs.remove(this.noteFile(docId));
 			else await this.writeJson(this.noteFile(docId), rest);
@@ -457,5 +527,112 @@ export class SyncState {
 
 	writeSamples(store: SampleStore): Promise<void> {
 		return this.writeJson(this.path("samples.json"), store);
+	}
+
+	/* ------------------------------ lease ------------------------------ */
+
+	/** Which copy of the vault syncs on its own (sync/lease.ts); a file that cannot be read counts as none. */
+	async readLease(): Promise<SyncLease | null> {
+		const file = this.path("lease.json");
+		if (!(await this.fs.exists(file))) return null;
+		try {
+			return parseLease(await this.fs.read(file));
+		} catch {
+			return null;
+		}
+	}
+
+	writeLease(lease: SyncLease): Promise<void> {
+		return this.writeJson(this.path("lease.json"), lease);
+	}
+
+	/* ------------------------ garbage collection ----------------------- */
+
+	/**
+	 * Move pictures, remark strokes and learned hands nothing refers to any
+	 * more into `trash/` of the state folder, once they have been unused for
+	 * `graceMs` — a copy of the vault whose newer note files have not arrived
+	 * yet may still need them. Never deletes. A picture is in use while any
+	 * note's file names it, a send in flight included; a hand while the
+	 * shared handwriting or any send uses it; remark strokes while a note
+	 * embeds their image (`inkInUse`, by image file name). A note's file that
+	 * cannot be read stops the whole collection: what it refers to is unknown.
+	 * When each file was first seen unused is kept in `gc.json`.
+	 */
+	async collectGarbage(options: { inkInUse: ReadonlySet<string>; graceMs?: number }): Promise<GcResult> {
+		const now = this.now();
+		const grace = options.graceMs ?? GC_GRACE_MS;
+		const pictures = new Set<string>();
+		const hands = new Set<string>();
+		const notesDir = this.path("notes");
+		// Conflict copies too: the owner may still merge one back.
+		for (const file of (await this.fs.exists(notesDir)) ? await this.fs.list(notesDir) : []) {
+			let note: NoteFile;
+			try {
+				note = JSON.parse(await this.fs.read(file)) as NoteFile;
+			} catch {
+				return { moved: [], waiting: 0, skipped: file };
+			}
+			for (const sent of [note.sent, note.pending?.sent]) {
+				for (const key of [...Object.values(sent?.images ?? {}), ...Object.values(sent?.drawings ?? {})]) pictures.add(key);
+			}
+			for (const mapping of [note.mapping, note.pending?.mapping]) if (mapping?.ink?.hand !== undefined) hands.add(mapping.ink.hand);
+		}
+		const handwritingFile = this.path("handwriting.json");
+		if (await this.fs.exists(handwritingFile)) {
+			try {
+				const shared = JSON.parse(await this.fs.read(handwritingFile)) as Partial<SharedHandwriting>;
+				if (typeof shared.handVersion === "string") hands.add(shared.handVersion);
+			} catch {
+				return { moved: [], waiting: 0, skipped: handwritingFile };
+			}
+		}
+		const inUse: [string, ReadonlySet<string>][] = [
+			["pictures", pictures],
+			["ink", options.inkInUse],
+			["hands", hands],
+		];
+		const unused: string[] = [];
+		for (const [dir, used] of inUse) {
+			const folder = this.path(dir);
+			if (!(await this.fs.exists(folder))) continue;
+			for (const file of await this.fs.list(folder)) {
+				const name = file.split("/").pop() ?? file;
+				if (name.endsWith(".json") && !used.has(name.slice(0, -".json".length))) unused.push(`${dir}/${name}`);
+			}
+		}
+
+		const ledgerFile = this.path("gc.json");
+		let before: Record<string, number> = {};
+		if (await this.fs.exists(ledgerFile)) {
+			try {
+				before = JSON.parse(await this.fs.read(ledgerFile)) as Record<string, number>;
+			} catch {
+				// A damaged ledger starts over: every grace period begins again.
+			}
+		}
+		const ledger: Record<string, number> = {};
+		const moved: string[] = [];
+		for (const file of unused) {
+			const since = typeof before[file] === "number" ? before[file] : now;
+			if (now - since < grace) {
+				ledger[file] = since;
+				continue;
+			}
+			const text = await this.fs.read(this.path(file));
+			const target = this.path("trash", file);
+			const folder = target.split("/").slice(0, -1).join("/");
+			if (!(await this.fs.exists(folder))) await this.fs.mkdir(folder);
+			await this.fs.write(target, text);
+			await this.fs.remove(this.path(file));
+			moved.push(file);
+		}
+		const changed =
+			Object.keys(ledger).length !== Object.keys(before).length || Object.entries(ledger).some(([file, since]) => before[file] !== since);
+		if (changed) {
+			if (Object.keys(ledger).length > 0) await this.writeJson(ledgerFile, ledger);
+			else await this.fs.remove(ledgerFile);
+		}
+		return { moved, waiting: Object.keys(ledger).length };
 	}
 }

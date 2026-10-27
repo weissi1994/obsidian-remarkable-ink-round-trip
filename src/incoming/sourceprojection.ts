@@ -860,49 +860,70 @@ function applyBlockMarks(
 			const device = mark.addedPage === undefined && mark.strokes !== undefined ? strokeBounds(mark.strokes.map((points) => ({ points }))) : null;
 			const ink = device === null ? null : deviceBoundsToPdf(device, input.layout);
 			const anchor = anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1);
-			// A whole page added on the device is not a remark in the margin;
-			// say what it is, so a page of thinking is not mistaken for a
-			// scribble (GP_E3_S20).
-			const title =
-				(mark.addedPage === undefined
-					? "> [!note] Remark"
-					: `> [!note] Page added on the reMarkable (page ${mark.addedPage})`) +
-				(mark.confirmed === true ? ` ${CONFIRM_MARK}` : "");
-			remarks.set(anchor, [
-				...(remarks.get(anchor) ?? []),
-				title,
-				// Ink fork: the transcript is the remark's text; the image
-				// stays beside it unless the owner switched images off.
-				...(mark.transcript === undefined
-					? []
-					: mark.transcript.split("\n").map((line) => `> ${line}`)),
-				...(mark.path === undefined ? [] : [`> ![[${mark.path}]]`]),
-				// The remark's id, so the note's own text for it is found
-				// again on the next import (remarkid.ts).
-				...(mark.id === undefined ? [] : [remarkIdLine(mark.id)]),
-			]);
+			// Typed text is the note's own text: plain lines, not a callout.
+			remarks.set(anchor, joinBlocks(remarks.get(anchor) ?? [], mark.typed?.split("\n") ?? remarkCallout(mark)));
 		}
 	}
 
-	// A remark goes after the whole block its line belongs to — a callout
-	// in the middle of a table, list, callout or code fence would split it,
-	// and the lines after it would run on into the remark.
+	return placeAfterBlocks(lines, remarks, quoted);
+}
+
+/**
+ * The lines with each placed block after the line it belongs to (-1: before
+ * them all) — after the whole markdown block that line is in: a callout in
+ * the middle of a table, list, callout or code fence would split it, and the
+ * lines after it would run on into the callout. `quoted` lines become quotes.
+ */
+export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>, quoted: ReadonlySet<number> = new Set()): string {
 	const placed = new Map<number, string[]>();
-	for (const [line, remark] of remarks) {
-		const end = line < 0 ? -1 : blockEnd(lines, line);
-		placed.set(end, [...(placed.get(end) ?? []), ...remark]);
+	for (const [line, block] of blocks) {
+		const end = line < 0 ? -1 : blockEnd(lines, Math.min(line, lines.length - 1));
+		placed.set(end, joinBlocks(placed.get(end) ?? [], block));
 	}
 	const out: string[] = [];
 	const top = placed.get(-1);
 	if (top !== undefined) out.push(...top, ...(lines[0].trim() === "" ? [] : [""]));
 	lines.forEach((line, index) => {
 		out.push(quoted.has(index) && !line.startsWith(">") ? `> ${line}` : line);
-		const remark = placed.get(index);
-		if (remark === undefined) return;
-		out.push("", ...remark);
+		const block = placed.get(index);
+		if (block === undefined) return;
+		out.push("", ...block);
 		if (index + 1 < lines.length && lines[index + 1].trim() !== "") out.push("");
 	});
 	return out.join("\n");
+}
+
+/**
+ * Two placed blocks one after the other: callouts follow each other as they
+ * are, plain text is kept apart by a blank line — right after a callout it
+ * would read as more of it.
+ */
+export function joinBlocks(first: string[], second: string[]): string[] {
+	if (first.length === 0) return second;
+	const quoted = first[first.length - 1].startsWith(">") && (second[0] ?? "").startsWith(">");
+	return quoted ? [...first, ...second] : [...first, "", ...second];
+}
+
+/** A remark's callout: title, its reading, its image, its id (remarkid.ts). */
+export function remarkCallout(mark: ImportedMark): string[] {
+	// A whole page added on the device is not a remark in the margin; say
+	// what it is, so a page of thinking is not mistaken for a scribble
+	// (GP_E3_S20).
+	const title =
+		(mark.addedPage === undefined
+			? "> [!note] Remark"
+			: `> [!note] Page added on the reMarkable (page ${mark.addedPage})`) +
+		(mark.confirmed === true ? ` ${CONFIRM_MARK}` : "");
+	return [
+		title,
+		// Ink fork: the transcript is the remark's text; the image stays
+		// beside it unless the owner switched images off.
+		...(mark.transcript === undefined ? [] : mark.transcript.split("\n").map((line) => `> ${line}`)),
+		...(mark.path === undefined ? [] : [`> ![[${mark.path}]]`]),
+		// The remark's id, so the note's own text for it is found again on
+		// the next import (remarkid.ts).
+		...(mark.id === undefined ? [] : [remarkIdLine(mark.id)]),
+	];
 }
 
 const FENCE = /^\s*(`{3,}|~{3,})/;

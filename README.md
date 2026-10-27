@@ -3,9 +3,10 @@
 Keep your Obsidian notes in **two-way sync** with your reMarkable — as **real
 handwriting**. Notes arrive on the tablet as pen strokes, in a single-line font or
 your own hand. Erase a word, lasso it elsewhere, strike it through, circle it,
-highlight it, write between the lines: the next sync merges it into the note
-itself. Change the note in Obsidian and the notebook is rewritten. Start a
-notebook on the tablet and it becomes a note.
+highlight it, write between the lines, type with the keyboard: the next sync
+merges it into the note itself. Change the note in Obsidian and the notebook is
+updated in place. Rename, move or delete on either side and the other side
+follows. Start a notebook on the tablet and it becomes a note.
 
 A fork of [reMarkable Round-Trip](https://github.com/maxonamission/obsidian-remarkable-round-trip)
 by Max Kloosterman, which sends notes as PDF for review and imports the
@@ -29,8 +30,8 @@ writes what you did on paper back into the note you wrote.
    right-click → **Sync with reMarkable** and stays in sync from then on.
 5. **Work on either side.** The plugin syncs when Obsidian starts, every few
    minutes (*Check the reMarkable every*) and when a note in a sync folder you
-   changed has been quiet for a moment. **Sync with reMarkable now** does it at
-   once.
+   changed has been quiet for a moment (at most a minute while you keep
+   typing). **Sync with reMarkable now** does it at once.
 
 Optional, and worth it: fill in the [handwriting sheet](#your-own-handwriting)
 so notes come in your own hand and the built-in reader knows your letters.
@@ -43,22 +44,29 @@ On every sync the plugin first reads the notebooks back, then sends what changed
    wrote (it regenerates them exactly, from the text it kept at send time), so
    your ink and its own letters are never confused. What you did is projected
    onto the note as it was sent and **merged three ways** with the note as it
-   reads now — so edits you made in Obsidian meanwhile survive. Within a
-   paragraph the merge goes word by word; only where both sides changed the same
-   words does the note keep yours, with the tablet's version in an
-   *Also changed on the reMarkable* callout right below. Before anything goes
-   in, the previous version of the note is saved to the backup folder.
+   reads now — so edits you made in Obsidian meanwhile survive. The merge goes
+   word by word: every change that doesn't touch the words the other side
+   changed goes in. Only where both sides changed the same words does the note
+   keep yours, with the tablet's version in an *Also changed on the reMarkable*
+   callout right below. Anything the plugin could not place — a move into empty
+   space, a partly erased word, a page it could not read — is listed in a
+   *Pending from reMarkable* callout at the end of the note instead of being
+   dropped. Before anything goes in, the previous version of the note is saved
+   to the backup folder, and the merge is made against the note as it is at that
+   moment, so typing during a sync is kept.
 2. **Note → tablet.** Every note in the sync folders, or with a notebook
-   already, that is new or changed is written into a fresh notebook. Its old
-   notebook is read first — so no ink is lost — and moved to the tablet's trash
-   in the same cloud update.
+   already, that is new or changed is written into its notebook **in place**:
+   same notebook, only the pages whose text changed are rewritten, and page
+   tags, templates and bookmarks stay. A notebook is only rewritten while it is
+   exactly as the plugin last read it; if you wrote in it after the read, the
+   plugin reads it again first. A notebook it could not read is not touched.
 3. **New notebooks from the tablet.** A notebook you started in the device
    folder of a synced vault folder (on the tablet: the folder under *Obsidian*
    named like the vault folder) becomes a note there — each page's ink as an
-   image with its text as read — and is sent back as a handwritten notebook in
-   place of the original. From then on it syncs like any other note. A notebook
-   changed in the last ten minutes is left alone, so it is never swapped out
-   while you are still writing in it.
+   image with its text as read, typed text word for word — and from then on
+   syncs like any other note. A notebook changed in the last ten minutes is left
+   alone, so it is never taken while you are still writing in it; write in it
+   again later and the new pages are merged into the note.
 
 | On the tablet | In the note |
 |---|---|
@@ -72,6 +80,8 @@ On every sync the plugin first reads the notebooks back, then sends what changed
 | A **tick** in a drawn checkbox / a **stripe** through it | `- [x]` / `- [-]` |
 | **Handwriting** between the lines or in the margin | A remark callout with the image — and its text (see [OCR](#reading-handwriting)); sent back, it is your original strokes again, where you wrote them |
 | A **page you added** | The whole page as a remark, after the text it follows |
+| **Typed text** (the reMarkable keyboard) | The text itself, word for word, after the content of its page |
+| The notebook's **tags** | The note's `tags` frontmatter — both ways; added or removed on either side, merged |
 
 What the three inline marks become is yours to choose (*Settings → What a pen
 mark becomes*): strikethrough, bold, italic, underline, highlight or nothing. A
@@ -80,6 +90,42 @@ round trip stays stable.
 
 Every run that did something writes a report to `reMarkable Ink Round-Trip log.md`:
 what was read, what went into which note, and what was sent.
+
+### Renaming, moving, deleting
+
+| You do | The other side |
+|---|---|
+| Rename or move a note in Obsidian | Its notebook is renamed or moved to the matching folder (nothing is redrawn) |
+| Rename a notebook on the tablet | The note is renamed (links follow) |
+| Move a notebook on the tablet into another synced folder, or rename/move such a folder | The note moves to the matching vault folder |
+| Move a notebook on the tablet outside the synced folders | The note stays where it is and keeps syncing; the notebook stays where you put it |
+| Rename on both sides | The vault's name wins; the log says so |
+| Rename a sync folder in Obsidian | *Folders to sync* follows, and so do its notebooks; device folders left empty are reported, not deleted |
+| Delete a note in Obsidian | Its notebook goes to the tablet's trash. If it has ink the plugin has not read yet, it is kept and the log says so |
+| Delete or trash a notebook on the tablet | Its new ink is read first, then the note moves to the *Folder for archived notes* (default `reMarkable/Archive`) and is no longer sent |
+| Restore either one | The other comes back: a restored note restores its notebook from the trash, a restored notebook moves its note back, and moving a note out of the archive folder restores its notebook |
+| **Stop syncing with reMarkable** (command or right-click) | The note gets `remarkable: false` in its frontmatter and is left alone, even in a sync folder; you choose whether its notebook goes to the trash (default: keep it). **Sync with reMarkable** on the note joins it again |
+
+Nothing is ever deleted for good: notes go to the archive folder, notebooks to the
+tablet's trash. A note that disappears without Obsidian seeing it deleted (a
+vault sync still catching up, say) has its notebook trashed only if it is still
+missing on the next sync. Switching to a different reMarkable account or a
+self-hosted endpoint archives, trashes and sends nothing.
+
+### Typed-text notebooks (experimental)
+
+*Settings → Sync → Notes go to the tablet as → Typed text* sends notes as the
+tablet's own keyboard text instead of handwriting. Edit it with the reMarkable
+keyboard and the change comes back word for word — no handwriting reading
+involved. Headings (`#`, `##`), bullets, checkboxes and bold/italic become the
+tablet's text styles; everything else (links, embeds, tables) is sent as plain
+text, exactly as it reads in the note. What you write with the pen on a typed
+page comes into the note as remarks and stays on the tablet, attached to the
+text it was written next to; later updates change only the characters that
+changed, so it stays attached. Switching a note between handwriting and typed
+text rewrites its notebook in place after reading it. This mode has been checked
+against the [rmscene](https://github.com/ricklupton/rmscene) reader, not yet on a
+tablet.
 
 ## What a note looks like on the tablet
 
@@ -286,9 +332,16 @@ A hand learned on one copy is the hand every copy writes and reads with, a sheet
 sent from one can be read back on another, and joined-up words and corrections
 learned anywhere are merged, never overwritten. Your pairing token and device settings stay in the plugin's own data.
 
-Turn **Sync automatically from this device** off on all but one copy: two copies
-syncing at once could both send a note changed before the vault sync carried
-their state across. The others sync when you run **Sync with reMarkable now**.
+The copy that syncs on its own holds a **lease** in the shared state folder
+(*This device's name* says which one in the others' status). While its lease is
+fresh, the other copies leave the startup, interval and change-triggered syncs
+to it; **Sync with reMarkable now** on another copy asks before it goes ahead. A
+send another copy has in flight is recognised and left alone. The vault sync
+can carry the lease late, so with copies that sync rarely, turning **Sync
+automatically from this device** off on all but one is still the surest.
+
+Files in the state folder that no note uses any more go to its `trash`
+subfolder after a week; delete that subfolder to empty it.
 
 ## Commands
 
@@ -296,9 +349,10 @@ their state across. The others sync when you run **Sync with reMarkable now**.
 |---|---|
 | Sync with reMarkable now | Read the tablet back, bring in new notebooks, send what changed |
 | Sync current note with reMarkable | The same for one note (also right-click on notes, folders and selections) |
+| Stop syncing current note with reMarkable | Leave the note out from now on (also right-click); asks whether its notebook goes to the trash |
 | Re-read current note from reMarkable | Read its notebook again even when the tablet reports no change |
-| Re-send every synced note to reMarkable | Rewrite all notebooks, e.g. after an update that changes how they look |
-| Show sync status | Queue, running batch (*Uploading 12/80*), tracked notes |
+| Re-send every synced note to reMarkable | Rewrite all notebooks in place, e.g. after an update that changes how they look |
+| Show sync status | Every note by state — in sync, waiting to send, clash, tablet changes pending, not sent (with the reason), archived, left out — plus the queue and the last failures; click a note to open it |
 | Check reMarkable cloud status (read-only) | Diagnose the connection |
 | Send handwriting sheet / Learn my handwriting / Add handwriting variations | Your letters |
 | Send joined-up word sheet / Learn my joined-up words | Your joined-up writing |
@@ -331,10 +385,12 @@ changed.
   or before the two-way merge existed, are re-sent as handwriting on the next
   sync; changes that arrive without a record of the sent text are added to the
   note as a summary block instead of woven in.
-- **A re-send replaces the notebook.** Ink written in the seconds between a
-  sync's read and its send lands in the trashed copy.
-- **A partly erased word** (a nicked letter) stays; the log lists it. **Moves**
-  into empty space are reported but not applied.
+- **A partly erased word** (a nicked letter) stays, and a **move** into empty
+  space is not applied: both are listed in the note's *Pending from reMarkable*
+  callout.
+- **Background syncs that keep failing** show a notice after three in a row,
+  and the status bar shows the problem until a sync succeeds. A rate-limited
+  upload isn't a failure: the plugin carries on at the next sync.
 - **First sync of many notes** can take a while: the reMarkable cloud limits how
   fast it accepts uploads, and the plugin waits when told to.
 - **Pages are bigger than a PDF's.** A full page is a few hundred KB of strokes.

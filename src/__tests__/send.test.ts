@@ -13,6 +13,7 @@ import {
 import { TYPO_VERSION } from "../convert/pdf";
 import { isValidDocId } from "../id/docid";
 import { MappingEntry, MappingTable, contentHash } from "../id/mapping";
+import { parsePageOrder } from "../incoming/pagemap";
 import { remarkId } from "../incoming/remarkid";
 import { parseRmScene } from "../incoming/rmscene";
 import { DEVICE_PROFILES } from "../ink/inkrender";
@@ -549,7 +550,7 @@ describe("sending into the same notebook", () => {
 					shape: 1,
 				},
 			}),
-			persistPending: (docId, sent, mapping, previousHash) => state.writePending(docId, sent, mapping, previousHash),
+			persistPending: (docId, sent, mapping, previousHash, written) => state.writePending(docId, sent, mapping, previousHash, written),
 			commitSent: (docId, sent, mapping) => state.commitSent(docId, sent, mapping),
 		};
 		return { cloud, disk, state, deps, trashed };
@@ -614,6 +615,35 @@ describe("sending into the same notebook", () => {
 		expect(await next.readSent(DOC)).toEqual(base);
 	});
 
+	it("drops the pending record of an update that lost its root write to the tablet, before reading the notebook again", async () => {
+		const { cloud, disk, state, deps } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		const base = await state.readSent(DOC);
+		deps.ink = { ...deps.ink, dropPending: (docId, hash) => state.dropPending(docId, hash) };
+		// The tablet syncs a page in just as the update's root write goes out: refused, and the retry finds it changed.
+		cloud.onRootWrite(() => {
+			cloud.onRootWrite(null);
+			cloud.writeOnTablet(old);
+			return new Error("precondition failed");
+		});
+		// What the re-read's settle would find: with the notebook's files to tell, a pending record is decided.
+		let pendingAtReread: boolean | undefined;
+		deps.reread = async () => {
+			const next = new SyncState(disk.fs, ROOT, "this-copy");
+			const entriesAt = async (id: string, hash: string) =>
+				new Set((await cloud.api.getEntries(`${id}.docSchema`, hash)).entries.map((entry) => entry.hash));
+			const settled = await next.settlePending(await next.loadMappings(), listed(cloud), entriesAt);
+			pendingAtReread = settled.committed.length > 0 || settled.dropped.length > 0;
+			return null;
+		};
+		const { result } = await sendNote(edited, table, deps);
+		expect(result.ok).toBe(false);
+		// Nothing of the refused update was left to settle as if it had landed.
+		expect(pendingAtReread).toBe(false);
+		expect(await state.readSent(DOC)).toEqual(base);
+	});
+
 	it("makes a new notebook when the old one is gone from the account", async () => {
 		const { cloud, deps, trashed } = setup();
 		const table = await sentOnce(deps);
@@ -667,7 +697,8 @@ describe("sending into the same notebook", () => {
 		expect(result.deviceDocId).toBe(tablet.docId);
 		expect(cloud.live()).toEqual([tablet.docId]);
 		const files = await filesOf(cloud, tablet.docId);
-		expect(files.has(`${tablet.docId}/${taken}.rm`)).toBe(false);
+		// Gone from the notebook as the tablet deletes a page: no longer shown, files kept.
+		expect(parsePageOrder(new TextDecoder().decode(files.get(`${tablet.docId}.content`)))).not.toContain(taken);
 		expect(files.get(`${tablet.docId}/${left}.rm`)).toEqual(notInNote);
 		expect(table[DOC]).toMatchObject({ format: "ink", accountedHash: cloud.hashOf(tablet.docId) });
 		expect(table[DOC].ink?.pageIds).not.toContain(left);

@@ -3,11 +3,14 @@
  *
  * A notebook the plugin did not write, sitting in the device folder of a
  * synced vault folder, becomes a note at the same place in the vault: each
- * page as a callout with the page's ink as an image and its text as read.
+ * page's typed text as it is, then a callout with the page's ink as an
+ * image and its text as read.
  * The sync then sends that note back as a handwritten notebook in place of
  * the original — from there on it is a synced note like any other.
  */
 
+import { parseRmScene } from "../incoming/rmscene";
+import { pageTypedMarkdown } from "../incoming/typedtext";
 import { splitNote } from "../preprocess/preprocess";
 import { devicePathOf } from "../transport/metadata";
 import { merge3 } from "./merge3";
@@ -20,6 +23,8 @@ export interface DeviceItem {
 	parent: string;
 	visibleName: string;
 	lastModified: string;
+	/** When it was made (metadata `createdTime`), where the listing read it. */
+	createdTime?: string;
 	/** Read and found not to be a notebook (a PDF, an EPUB): not looked at again at this hash. */
 	notNotebook?: boolean;
 	/** Written by this plugin — from this or another vault instance — so never brought in. */
@@ -83,20 +88,29 @@ export function noteFileName(name: string): string {
 }
 
 /**
- * The note for a notebook: its id in the frontmatter, then each page as a
- * callout — the text as read (edit it freely: corrections teach the reader
- * your hand) and the page's ink.
+ * The note for a notebook: its id in the frontmatter, then each page — its
+ * typed text as it is, then a callout with the text of its ink as read
+ * (edit it freely: corrections teach the reader your hand) and the ink.
  */
-export function importedNote(docId: string, pages: { image?: string; text?: string }[]): string {
+export function importedNote(docId: string, pages: { image?: string; text?: string; typed?: string }[]): string {
 	const blocks = pages
 		.map((page, index) => {
+			const typed = page.typed === undefined ? [] : [page.typed];
+			if (page.image === undefined && page.text === undefined) return typed.join("\n");
 			const title = pages.length === 1 ? "> [!note] Written on the reMarkable" : `> [!note] Page ${index + 1}`;
 			const text = page.text === undefined ? [] : page.text.split("\n").map((line) => `> ${line}`);
 			const image = page.image === undefined ? [] : [`> ![[${page.image}]]`];
-			return [title, ...text, ...image].join("\n");
+			return [...typed, ...(typed.length > 0 ? [""] : []), title, ...text, ...image].join("\n");
 		})
+		.filter((block) => block !== "")
 		.join("\n\n");
 	return `---\nremarkable-id: ${docId}\n---\n${blocks}\n`;
+}
+
+/** A page's typed text as an imported note shows it; undefined when it has none or it cannot be read. */
+export function pageTypedText(bytes: Uint8Array): string | undefined {
+	const typed = pageTypedMarkdown(parseRmScene(bytes));
+	return typed === null || typed === "unreadable" ? undefined : typed.markdown;
 }
 
 /**

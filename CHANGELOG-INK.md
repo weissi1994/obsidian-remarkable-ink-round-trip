@@ -2,6 +2,84 @@
 
 ## Unreleased
 
+- **Full two-way sync — renames, moves and deletes follow both ways:** renaming
+  or moving a note renames or moves its notebook (metadata only, nothing is
+  redrawn), and renaming or moving a notebook — or its folder — on the tablet
+  renames or moves the note. When both sides renamed, the vault's name wins.
+  Renaming a sync folder updates *Folders to sync*. Deleting a note sends its
+  notebook to the tablet's trash (kept, and reported, if it holds ink not read
+  yet); deleting or trashing a notebook reads its new ink first, then moves the
+  note to the new *Folder for archived notes* (default `reMarkable/Archive`)
+  instead of sending it again. Restoring either side brings the other back;
+  a note restored in the vault brings its notebook back to the folder it was
+  in, unless that folder now mirrors another vault folder (renamed on the
+  tablet meanwhile). Nothing is ever deleted for good. An account or endpoint
+  switch archives, trashes and sends nothing.
+- **Notebooks are updated in place:** a changed note rewrites only the pages
+  whose text changed, in the same notebook. Page tags, templates, bookmarks and
+  pages you added stay (an added page goes only once its ink is in the note).
+  Notebook tags and the note's `tags` frontmatter sync both ways.
+- **No more lost tablet ink:** a notebook is only rewritten or trashed while it
+  is exactly as the plugin last read it. Ink written after the read is read in
+  first; a notebook that could not be read is not touched. A send cut off by a
+  crash or closing Obsidian is recognised on the next sync (no duplicate
+  notebook), and the merge base only moves once the tablet really has the new
+  notebook. Tablet changes are merged against the note as it is at the moment of
+  writing, so typing during a sync is kept; the backup holds exactly the text
+  that was replaced.
+- **Better merging:** every change that doesn't touch the words the other side
+  changed goes in — before, one clashing word sent the whole paragraph to the
+  *Also changed on the reMarkable* callout and dropped the tablet's other edits
+  in it. Lines added on both sides at the same spot are both kept. Editing one of
+  several identical lines no longer cuts it apart. Importing again (after a held
+  back send, say) changes nothing, and a clash you resolved never comes back.
+  Each clash callout has its own id.
+- **Nothing dropped silently:** a move into empty space, a partly erased word, a
+  page that could not be read or a mark that could not be placed is listed in a
+  *Pending from reMarkable* callout at the end of the note.
+- **Placement:** words match only whole words (`the` no longer matches inside
+  `theory`), a repeated phrase is matched where you marked it, a remark without
+  printed text under it goes after the text above it on its page instead of to
+  the end of the note, and adding a stroke to a handwritten remark updates it
+  instead of adding a second one. Words the typesetter broke across lines (long
+  URLs, compounds) can be erased and marked again.
+- **Erased words are struck through by default** instead of removed (*A word you
+  erase on the tablet becomes*). An existing install keeps the choice it has
+  saved; pick *Struck through* there to switch.
+- **Typed text:** text you type with the reMarkable keyboard comes into the note
+  word for word, and notebooks started on the tablet bring theirs in verbatim.
+- **Typed-text notebooks (experimental):** *Notes go to the tablet as → Typed
+  text* sends notes as the tablet's own keyboard text. Typed edits come back
+  exactly; pen ink becomes remarks and stays attached to its text on the tablet.
+  Checked against rmscene, not yet on a device.
+- **Several copies of the vault:** the copy that syncs on its own holds a lease
+  in the shared state folder; the others leave automatic syncs to it, and a
+  manual sync there asks first (new setting *This device's name*). A send
+  another copy has in flight is left alone. A notebook another copy replaced
+  by a send is not taken for trashed on the tablet while that copy's sync state
+  has not arrived: the note is neither archived nor sent until it has. A note
+  found in the archive folder while its notebook is still on the tablet goes
+  back where it was synced, instead of its notebook following it into an
+  archive folder on the tablet. A note whose record has not arrived waits only
+  for a notebook of its name in the folder it would be sent to, not for one of
+  yours elsewhere on the tablet. Damaged state files (merge conflict
+  markers) are never overwritten, Syncthing/git conflict copies are listed
+  instead of loaded, and notes copied with their `remarkable-id` get their own
+  notebook. Unused files in the state folder move to its `trash` subfolder after
+  a week.
+- **Stop syncing with reMarkable** (command and right-click): writes
+  `remarkable: false` into the note so it stays out even in a sync folder, and
+  asks whether its notebook goes to the trash. **Sync with reMarkable** joins it
+  again.
+- **Sync status** lists every note by state (in sync, waiting to send, clash,
+  tablet changes pending, not sent with the reason, archived, left out); click one
+  to open it. A status-bar warning shows failing syncs, unsent notes and clashes;
+  after three failed background syncs in a row a notice appears. Rate limits
+  don't count, and their message no longer suggests turning folder mirroring off.
+- **Watching notes:** a note you keep editing is sent at most a minute after its
+  first unsent change; the plugin's own writes and the backup folder no longer
+  trigger sends; watched notes sync through the same queue as *Sync now*.
+
 - **Built-in reading no longer guesses at joined-up writing:** a joined-up
   word has no separate letters, so the letter reader matched each whole word
   as one symbol (`mmmmmmm` for "Ask about the budget and the timeline"). It

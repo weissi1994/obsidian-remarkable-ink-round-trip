@@ -33,6 +33,12 @@
  * that left a page unread merges against the text as sent: against the
  * last merge's, that page's changes would look undone.
  *
+ * Text typed on a handwritten page comes in as a mark carrying it, placed
+ * like a free remark on its page. A typed-text notebook needs no
+ * projection: the page's text is the tablet's side as it is
+ * (sync/typednote.ts projectTyped), its ink placed after the paragraph it
+ * belongs to.
+ *
  * Pure and synchronous: the write runs it again on the note as it is at
  * that moment.
  */
@@ -60,6 +66,7 @@ import {
 } from "../incoming/remarkid";
 import { projectOntoSource } from "../incoming/sourceprojection";
 import { merge3 } from "./merge3";
+import { projectTyped } from "./typednote";
 
 /** A remark's ink as an earlier import kept it, and the plugin's reading of it while the owner never changed it. */
 export type KeptRemark = { strokes: { x: number; y: number }[][]; text?: string };
@@ -261,26 +268,35 @@ export function mergeTabletChanges(input: TabletChanges): {
 		};
 	}
 	const settled = settleRemarks(ours, marks, input.remarkInk);
+	const typedPage = marks.find((mark) => mark.tabletText !== undefined)?.tabletText;
 	const projected =
-		input.base === null || input.layout === null
+		input.base === null
 			? null
-			: projectOntoSource({
-					source: input.base,
-					layout: input.layout,
-					highlights: input.highlights,
-					marks: settled.marks,
-					styles: input.styles,
-					erasedAs: input.erasedAs,
-					listUnplaced: false,
-				});
+			: typedPage !== undefined
+				? projectTyped(input.base, typedPage, settled.marks)
+				: input.layout === null
+					? null
+					: projectOntoSource({
+							source: input.base,
+							layout: input.layout,
+							highlights: input.highlights,
+							marks: settled.marks,
+							styles: input.styles,
+							erasedAs: input.erasedAs,
+							listUnplaced: false,
+						});
 	if (projected === null || input.base === null) {
 		const refreshed: string[] = [];
+		// Without what was sent, a typed page's text cannot be merged: it is listed whole.
+		const listed = input.marks.map((mark) =>
+			mark.tabletText === undefined ? mark : { kind: mark.kind, typed: mark.tabletText },
+		);
 		const summary = renderAnnotationBlock({
 			sourcePath: input.sourcePath,
 			sourceName: input.sourceName,
 			highlights: input.highlights,
 			// The summary lists what could not be read with everything else.
-			marks: withNoteTexts(ours, input.marks, refreshed),
+			marks: withNoteTexts(ours, listed, refreshed),
 			inSourceNote: true,
 			styles: input.styles,
 			erasedAs: input.erasedAs,

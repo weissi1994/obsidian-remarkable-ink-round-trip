@@ -181,15 +181,16 @@ describe("sends in flight", () => {
 	});
 
 	describe("an update in place (same notebook, new hash)", () => {
-		/** A committed send to d1 at hash h1, then an update to h2 recorded as pending. */
+		/** A committed send to d1 at hash h1, then an update to h2 (writing file f-new) recorded as pending. */
 		async function inFlight() {
 			const { fs } = memoryFs();
 			const state = new SyncState(fs, ROOT, "this-copy");
 			await state.commitSent(A, sent("old"), { ...entry(A, "d1"), accountedHash: "h1" });
-			await state.writePending(A, sent("new"), { ...entry(A, "d1"), accountedHash: "h2" }, "h1");
+			await state.writePending(A, sent("new"), { ...entry(A, "d1"), accountedHash: "h2" }, "h1", ["f-new"]);
 			const next = new SyncState(fs, ROOT, "this-copy");
-			return { next, table: await next.loadMappings() };
+			return { fs, state, next, table: await next.loadMappings() };
 		}
+		const holding = (...hashes: string[]) => () => Promise.resolve(new Set(hashes));
 
 		it("did not land while the notebook still has the hash it replaced, though it is listed", async () => {
 			const { next, table } = await inFlight();
@@ -207,12 +208,42 @@ describe("sends in flight", () => {
 			expect((await next.readSent(A))?.body).toBe("new");
 		});
 
-		it("landed and was written on since: committed, the newer ink left for the next read", async () => {
+		it("landed and was written on since: committed when the notebook holds a file it wrote, the newer ink left for the next read", async () => {
 			const { next, table } = await inFlight();
-			const settled = await next.settlePending(table, new Map([["d1", "h3"]]));
+			const settled = await next.settlePending(table, new Map([["d1", "h3"]]), holding("f-tablet", "f-new"));
 			expect(settled.committed).toEqual([A]);
 			// Still the hash the update wrote, so the pull sees h3 as new.
 			expect(settled.table[A].accountedHash).toBe("h2");
+		});
+
+		it("never landed and the tablet wrote since: dropped, the merge base stays what the tablet holds", async () => {
+			const { next, table } = await inFlight();
+			const settled = await next.settlePending(table, new Map([["d1", "h3"]]), holding("f-old", "f-tablet"));
+			expect(settled).toMatchObject({ committed: [], dropped: [A] });
+			expect(settled.table[A].accountedHash).toBe("h1");
+			expect((await next.readSent(A))?.body).toBe("old");
+		});
+
+		it("stays undecided at another hash while the notebook's files cannot be read", async () => {
+			const { fs, next, table } = await inFlight();
+			expect(await next.settlePending(table, new Map([["d1", "h3"]]))).toMatchObject({ committed: [], dropped: [] });
+			const failing = () => Promise.reject(new Error("offline"));
+			expect(await next.settlePending(table, new Map([["d1", "h3"]]), failing)).toMatchObject({ committed: [], dropped: [] });
+			// Still there for a later run that can tell.
+			const later = new SyncState(fs, ROOT, "this-copy");
+			const again = await later.settlePending(await later.loadMappings(), new Map([["d1", "h3"]]), holding("f-new"));
+			expect(again.committed).toEqual([A]);
+		});
+
+		it("is dropped when refused, but only while it is still the send that writes that hash", async () => {
+			const { fs, state, next } = await inFlight();
+			await state.dropPending(A, "h9");
+			expect((await next.settlePending(await next.loadMappings(), new Map([["d1", "h2"]]))).committed).toEqual([A]);
+			await state.writePending(A, sent("newer"), { ...entry(A, "d1"), accountedHash: "h4" }, "h2", ["f-4"]);
+			await state.dropPending(A, "h4");
+			const after = new SyncState(fs, ROOT, "this-copy");
+			expect(await after.settlePending(await after.loadMappings(), new Map([["d1", "h4"]]))).toMatchObject({ committed: [], dropped: [] });
+			expect((await after.readSent(A))?.body).toBe("new");
 		});
 	});
 

@@ -4,7 +4,7 @@
  * comes back as the same markdown and the tablet's edits show up as edits.
  */
 
-import type { TextSpan, TypedParagraph } from "./rmscene";
+import type { RmScene, TextSpan, TypedParagraph } from "./rmscene";
 import { linePrefixStyle, parseInlineMarkdown, STYLE_PREFIX } from "../ink/roottext";
 
 export function typedTextToMarkdown(paragraphs: readonly TypedParagraph[]): string {
@@ -19,6 +19,19 @@ export function typedTextToMarkdown(paragraphs: readonly TypedParagraph[]): stri
 			return reads === (prefix === "" ? "plain" : paragraph.style) ? prefix + inline : `${prefix}\\${inline}`;
 		})
 		.join("\n");
+}
+
+/**
+ * The text typed on a page as markdown, blank paragraphs around it left
+ * out; null when it has none, "unreadable" when its text block could not
+ * be read.
+ */
+export function pageTypedMarkdown(scene: RmScene): { markdown: string } | "unreadable" | null {
+	if (scene.text === undefined) return (scene.blockTypes[0x07] ?? 0) > 0 ? "unreadable" : null;
+	const paragraphs = [...scene.text.paragraphs];
+	while (paragraphs.length > 0 && paragraphs[0].text.trim() === "") paragraphs.shift();
+	while (paragraphs.length > 0 && paragraphs[paragraphs.length - 1].text.trim() === "") paragraphs.pop();
+	return paragraphs.length === 0 ? null : { markdown: typedTextToMarkdown(paragraphs) };
 }
 
 function append(segments: TextSpan[], text: string, bold: boolean, italic: boolean): void {

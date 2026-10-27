@@ -140,6 +140,20 @@ export interface ImportedMark {
 	unapplied?: string;
 	/** Ink fork, kind "skipped": a whole page went unread (not downloadable, unreadable, or no longer matching what was sent), so this import cannot say what changed on it — the merge must not take its text as the tablet's (sync/twoway.ts). */
 	unreadPage?: boolean;
+	/**
+	 * Ink fork, kind "note": text typed on the tablet, as markdown. It goes
+	 * into the note as it is — plain text, no callout — where a free remark
+	 * on its page would.
+	 */
+	typed?: string;
+	/**
+	 * Ink fork, typed-text notebooks: the whole typed text of the notebook's
+	 * page as markdown, the tablet's side of the merge (sync/twoway.ts). One
+	 * mark per import carries it.
+	 */
+	tabletText?: string;
+	/** Ink fork, typed-text notebooks: a remark goes after this paragraph of `tabletText` (0-based; -1 before the first). */
+	afterParagraph?: number;
 }
 
 /** What the edge needs to paint one remark. */
@@ -256,7 +270,11 @@ export type PullResult = PullSuccess | PullFailure;
 
 /**
  * Apply pull-owned mapping changes without overwriting a push that completed
- * while an account-wide pull yielded. Pulls only update accountedHash.
+ * while an account-wide pull yielded. Pulls only update accountedHash, and
+ * only while nothing else moved it since the pull took its scope: an update
+ * in place keeps the notebook's id, so a changed id alone would miss it, and
+ * the older hash written back would have the notebook read again, against
+ * the newer send.
  */
 export function mergePullMappings(
 	current: MappingTable,
@@ -267,7 +285,9 @@ export function mergePullMappings(
 	for (const [docId, original] of Object.entries(scope)) {
 		const latest = merged[docId];
 		const result = pulled[docId];
-		if (latest?.deviceDocId !== original.deviceDocId || result === undefined) continue;
+		if (latest?.deviceDocId !== original.deviceDocId || latest.accountedHash !== original.accountedHash || result === undefined) {
+			continue;
+		}
 		merged[docId] = { ...latest, accountedHash: result.accountedHash };
 	}
 	return merged;

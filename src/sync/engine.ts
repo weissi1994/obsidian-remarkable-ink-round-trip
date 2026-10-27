@@ -21,17 +21,21 @@ import type { PushWork } from "./queues";
 import {
 	baseName,
 	folderOf,
+	foreignListing,
 	inTrash,
 	mirroredDevicePath,
+	mirroredVaultFolder,
 	plan,
+	vanishedAtOnce,
 	type Action,
 	type RecordPatch,
 	type ReconcilePolicy,
 	type VaultNote,
 } from "./reconcile";
-import { relativeFolderPath } from "./selection";
+import { optedOut, relativeFolderPath } from "./selection";
 import { devicePathOf } from "../transport/metadata";
 import { notesNeedingUpload, sendBatch, type NoteInput, type SendDeps, type SendResult } from "./send";
+import { mergeTags, normalTags, sameTags } from "./tags";
 import { isInWatchFolder } from "./watcher";
 
 export interface VaultPort {
@@ -41,6 +45,12 @@ export interface VaultPort {
 	move(from: string, to: string): Promise<string>;
 	/** Write (or, with null, remove) the document id in a note's frontmatter. */
 	setDocId(path: string, docId: string | null): Promise<void>;
+	/** Write (true) or remove (false) the opt-out in a note's frontmatter (selection.ts OPT_OUT_FRONTMATTER_KEY). */
+	setOptOut(path: string, optOut: boolean): Promise<void>;
+	/** Replace a note's frontmatter `tags` (none: the key goes). */
+	setTags(path: string, tags: readonly string[]): Promise<void>;
+	/** Whether the note with this document id was seen deleted (a vault event): taken as deleted at once, not one sync later. */
+	deleted?(docId: string): boolean;
 	/** The note as a send reads it, its embeds resolved; null when it is not there. */
 	load(path: string): Promise<{ note: NoteInput; resolveEmbed: (linkpath: string) => EmbedContent } | null>;
 }
@@ -52,6 +62,10 @@ export interface CloudPort {
 	ensureFolder(path: string, listing: DeviceItem[]): Promise<string>;
 	/** Rename/move a document while its hash is `expectedHash`; resolves to its new hash. */
 	editMetadata(deviceDocId: string, expectedHash: string, update: { visibleName?: string; parent?: string }): Promise<string>;
+	/** A document's tags at root entry hash `hash` (transport/metadata.ts readTags). */
+	readTags(deviceDocId: string, hash: string): Promise<string[]>;
+	/** Set a document's tags while its hash is `expectedHash`; resolves to its new hash. */
+	editTags(deviceDocId: string, expectedHash: string, tags: readonly string[]): Promise<string>;
 	uploadInk: SendDeps["client"]["uploadInk"];
 	updateInk?: SendDeps["client"]["updateInk"];
 }
@@ -66,6 +80,10 @@ export interface RecordStore {
 	settle(present: ReadonlyMap<string, string>): Promise<string[]>;
 	persistPending?: SendDeps["ink"]["persistPending"];
 	commitSent?: SendDeps["ink"]["commitSent"];
+	/** Notes another copy of the vault is sending right now (SyncState.sendingElsewhere): not sent from here meanwhile. */
+	sendingElsewhere?(): ReadonlySet<string>;
+	/** A send recorded as pending was refused before it could land (SyncState.dropPending). */
+	dropPending?: SendDeps["ink"]["dropPending"];
 }
 
 export interface ContentPort {
@@ -88,6 +106,8 @@ export interface SendPorts {
 	render: SendDeps["ink"]["render"];
 	loadImages?: SendDeps["ink"]["loadImages"];
 	loadDrawings?: SendDeps["ink"]["loadDrawings"];
+	renderTyped?: SendDeps["ink"]["renderTyped"];
+	notebookMode?: SendDeps["notebookMode"];
 	/** Ready what every send of the batch needs (the learned hand). */
 	prepare?(): Promise<void>;
 	layout?: SendDeps["layout"];
@@ -112,6 +132,12 @@ export interface EnginePorts {
 	send: SendPorts;
 	policy(): EnginePolicy;
 	log: (line: string) => void;
+	/**
+	 * A step that could not run at all (the account could not be listed, a
+	 * cloud call failed): the run's failure, for the caller to count and
+	 * show. Logged as a line when absent.
+	 */
+	failed?: (what: string, error: unknown) => void;
 	/** Run a send in the shared cloud lane (sync/queues.ts PushQueue); run directly when absent. */
 	push?: (work: PushWork) => Promise<void>;
 }
@@ -128,6 +154,8 @@ export interface SendOptions {
 	reconcile?: boolean;
 	/** "Sync folder" with mirroring off: the folder keeps its own tree below the device root. */
 	structureRoot?: string;
+	/** The owner asked for these notes by hand: an opt-out in their frontmatter goes first. */
+	optIn?: boolean;
 }
 
 const isActive = (entry: MappingEntry | undefined): entry is MappingEntry =>
@@ -140,6 +168,15 @@ function patched(entry: MappingEntry, patch: RecordPatch): MappingEntry {
 }
 
 export class SyncEngine {
+	/** Notes this engine held back from a send, with why (SyncEngine.send). */
+	readonly held = new Map<string, string>();
+	/**
+	 * Notes whose rename, move or archive failed in this engine's run: a send
+	 * now would record the note's name and place as the notebook's while the
+	 * notebook still has the old ones, and the change would never follow.
+	 */
+	private readonly unsettled = new Set<string>();
+
 	constructor(private readonly ports: EnginePorts) {}
 
 	private async update(docId: string, patch: RecordPatch): Promise<void> {
@@ -147,6 +184,66 @@ export class SyncEngine {
 		const entry = table[docId];
 		if (entry === undefined) return;
 		await this.ports.records.set({ ...table, [docId]: patched(entry, patch) });
+	}
+
+	/**
+	 * The tags a record keeps through a send. A new notebook starts without
+	 * tags, so the note's count as added to it; one written in place keeps
+	 * its tags, still known at the new hash when they were at the old one.
+	 */
+	private tagsAfterSend(previous: MappingEntry | undefined, entry: MappingEntry): RecordPatch {
+		if (entry.tags !== undefined) return {};
+		if (previous === undefined || previous.deviceDocId !== entry.deviceDocId) return { tags: [], tagsHash: entry.accountedHash };
+		if (previous.tags === undefined) return {};
+		return {
+			tags: previous.tags,
+			tagsHash: previous.tagsHash !== undefined && previous.tagsHash === previous.accountedHash ? entry.accountedHash : previous.tagsHash,
+		};
+	}
+
+	/**
+	 * Whether a note waits instead of being sent: another copy of the vault
+	 * is sending it right now, or another copy sent it and its record has not
+	 * arrived — the note has a document id this copy has no record of, and a
+	 * notebook of its name no record knows is on the account; or its
+	 * notebook is in the trash without the lifecycle having archived it,
+	 * replaced by another copy's send (sync/reconcile.ts plan). Sending it
+	 * now would put a second notebook beside that one.
+	 */
+	private heldBack(note: NoteInput, listing: readonly DeviceItem[]): boolean {
+		const docId = note.existingDocId;
+		if (typeof docId !== "string") return false;
+		const record = this.ports.records.get()[docId];
+		if (this.unsettled.has(docId) || (isActive(record) && record.notePath !== note.path)) {
+			this.held.set(note.path, "its notebook's name or folder could not be brought along yet");
+			return true;
+		}
+		if (this.ports.records.sendingElsewhere?.().has(docId) === true) {
+			this.held.set(note.path, "another copy of the vault is sending it right now");
+			return true;
+		}
+		const byId = new Map(listing.map((item) => [item.id, item]));
+		const current = isActive(record) ? byId.get(record.deviceDocId) : undefined;
+		if (current !== undefined && inTrash(current.parent, byId)) {
+			this.held.set(note.path, "its notebook was replaced on the reMarkable by a send from another copy of the vault, whose sync state has not arrived yet");
+			return true;
+		}
+		const table = this.ports.records.get();
+		if (table[docId] !== undefined) return false;
+		const known = new Set(Object.values(table).map((entry) => entry.deviceDocId));
+		// Another copy sent it where the note's folder mirrors; one elsewhere is the owner's own.
+		const { baseFolder } = this.ports.policy();
+		const stranger = listing.find(
+			(item) =>
+				item.type === "DocumentType" &&
+				item.visibleName === note.basename &&
+				!known.has(item.id) &&
+				!inTrash(item.parent, byId) &&
+				(baseFolder === null || mirroredVaultFolder(item.parent, byId, baseFolder) === folderOf(note.path)),
+		);
+		if (stranger === undefined) return false;
+		this.held.set(note.path, `notebook “${stranger.visibleName}” on the reMarkable may be this note, sent from another copy of the vault whose sync state has not arrived yet`);
+		return true;
 	}
 
 	/**
@@ -177,15 +274,17 @@ export class SyncEngine {
 	/**
 	 * Bring notes and notebooks together: renames, moves, deletes and
 	 * restores from either side (sync/reconcile.ts). Resolves to the account
-	 * listing as it is after, or null when it could not be read.
+	 * listing as it is after (null when it could not be read), and whether it
+	 * is another account's (`foreign`): then nothing should be sent either.
 	 */
-	async reconcile(): Promise<{ listing: DeviceItem[] | null; notes: VaultNote[] }> {
+	async reconcile(): Promise<{ listing: DeviceItem[] | null; notes: VaultNote[]; foreign: boolean }> {
+		this.unsettled.clear();
 		await this.ports.records.refresh();
 		let listing: DeviceItem[] | null = null;
 		try {
 			listing = await this.ports.cloud.listing();
 		} catch (error) {
-			this.ports.log(`could not list the reMarkable account: ${error instanceof Error ? error.message : String(error)}`);
+			this.fail("could not list the reMarkable account", error);
 		}
 		if (listing !== null) {
 			for (const line of await this.ports.records.settle(new Map(listing.map((item) => [item.id, item.hash])))) {
@@ -193,13 +292,37 @@ export class SyncEngine {
 			}
 		}
 		let notes = await this.splitCopies();
-		const actions = plan(this.ports.records.get(), notes, listing, this.ports.policy());
-		for (const action of actions) await this.execute(action, listing ?? []);
+		const records = this.ports.records.get();
+		const foreign = foreignListing(records, listing);
+		if (foreign) {
+			this.fail(
+				"none of the synced notes' notebooks are on this reMarkable account",
+				new Error("Another account or endpoint? Nothing is archived or sent until the notebooks are found again — switch back, or start over with a fresh sync state."),
+			);
+		}
+		const deleted = this.ports.vault.deleted?.bind(this.ports.vault);
+		if (notes.length > 0 && vanishedAtOnce(records, notes, deleted)) {
+			this.ports.log("most synced notes are not in the vault (still arriving on this device?) — none is taken as deleted for now");
+		}
+		const actions = plan(records, notes, listing, this.ports.policy(), deleted);
+		// A note's later actions build on its earlier ones: after one fails, the next run plans again from what is there.
+		const failed = new Set<string>();
+		for (const action of actions) {
+			if (failed.has(action.docId)) continue;
+			if (!(await this.execute(action, listing ?? []))) failed.add(action.docId);
+		}
+		for (const docId of failed) this.unsettled.add(docId);
 		if (actions.some((action) => action.kind === "move-note")) notes = await this.ports.vault.notes();
-		return { listing, notes };
+		return { listing, notes, foreign };
 	}
 
-	private async execute(action: Action, listing: DeviceItem[]): Promise<void> {
+	private fail(what: string, error: unknown): void {
+		if (this.ports.failed !== undefined) this.ports.failed(what, error);
+		else this.ports.log(`${what}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+
+	/** Carry out one action; resolves to whether it was done. */
+	private async execute(action: Action, listing: DeviceItem[]): Promise<boolean> {
 		const { cloud, vault, log } = this.ports;
 		try {
 			switch (action.kind) {
@@ -228,12 +351,17 @@ export class SyncEngine {
 						if (path !== null) log(`device folder “${path}” is empty now; it is left on the reMarkable`);
 					}
 					const entry = this.ports.records.get()[action.docId];
+					const newParent = parent ?? item?.parent;
+					const devicePath = newParent === undefined ? null : devicePathOf(newParent, new Map(listing.map((one) => [one.id, one])));
 					await this.update(action.docId, {
 						...action.patch,
 						deviceName: visibleName,
-						deviceParent: parent ?? item?.parent,
+						deviceParent: newParent,
+						devicePath: devicePath ?? undefined,
 						// Ink the note does not have yet stays unaccounted for: the read after this takes it in.
 						accountedHash: entry?.accountedHash === action.expectedHash ? hash : entry?.accountedHash,
+						// Name and folder are not tags: tags known at the old hash still hold.
+						tagsHash: entry?.tagsHash === action.expectedHash ? hash : entry?.tagsHash,
 					});
 					break;
 				}
@@ -246,17 +374,24 @@ export class SyncEngine {
 					const hash = await cloud.editMetadata(action.deviceDocId, action.expectedHash, { parent: "trash" });
 					const item = listing.find((entry) => entry.id === action.deviceDocId);
 					if (item !== undefined) Object.assign(item, { hash, parent: "trash" });
-					await this.update(action.docId, { state: "archived", archivedFrom: undefined, accountedHash: hash });
+					await this.update(action.docId, { state: "archived", archivedFrom: undefined, accountedHash: hash, noteMissing: undefined });
 					break;
 				}
 				case "archive-note": {
 					if (action.readFirst) {
-						const { unread } = await this.ports.content.pull([action.docId], { nested: true, background: true });
-						const reason = unread.get(action.docId);
+						let reason: string | undefined;
+						if (this.ports.records.get()[action.docId]?.format === "device") {
+							await this.ports.content.reimport(action.docId).catch((error: unknown) => {
+								reason = error instanceof Error ? error.message : String(error);
+							});
+						} else {
+							const { unread } = await this.ports.content.pull([action.docId], { nested: true, background: true });
+							reason = unread.get(action.docId);
+						}
 						if (reason !== undefined) log(`${action.from}: the trashed notebook's new ink could not be read (${reason}); it stays in the notebook`);
 					}
 					const path = action.from === action.to ? action.from : await vault.move(action.from, action.to);
-					await this.update(action.docId, { state: "archived", archivedFrom: action.from, notePath: path, unappliedHash: undefined });
+					await this.update(action.docId, { state: "archived", archivedFrom: action.archivedFrom, notePath: path, unappliedHash: undefined, noteMissing: undefined });
 					break;
 				}
 			}
@@ -268,21 +403,25 @@ export class SyncEngine {
 			} else {
 				log(`${action.docId}: ${action.kind} failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
-			return;
+			return false;
 		}
 		if ("log" in action && action.log !== undefined) log(action.log);
+		return true;
 	}
 
 	/**
-	 * The whole round trip: lifecycle, then every notebook with new ink read
-	 * into its note, notebooks started on the tablet brought in, and every
-	 * note that is new or out of date sent.
+	 * The whole round trip: lifecycle, then tags both ways, every notebook
+	 * with new ink read into its note, notebooks started on the tablet
+	 * brought in, and every note that is new or out of date sent. A note
+	 * opted out in its frontmatter is left alone.
 	 */
 	async sync(options: { background?: boolean } = {}): Promise<void> {
 		const background = options.background === true;
-		const { listing, notes } = await this.reconcile();
+		const { listing, notes, foreign } = await this.reconcile();
+		if (foreign) return;
 		const table = this.ports.records.get();
-		const byDoc = new Map(notes.filter((note) => note.docId !== undefined).map((note) => [note.docId, note.path]));
+		const kept = notes.filter((note) => note.docId !== undefined && note.optOut !== true);
+		const noteOf = new Map(kept.map((note) => [note.docId, note]));
 		const byId = new Map((listing ?? []).map((item) => [item.id, item]));
 		const live = (entry: MappingEntry): DeviceItem | undefined => {
 			const item = byId.get(entry.deviceDocId);
@@ -290,17 +429,28 @@ export class SyncEngine {
 		};
 		// Only notes that are there with notebooks that are there: anything else the lifecycle has dealt with.
 		const synced = Object.values(table).filter(
-			(entry) => isActive(entry) && byDoc.has(entry.docId) && (listing === null || live(entry) !== undefined),
+			(entry) => isActive(entry) && noteOf.has(entry.docId) && (listing === null || live(entry) !== undefined),
 		);
+		// Before the read: it takes the notebook's new hash as read, and tags changed on the tablet would go unseen.
+		if (listing !== null) {
+			await this.syncTags(
+				synced.flatMap((entry) => {
+					const item = live(entry);
+					const note = noteOf.get(entry.docId);
+					return item === undefined || item.unreadable === true || note === undefined ? [] : [{ docId: entry.docId, note, item }];
+				}),
+			);
+		}
 		const { changed, unread } = await this.ports.content.pull(
 			synced.filter((entry) => entry.format === "ink").map((entry) => entry.docId),
 			{ background },
 		);
 		const unreadAll = new Map(unread);
 		for (const entry of synced) {
-			if (entry.format !== "device" || live(entry)?.hash === entry.accountedHash) continue;
+			const latest = this.ports.records.get()[entry.docId] ?? entry;
+			if (entry.format !== "device" || live(entry)?.hash === latest.accountedHash) continue;
 			try {
-				if (await this.ports.content.reimport(entry.docId)) changed.add(byDoc.get(entry.docId) ?? entry.notePath);
+				if (await this.ports.content.reimport(entry.docId)) changed.add(noteOf.get(entry.docId)?.path ?? entry.notePath);
 			} catch (error) {
 				unreadAll.set(entry.docId, error instanceof Error ? error.message : String(error));
 			}
@@ -312,9 +462,10 @@ export class SyncEngine {
 		const policy = this.ports.policy();
 		const current = this.ports.records.get();
 		const paths = new Set<string>();
-		for (const note of await this.ports.vault.notes()) {
+		const after = await this.ports.vault.notes();
+		for (const note of after) {
 			const record = note.docId === undefined ? undefined : current[note.docId];
-			if (record?.state === "archived") continue;
+			if (record?.state === "archived" || note.optOut === true) continue;
 			const inSyncFolder =
 				policy.syncFolders.some((folder) => isInWatchFolder(note.path, folder)) &&
 				!policy.excludeFolders.some((folder) => isInWatchFolder(note.path, folder));
@@ -322,19 +473,82 @@ export class SyncEngine {
 		}
 		if (paths.size === 0) return;
 		await this.send([...paths], { auto: true, pullFirst: false, reconcile: false, background, unread: unreadAll });
+
+		// A fresh notebook starts without tags, a note brought in this run has none recorded: settled now, not one sync later.
+		const fresh = Object.values(this.ports.records.get()).filter(
+			(entry): entry is MappingEntry & { accountedHash: string } =>
+				isActive(entry) &&
+				entry.accountedHash !== undefined &&
+				(entry.tags === undefined || entry.tagsHash === entry.accountedHash) &&
+				current[entry.docId]?.accountedHash !== entry.accountedHash,
+		);
+		if (fresh.length === 0) return;
+		const noteNow = new Map((await this.ports.vault.notes()).filter((note) => note.optOut !== true).map((note) => [note.docId, note]));
+		await this.syncTags(
+			fresh.flatMap((entry) => {
+				const note = noteNow.get(entry.docId);
+				return note === undefined ? [] : [{ docId: entry.docId, note, item: { hash: entry.accountedHash } }];
+			}),
+		);
+	}
+
+	/**
+	 * Bring each note's frontmatter tags and its notebook's tags together
+	 * (sync/tags.ts): what either side added since the tags last agreed is
+	 * added to the other, what either removed is removed. The tablet's tags
+	 * are read only when its hash moved since. A notebook that changed
+	 * meanwhile is left for the next sync. `item`: the notebook as listed,
+	 * its hash moved along when the tags are written.
+	 */
+	private async syncTags(notes: { docId: string; note: VaultNote; item: { hash: string } }[]): Promise<void> {
+		const { cloud, vault } = this.ports;
+		for (const { docId, note, item } of notes) {
+			const entry = this.ports.records.get()[docId];
+			if (entry === undefined) continue;
+			const vaultTags = normalTags(note.tags ?? []);
+			const known = entry.tags !== undefined && entry.tagsHash === item.hash;
+			if (known && sameTags(vaultTags, entry.tags ?? [])) continue;
+			try {
+				const tablet = known ? (entry.tags ?? []) : normalTags(await cloud.readTags(entry.deviceDocId, item.hash));
+				const merged = mergeTags(entry.tags, vaultTags, tablet);
+				const hash = sameTags(merged, tablet) ? item.hash : await cloud.editTags(entry.deviceDocId, item.hash, merged);
+				const was = item.hash;
+				item.hash = hash;
+				if (!sameTags(merged, vaultTags)) await vault.setTags(note.path, merged);
+				const latest = this.ports.records.get()[docId] ?? entry;
+				if (latest.tags !== undefined && sameTags(latest.tags, merged) && latest.tagsHash === hash) continue;
+				await this.update(docId, {
+					tags: merged,
+					tagsHash: hash,
+					// Only the tags changed: a notebook read up to the write stays read.
+					accountedHash: latest.accountedHash === was ? hash : latest.accountedHash,
+				});
+			} catch (error) {
+				if (error instanceof NotebookChangedError || error instanceof NotebookGoneError) continue;
+				this.fail(`${note.path}: its tags could not be synced`, error);
+			}
+		}
 	}
 
 	/**
 	 * Send notes as handwritten notebooks. A note that has a notebook gets it
 	 * read first, so ink not yet in the note is merged before the notebook is
 	 * rewritten; one whose notebook could not be read is held back. With
-	 * `auto`, unchanged notes are skipped. Archived notes are never sent.
+	 * `auto`, unchanged notes are skipped. Archived notes are never sent, nor
+	 * notes opted out in their frontmatter — unless `optIn` lifts it first.
+	 * Held back too: a note another copy of the vault is sending right now,
+	 * and one with a document id this copy has no record of while a notebook
+	 * of its name that no record knows is on the account — another copy's
+	 * send whose state has not arrived yet (`held`).
 	 */
 	async send(paths: string[], options: SendOptions = {}): Promise<void> {
 		const { vault, records, content, cloud } = this.ports;
 		const auto = options.auto === true;
 		const background = options.background === true;
-		if (options.reconcile !== false) await this.reconcile();
+		if (options.reconcile !== false && (await this.reconcile()).foreign) {
+			if (!background) await this.ports.send.report([], { auto, background, failure: "None of the synced notes' notebooks are on this reMarkable account." });
+			return;
+		}
 		let unread: ReadonlyMap<string, string> = options.unread ?? new Map<string, string>();
 		const loaded = new Map<string, { note: NoteInput; resolveEmbed: (linkpath: string) => EmbedContent }>();
 		const load = async () => {
@@ -345,6 +559,11 @@ export class SyncEngine {
 			}
 		};
 		await load();
+		if (options.optIn === true) {
+			const lifted = [...loaded.values()].filter(({ note }) => optedOut(note.content));
+			for (const { note } of lifted) await vault.setOptOut(note.path, false);
+			if (lifted.length > 0) await load();
+		}
 		const recordOf = (note: NoteInput) => (typeof note.existingDocId === "string" ? records.get()[note.existingDocId] : undefined);
 		if (options.pullFirst !== false) {
 			const synced = [...loaded.values()].map(({ note }) => recordOf(note)).filter(isActive);
@@ -362,14 +581,16 @@ export class SyncEngine {
 		await records.refresh();
 		const resolveEmbed = (linkpath: string, notePath: string): EmbedContent =>
 			loaded.get(notePath)?.resolveEmbed(linkpath) ?? { kind: "missing" };
-		let notes = [...loaded.values()].map(({ note }) => note).filter((note) => recordOf(note)?.state !== "archived");
+		let notes = [...loaded.values()]
+			.map(({ note }) => note)
+			.filter((note) => recordOf(note)?.state !== "archived" && !optedOut(note.content));
 		if (notes.length === 0) {
 			if (!background) await this.ports.send.report([], { auto, background, failure: "No markdown notes to send." });
 			return;
 		}
 		if (auto) {
 			try {
-				notes = notesNeedingUpload(notes, records.get(), resolveEmbed, this.ports.send.frontmatterAsTitleBlock);
+				notes = notesNeedingUpload(notes, records.get(), resolveEmbed, this.ports.send.frontmatterAsTitleBlock, this.ports.send.notebookMode);
 			} catch (error) {
 				await this.ports.send.report([], { auto, background, failure: error instanceof Error ? error.message : String(error) });
 				return;
@@ -380,12 +601,14 @@ export class SyncEngine {
 		const structureOnly = policy.baseFolder === null && options.structureRoot !== undefined;
 		const base = structureOnly ? "" : policy.baseFolder;
 		const parents = new Map<string, string>();
+		const parentPaths = new Map<string, string>();
 		const work: PushWork = {
 			ensureFolders: async () => {
 				if (notes.length === 0) return;
 				await this.ports.send.prepare?.();
 				const listing = await cloud.listing();
 				for (const line of await records.settle(new Map(listing.map((item) => [item.id, item.hash])))) this.ports.log(line);
+				notes = notes.filter((note) => !this.heldBack(note, listing));
 				const byId = new Map(listing.map((item) => [item.id, item]));
 				for (const note of notes) {
 					const record = recordOf(note);
@@ -400,6 +623,11 @@ export class SyncEngine {
 						parents.set(note.path, "");
 					}
 				}
+				const after = new Map(listing.map((item) => [item.id, item]));
+				for (const [path, parent] of parents) {
+					const devicePath = devicePathOf(parent, after);
+					if (devicePath !== null) parentPaths.set(path, devicePath);
+				}
 			},
 			uploadFiles: async () => {
 				if (notes.length === 0) {
@@ -413,11 +641,18 @@ export class SyncEngine {
 					const merged = { ...records.get() };
 					for (const [docId, entry] of Object.entries(next)) {
 						if (entry === batchBase[docId]) continue;
+						const previous = merged[docId];
 						// A fresh send knows its notebook's name and folder: what it was sent with.
-						merged[docId] =
+						const named =
 							entry.deviceName === undefined
-								? { ...entry, deviceName: baseName(entry.notePath), deviceParent: parents.get(entry.notePath) ?? "" }
+								? {
+										...entry,
+										deviceName: baseName(entry.notePath),
+										deviceParent: parents.get(entry.notePath) ?? "",
+										devicePath: parentPaths.get(entry.notePath),
+									}
 								: entry;
+						merged[docId] = { ...named, ...this.tagsAfterSend(previous, entry) };
 					}
 					batchBase = next;
 					await records.set(merged);
@@ -431,7 +666,9 @@ export class SyncEngine {
 							render: this.ports.send.render,
 							loadImages: this.ports.send.loadImages,
 							loadDrawings: this.ports.send.loadDrawings,
+							renderTyped: this.ports.send.renderTyped,
 							persistPending: records.persistPending,
+							dropPending: records.dropPending,
 							commitSent: records.commitSent,
 						},
 						resolveParent: (notePath) => {
@@ -468,6 +705,7 @@ export class SyncEngine {
 						persistDocId: (note, docId) => vault.setDocId(note.path, docId),
 						layout: this.ports.send.layout,
 						frontmatterAsTitleBlock: this.ports.send.frontmatterAsTitleBlock,
+						notebookMode: this.ports.send.notebookMode,
 						skipUnchanged: auto,
 					},
 					(done, total) => this.ports.send.progress?.(done, total),
@@ -489,11 +727,13 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Stop syncing a note: its record goes, then the id in its frontmatter
-	 * (in that order, so a stop cut short never leaves a record whose note
-	 * looks deleted). The notebook stays, or with `trashNotebook` goes to the
-	 * tablet's trash — only while it holds nothing the note lacks. Resolves to
-	 * what happened to the notebook.
+	 * Stop syncing a note: its record goes, then the note is opted out in its
+	 * frontmatter (so a sync folder does not send it again as a new
+	 * notebook), then the id goes from its frontmatter — in that order, so a
+	 * stop cut short never leaves a record whose note looks deleted, nor a
+	 * note that is sent again. The notebook stays, or with `trashNotebook`
+	 * goes to the tablet's trash — only while it holds nothing the note
+	 * lacks. Resolves to what happened to the notebook.
 	 */
 	async unlink(docId: string, notePath: string | null, trashNotebook: boolean): Promise<"kept" | "trashed" | "changed"> {
 		const { cloud, records, vault } = this.ports;
@@ -520,7 +760,10 @@ export class SyncEngine {
 		if (entry !== undefined) {
 			await records.set(Object.fromEntries(Object.entries(records.get()).filter(([id]) => id !== docId)));
 		}
-		if (notePath !== null) await vault.setDocId(notePath, null);
+		if (notePath !== null) {
+			await vault.setOptOut(notePath, true);
+			await vault.setDocId(notePath, null);
+		}
 		return outcome;
 	}
 }

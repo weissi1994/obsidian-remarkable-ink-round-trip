@@ -33,7 +33,8 @@ import {
 	InkRender,
 	renderInk,
 } from "./ink/inkrender";
-import { parseRmScene } from "./incoming/rmscene";
+import { parseRmScene, type TypedParagraph } from "./incoming/rmscene";
+import { buildTextPageRm } from "./ink/roottext";
 import type { Picture } from "./ink/inkimage";
 import type { InkDrawing } from "./ink/inkdrawing";
 import type { RoundTripSettings } from "./settingsmodel";
@@ -200,6 +201,12 @@ export class InkEdge {
 		return { pages: inkPagesToRm(render, options), snapshot };
 	}
 
+	/** One page of typed text (a typed-text notebook), and the settings it was sent with. */
+	renderTyped(paragraphs: readonly TypedParagraph[]): { page: Uint8Array; snapshot: Omit<InkSnapshot, "pageIds"> } {
+		const snapshot = { ...this.snapshotBase(), mode: "typed" as const };
+		return { page: buildTextPageRm(paragraphs, [], { paperSize: snapshot.profile }), snapshot };
+	}
+
 	/** What a send kept, or null when it is gone. */
 	readSent(docId: string): Promise<SentRecord | null> {
 		return this.host.state
@@ -240,7 +247,8 @@ export class InkEdge {
 		entry: MappingEntry,
 		fallback?: () => Promise<{ title: string; markdown: string } | null>,
 	): Promise<InkRender | null> {
-		if (entry.ink === undefined || entry.pdfLayout === undefined) return null;
+		// A typed-text notebook holds no handwriting of ours to regenerate.
+		if (entry.ink === undefined || entry.ink.mode === "typed" || entry.pdfLayout === undefined) return null;
 		const sent: Omit<SentRecord, "body"> | null =
 			(await this.readSent(entry.docId)) ?? (fallback === undefined ? null : await fallback());
 		if (sent === null) return null;

@@ -85,3 +85,38 @@ export class ProgressStatus {
 		setTooltip(this.item, `${NOTICE_PREFIX} — ${message}`);
 	}
 }
+
+/**
+ * Desktop status-bar item for what needs the owner: background syncs
+ * failing, notes not sent because of an error, open clashes. Hidden while
+ * all is well; a click opens the sync status.
+ */
+export class SyncAlertStatus {
+	private readonly text: HTMLElement;
+
+	constructor(
+		private readonly item: HTMLElement,
+		onClick: () => void,
+	) {
+		item.addClass("remarkable-round-trip-alert", "mod-clickable");
+		setIcon(item.createSpan({ cls: "remarkable-round-trip-status-icon" }), "alert-triangle");
+		this.text = item.createSpan({ cls: "remarkable-round-trip-status-text" });
+		item.addEventListener("click", onClick);
+		item.hide();
+	}
+
+	show(state: { failing: string | null; errors: number; clashes: number }): void {
+		const parts = [
+			...(state.failing === null ? [] : ["sync failing"]),
+			...(state.errors > 0 ? [`${state.errors} not sent`] : []),
+			...(state.clashes > 0 ? [`${state.clashes} clash${state.clashes === 1 ? "" : "es"}`] : []),
+		];
+		if (parts.length === 0) {
+			this.item.hide();
+			return;
+		}
+		this.text.setText(`reMarkable: ${parts.join(", ")}`);
+		setTooltip(this.item, `${NOTICE_PREFIX} — ${state.failing ?? parts.join(", ")}. Click for the sync status.`);
+		this.item.show();
+	}
+}

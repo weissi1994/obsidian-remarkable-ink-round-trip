@@ -2,7 +2,9 @@
  * Send orchestration (PRD F1, F8-basis): note → preprocess → handwritten
  * notebook → upload, with per-file results for batch runs. Pure logic over
  * injected adapters so the whole flow is unit-testable without Obsidian or a
- * device.
+ * device. A typed-text notebook (notebookMode "typed") gets the note body
+ * as keyboard text instead (sync/typednote.ts), edited in place character
+ * by character once it exists.
  */
 
 import { preprocess, splitNote, EmbedResolver } from "../preprocess/preprocess";
@@ -10,8 +12,11 @@ import { parseBlocks } from "../convert/mdblocks";
 import { resolveLayoutOptions, PdfLayoutOptions } from "../convert/pdf";
 import { ensureDocId, generateDocId } from "../id/docid";
 import { InkSnapshot, MappingEntry, MappingTable, contentHash, recordUpload } from "../id/mapping";
+import { markdownToTypedText } from "../ink/roottext";
 import { NotebookChangedError, NotebookGoneError } from "../transport/notebook";
+import { typedBody } from "./typednote";
 import type { Block } from "../convert/mdblocks";
+import type { TypedParagraph } from "../incoming/rmscene";
 import type { Picture } from "../ink/inkimage";
 import type { InkDrawing } from "../ink/inkdrawing";
 import type { UploadResult } from "../transport/cloud";
@@ -63,11 +68,14 @@ export interface SendDeps {
 		): Promise<UploadResult & { pageIds: string[]; replaced?: boolean; hash?: string }>;
 		/**
 		 * Write the pages into the note's existing notebook
-		 * (transport/notebook.ts updateNotebook): only while its hash is still
-		 * `expectedHash` (else NotebookChangedError), NotebookGoneError when it
-		 * is gone, InPlaceRefusedError when a page holds what the note lacks.
-		 * `pageIds`: the previous send's; `beforeCommit` runs just before the
-		 * update lands, with its hash and page ids.
+		 * (transport/notebook.ts sendNotebookUpdate): only while its hash is
+		 * still `expectedHash` (else NotebookChangedError), NotebookGoneError
+		 * when it is gone, InPlaceRefusedError when a page holds what the note
+		 * lacks. `pageIds`: the previous send's; `typedPages`: pages edited as
+		 * typed text in place; `beforeCommit` runs just before the update
+		 * lands, with its hash, page ids and the hashes of the files it wrote;
+		 * `abandoned` with a hash `beforeCommit` had whose update provably did
+		 * not land.
 		 */
 		updateInk?(
 			deviceDocId: string,
@@ -78,7 +86,9 @@ export interface SendDeps {
 				expectedHash: string;
 				pageIds: string[];
 				noteText: string;
-				beforeCommit?: (hash: string, pageIds: string[]) => Promise<void>;
+				typedPages?: (readonly TypedParagraph[] | undefined)[];
+				beforeCommit?: (hash: string, pageIds: string[], written: string[]) => Promise<void>;
+				abandoned?: (hash: string) => Promise<void>;
 			},
 		): Promise<{ deviceDocId: string; pageIds: string[]; hash: string }>;
 	};
@@ -92,6 +102,12 @@ export interface SendDeps {
 			images?: Record<string, Picture>,
 			drawings?: Record<string, InkDrawing>,
 		): { pages: Uint8Array[]; snapshot: Omit<InkSnapshot, "pageIds"> };
+		/**
+		 * A typed-text page of these paragraphs, and the snapshot of the
+		 * settings it was made with (`mode` "typed"). Needed when
+		 * `notebookMode` is "typed".
+		 */
+		renderTyped?(paragraphs: readonly TypedParagraph[]): { page: Uint8Array; snapshot: Omit<InkSnapshot, "pageIds"> };
 		/** The note's Mermaid diagrams, traced, by diagramKey(source). */
 		loadDrawings?(markdown: string): Promise<Record<string, InkDrawing>>;
 		/** The note's embedded pictures, quantised, by placeholder name. */
@@ -100,9 +116,18 @@ export interface SendDeps {
 		 * Record the send before its upload: a crash after the upload must not
 		 * lose the notebook, a failed upload must not change the merge base
 		 * (SyncState.writePending). `previousHash`: an update in place's
-		 * notebook hash before it.
+		 * notebook hash before it; `written`: the entry hashes of the files
+		 * it wrote.
 		 */
-		persistPending?(docId: string, sent: SentRecord, mapping: MappingEntry, previousHash?: string): Promise<void>;
+		persistPending?(
+			docId: string,
+			sent: SentRecord,
+			mapping: MappingEntry,
+			previousHash?: string,
+			written?: string[],
+		): Promise<void>;
+		/** A pending record whose update provably never landed goes (SyncState.dropPending). */
+		dropPending?(docId: string, hash: string): Promise<void>;
 		/** The upload landed: keep its text and mapping together (SyncState.commitSent). */
 		commitSent?(docId: string, sent: SentRecord, mapping: MappingEntry): Promise<void>;
 	};
@@ -141,6 +166,8 @@ export interface SendDeps {
 	 */
 	reread?: (note: NoteInput, docId: string) => Promise<{ note: NoteInput; entry: MappingEntry | undefined } | null>;
 	layout?: PdfLayoutOptions;
+	/** "typed": notes go as typed-text notebooks (ink.renderTyped); absent = handwriting. */
+	notebookMode?: "handwriting" | "typed";
 	frontmatterAsTitleBlock?: boolean;
 	/**
 	 * Skip the upload when the preprocessed content matches the recorded
@@ -184,8 +211,23 @@ export function prepareNoteContent(
 }
 
 /**
+ * The text a send writes and hashes: the preprocessed markdown of a
+ * handwritten notebook, the plain body of a typed-text one.
+ */
+function sentText(
+	note: NoteInput,
+	typed: boolean,
+	resolveEmbed: (linkpath: string, notePath: string) => ReturnType<EmbedResolver>,
+	frontmatterAsTitleBlock: boolean | undefined,
+): { markdown: string; missingEmbeds: string[] } {
+	if (typed) return { markdown: typedBody(splitNote(note.content).body), missingEmbeds: [] };
+	return prepareNoteContent(note, resolveEmbed, frontmatterAsTitleBlock);
+}
+
+/**
  * Notes whose notebook is missing or out of date. A note last sent in a
- * format other than handwriting always counts: it is re-sent as ink.
+ * format other than handwriting always counts: it is re-sent as ink; so
+ * does one last sent in the other notebook mode.
  */
 export function notesNeedingUpload(
 	notes: NoteInput[],
@@ -195,12 +237,15 @@ export function notesNeedingUpload(
 		notePath: string,
 	) => ReturnType<EmbedResolver>,
 	frontmatterAsTitleBlock = false,
+	notebookMode: "handwriting" | "typed" = "handwriting",
 ): NoteInput[] {
+	const typed = notebookMode === "typed";
 	return notes.filter((note) => {
 		if (typeof note.existingDocId !== "string") return true;
 		const previous = table[note.existingDocId];
 		if (previous === undefined || previous.format !== "ink") return true;
-		const { markdown } = prepareNoteContent(note, resolveEmbed, frontmatterAsTitleBlock);
+		if ((previous.ink?.mode === "typed") !== typed) return true;
+		const { markdown } = sentText(note, typed, resolveEmbed, frontmatterAsTitleBlock);
 		return previous.contentHash !== contentHash(markdown);
 	});
 }
@@ -273,10 +318,13 @@ async function uploadOnce(
 	table: MappingTable,
 	deps: SendDeps,
 ): Promise<{ result: SendResult; table: MappingTable }> {
-	const { markdown, missingEmbeds } = prepareNoteContent(note, deps.resolveEmbed, deps.frontmatterAsTitleBlock);
+	const typed = deps.notebookMode === "typed";
+	if (typed && deps.ink.renderTyped === undefined) throw new Error("Not sent: typed-text notebooks are not available here.");
+	const { markdown, missingEmbeds } = sentText(note, typed, deps.resolveEmbed, deps.frontmatterAsTitleBlock);
 	const hash = contentHash(markdown);
 	const current = table[docId];
-	if (deps.skipUnchanged && current?.format === "ink" && current.contentHash === hash) {
+	const sameMode = (current?.ink?.mode === "typed") === typed;
+	if (deps.skipUnchanged && current?.format === "ink" && sameMode && current.contentHash === hash) {
 		return {
 			result: { ok: true, path: note.path, docId, deviceDocId: current.deviceDocId, missingEmbeds, skipped: true },
 			table,
@@ -288,14 +336,26 @@ async function uploadOnce(
 	const read = current?.format === "ink" || current?.format === "device" ? current : undefined;
 	if (read !== undefined && read.accountedHash === undefined) throw new NotebookChangedError(read.deviceDocId, "", "");
 	const parentId = deps.resolveParent ? await deps.resolveParent(note.path) : undefined;
-	const blocks = parseBlocks(markdown, { html: true, quotePictures: true, nestedQuotes: true });
-	const images = (await deps.ink.loadImages?.(note)) ?? {};
-	const drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
-	const rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
+	let rendered: { pages: Uint8Array[]; snapshot: Omit<InkSnapshot, "pageIds"> };
+	let typedPages: TypedParagraph[][] | undefined;
+	let images: Record<string, Picture> = {};
+	let drawings: Record<string, InkDrawing> = {};
+	if (typed) {
+		// The body is the page's text, and as the merge base, the note's own text.
+		const paragraphs = markdownToTypedText(markdown);
+		const { page, snapshot } = deps.ink.renderTyped!(paragraphs);
+		rendered = { pages: [page], snapshot };
+		typedPages = [paragraphs];
+	} else {
+		const blocks = parseBlocks(markdown, { html: true, quotePictures: true, nestedQuotes: true });
+		images = (await deps.ink.loadImages?.(note)) ?? {};
+		drawings = (await deps.ink.loadDrawings?.(markdown)) ?? {};
+		rendered = deps.ink.render(blocks, note.basename, docId, deps.layout, images, drawings);
+	}
 	const sent: SentRecord = {
 		title: note.basename,
 		markdown,
-		body: splitNote(note.content).body,
+		body: typed ? markdown : splitNote(note.content).body,
 		images: Object.keys(images).length > 0 ? images : undefined,
 		drawings: Object.keys(drawings).length > 0 ? drawings : undefined,
 	};
@@ -320,14 +380,19 @@ async function uploadOnce(
 				expectedHash: previousHash,
 				pageIds: previousPages,
 				noteText: note.content,
-				beforeCommit: async (newHash, pageIds) => {
+				...(typedPages === undefined ? {} : { typedPages }),
+				beforeCommit: async (newHash, pageIds, written) => {
 					const pending: MappingEntry = {
 						...base,
 						deviceDocId: read.deviceDocId,
 						ink: { ...rendered.snapshot, pageIds },
 						accountedHash: newHash,
 					};
-					await deps.ink.persistPending?.(docId, sent, pending, previousHash);
+					await deps.ink.persistPending?.(docId, sent, pending, previousHash, written);
+				},
+				// The update gave up before its root write landed: its pending record must not settle as sent.
+				abandoned: async (newHash) => {
+					await deps.ink.dropPending?.(docId, newHash);
 				},
 			});
 			entry = {

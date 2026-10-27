@@ -9,11 +9,14 @@
  * Whatever cannot be read or applied — a page that no longer matches what
  * was sent, a word only partly erased, a remark while handwriting import is
  * off — comes back as a "skipped" mark saying so, for the note to list:
- * dropping it would lose the owner's change without a word.
+ * dropping it would lose the owner's change without a word. Text the owner
+ * typed on a page comes back as it is, for the note (no OCR needed); a
+ * typed-text notebook comes back as its page's text and the ink on it.
  *
  * Page numbers come from the page ids recorded at send time rather than from
  * `.content`: a notebook page has no PDF page behind it to redirect to, and
- * the ids are ours. A page id we never wrote is a page the owner added.
+ * the ids are ours. A page id we never wrote is a page the owner added; a
+ * page the tablet marks deleted is not read.
  */
 
 import type { LaidOutLine, PdfLayout } from "../convert/pdf";
@@ -23,12 +26,13 @@ import { deviceBoundsToPdf, strokeBounds } from "./anchor";
 import type { Highlight } from "./highlights";
 import { describeDiff, diffInkPage, InkPageDiff } from "./inkdiff";
 import { readMarks } from "./marks";
-import { pageIdOfFile, parsePageOrder } from "./pagemap";
+import { deletedPageIds, pageIdOfFile, parsePageOrder } from "./pagemap";
 import type { DocumentFile, DocumentScan, ImportedMark, InkHighlight, PullDeps, StrokeRenderRequest } from "./pull";
 import { TEXT_ONLY_KINDS } from "./pull";
 import type { Stroke } from "./rmlines";
-import { parseRmScene, SceneLine } from "./rmscene";
+import { idKey, parseRmScene, SceneLine } from "./rmscene";
 import { remarkId } from "./remarkid";
+import { pageTypedMarkdown, typedTextToMarkdown } from "./typedtext";
 
 /** Freehand highlighter pens (rmscene HIGHLIGHTER_1 / HIGHLIGHTER_2). */
 const HIGHLIGHTER_TOOLS = new Set([5, 18]);
@@ -299,6 +303,23 @@ export async function collectInkAnnotations(
 		}
 	}
 
+	// The device's own page order, for numbering pages the owner added, and
+	// the pages it deleted, whose files may stay.
+	let deviceOrder: string[] = [];
+	let deletedPages = new Set<string>();
+	const contentFile = allFiles.find((file) => file.id === `${entry.deviceDocId}.content`);
+	if (contentFile !== undefined) {
+		try {
+			const content = await deps.readFile(contentFile);
+			deviceOrder = parsePageOrder(content);
+			deletedPages = deletedPageIds(content);
+		} catch {
+			deviceOrder = [];
+		}
+	}
+	const shownFiles = strokeFiles.filter((file) => !deletedPages.has(pageIdOfFile(file.id) ?? ""));
+	if (entry.ink?.mode === "typed") return collectTypedText(entry, shownFiles, deviceOrder, scan, deps);
+
 	let render: InkRender | null = null;
 	try {
 		render = deps.loadInk ? await deps.loadInk(entry) : null;
@@ -317,17 +338,6 @@ export async function collectInkAnnotations(
 	const pageIds = entry.ink?.pageIds ?? [];
 	const pageOf = new Map(pageIds.map((id, index) => [id, index + 1]));
 
-	// The device's own page order, for numbering pages the owner added.
-	let deviceOrder: string[] = [];
-	const contentFile = allFiles.find((file) => file.id === `${entry.deviceDocId}.content`);
-	if (contentFile !== undefined) {
-		try {
-			deviceOrder = parsePageOrder(await deps.readFile(contentFile));
-		} catch {
-			deviceOrder = [];
-		}
-	}
-
 	const collected: { page: number | undefined; order: number; mark: ImportedMark }[] = [];
 	const highlights: Highlight[] = [];
 	// A change that cannot be read or applied is listed in the note, never dropped.
@@ -342,16 +352,28 @@ export async function collectInkAnnotations(
 
 	// Pages in our order first, added pages after the page they follow (by
 	// the device's own order when .content has one, else at the end).
-	for (const [index, file] of strokeFiles.entries()) {
+	for (const [index, file] of shownFiles.entries()) {
 		const pageId = pageIdOfFile(file.id);
 		const page = pageId === null ? undefined : pageOf.get(pageId);
 		try {
 			if (!deps.readBytes) {
-				skip(undefined, 0, `${strokeFiles.length - index} page(s) not read — they could not be downloaded`, true);
+				skip(undefined, 0, `${shownFiles.length - index} page(s) not read — they could not be downloaded`, true);
 				break;
 			}
 			const bytes = await deps.readBytes(file);
 			const scene = parseRmScene(bytes);
+			// Text typed on the page goes into the note as it is, where a free
+			// remark on that page would; the next send rewrites the page.
+			const typed = pageTypedMarkdown(scene);
+			const typedAt = page ?? pageIds.length;
+			const typedOrder = page === undefined ? 1000 + index + 0.5 : Number.MAX_SAFE_INTEGER;
+			if (typed === "unreadable") {
+				skip(typedAt, typedOrder, `text typed on ${page === undefined ? "a page you added" : `page ${page}`} — not read: its text could not be read`, true);
+			} else if (typed !== null) {
+				collected.push({ page: typedAt, order: typedOrder, mark: { kind: "note", page: typedAt, typed: typed.markdown } });
+				scan.interpretedMarks++;
+				deps.log?.(`  ${file.id}: typed text, ${typed.markdown.split("\n").length} paragraph(s)`);
+			}
 			if (page === undefined) {
 				// A page the owner added to write on: no text of ours to diff,
 				// so it comes back whole (GP_E3_S20 semantics).
@@ -533,4 +555,112 @@ export async function collectInkAnnotations(
 			`${scan.renderedRemarks} remark(s), ${scan.highlightsInStrokes} highlight(s), ${scan.ink?.transcribed ?? 0} transcribed`,
 	);
 	return { highlights, scan, marks: collected.map((item) => item.mark) };
+}
+
+/**
+ * What a typed-text notebook came back with: the page's typed text whole —
+ * the tablet's side of a merge with the note (sync/twoway.ts) — and the
+ * owner's pen ink as remarks, one per paragraph the ink is anchored to or
+ * sits beside, placed after it. Pages the owner added come back as in a
+ * handwritten notebook, after everything.
+ */
+async function collectTypedText(
+	entry: MappingEntry,
+	files: DocumentFile[],
+	deviceOrder: string[],
+	scan: DocumentScan,
+	deps: PullDeps,
+): Promise<{ highlights: Highlight[]; scan: DocumentScan; marks: ImportedMark[] }> {
+	const pageId = entry.ink?.pageIds[0];
+	const marks: ImportedMark[] = [];
+	let tabletText: string | undefined;
+	const skip = (unapplied: string, unreadPage = false) =>
+		marks.push({ kind: "skipped", page: 1, unapplied, ...(unreadPage ? { unreadPage } : {}) });
+	const notImported = (what: string) =>
+		`${what} — ${deps.transcribe === undefined ? "not imported: handwriting import is off" : "could not be read, and handwriting images are off"}`;
+	const END = Number.MAX_SAFE_INTEGER;
+	for (const [index, file] of files.entries()) {
+		const id = pageIdOfFile(file.id);
+		try {
+			if (!deps.readBytes) {
+				skip("not read — its pages could not be downloaded", true);
+				break;
+			}
+			const scene = parseRmScene(await deps.readBytes(file));
+			if (id !== pageId) {
+				const position = deviceOrder.indexOf(id ?? "") + 1 || index + 1;
+				const typed = pageTypedMarkdown(scene);
+				if (typed === "unreadable") skip(`text typed on the page you added (page ${position}) — not read: its text could not be read`);
+				else if (typed !== null) marks.push({ kind: "note", page: 1, afterParagraph: END, typed: typed.markdown });
+				const strokes = scene.lines.map((line) => line.stroke);
+				if (strokes.length === 0) continue;
+				const picture = await pictureOf(
+					{ deviceDocId: entry.deviceDocId, strokes, page: position, remark: 1, wholePage: true },
+					undefined,
+					deps,
+					scan,
+				);
+				if (picture !== null) {
+					marks.push({ kind: "note", page: 1, addedPage: position, afterParagraph: END, ...picture });
+					scan.addedPages++;
+				} else if (deps.renderStrokes === undefined) {
+					skip(notImported(`the page you added (page ${position})`));
+				}
+				continue;
+			}
+			if (scene.text === undefined) {
+				scan.unreadableFiles++;
+				skip("not read — its typed text could not be read", true);
+				continue;
+			}
+			const paragraphs = scene.text.paragraphs;
+			tabletText = typedTextToMarkdown(paragraphs);
+			const paragraphOf = new Map<string, number>();
+			paragraphs.forEach((paragraph, at) => {
+				for (const charId of [paragraph.startId, ...paragraph.charIds]) paragraphOf.set(idKey(charId), at);
+			});
+			// The paragraph the ink belongs to: the one its anchor is in, else
+			// the last one starting above it (rmc's layout, an estimate).
+			const byParagraph = new Map<number, Stroke[]>();
+			for (const line of scene.lines) {
+				let at = line.anchorId === undefined ? undefined : paragraphOf.get(idKey(line.anchorId));
+				if (at === undefined) {
+					const points = line.stroke.points;
+					const y = points.reduce((sum, point) => sum + point.y, 0) / Math.max(1, points.length) + (line.textAnchorY ?? 0);
+					at = paragraphs.reduce((found, paragraph, index) => (paragraph.y <= y ? index : found), -1);
+				}
+				byParagraph.set(at, [...(byParagraph.get(at) ?? []), line.stroke]);
+			}
+			for (const [remark, [at, strokes]] of [...byParagraph].sort((a, b) => a[0] - b[0]).entries()) {
+				const quote = paragraphs[at]?.text.trim() || undefined;
+				const picture = await pictureOf(
+					{ deviceDocId: entry.deviceDocId, strokes, page: 1, remark: remark + 1 },
+					quote,
+					deps,
+					scan,
+				);
+				if (picture === null) {
+					if (deps.renderStrokes === undefined) skip(notImported(`a handwritten remark${quote === undefined ? "" : ` near “${quote}”`}`));
+					continue;
+				}
+				marks.push({ kind: "note", page: 1, afterParagraph: at, ...(quote === undefined ? {} : { quote }), ...picture });
+				scan.renderedRemarks++;
+			}
+			if (scan.ink) scan.ink.ownStrokes += scene.lines.length;
+			deps.log?.(`  ${file.id}: typed text, ${paragraphs.length} paragraph(s); ${byParagraph.size} remark(s)`);
+		} catch (error) {
+			scan.unreadableFiles++;
+			const message = error instanceof Error ? error.message : String(error);
+			deps.log?.(`  could not read ${file.id}: ${message}`);
+			skip(`not read — ${message}`, id === pageId);
+		}
+	}
+	if (tabletText === undefined && !marks.some((mark) => mark.unreadPage === true)) {
+		skip("not read — its page is not on the reMarkable any more", true);
+	}
+	return {
+		highlights: [],
+		scan,
+		marks: tabletText === undefined ? marks : [{ kind: "note", tabletText }, ...marks],
+	};
 }

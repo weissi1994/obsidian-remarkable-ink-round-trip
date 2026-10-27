@@ -10,7 +10,9 @@
  *
  * An existing notebook is updated in place (`updateNotebook`): same document,
  * same page ids by index, the owner's page tags, templates and added pages
- * kept, only changed files written.
+ * kept, only changed files written. A page of typed text is edited in place
+ * (ink/textedit.ts) rather than replaced, so the owner's ink keeps its
+ * anchors; a page that goes is marked deleted, as the tablet does it.
  *
  * rmapi-js speaks the same protocol to the official cloud and to rmfakecloud,
  * so this module serves both endpoints unchanged.
@@ -19,9 +21,11 @@
 import { parsePageOrder } from "../incoming/pagemap";
 import { REMARK_ID_PREFIX, remarkId } from "../incoming/remarkid";
 import { RM_V6_HEADER } from "../incoming/rmlines";
-import { parseRmScene } from "../incoming/rmscene";
+import { parseRmScene, type TextParagraph, type TypedParagraph } from "../incoming/rmscene";
+import { typedTextToMarkdown } from "../incoming/typedtext";
+import { editTypedPage } from "../ink/textedit";
 import { INK_AUTHOR } from "../ink/rmwrite";
-import { withGenerationRetry, type RetryOptions } from "./mirror";
+import { isGenerationConflict, withGenerationRetry, type RetryOptions } from "./mirror";
 
 /** The slice of rmapi-js' raw api this module consumes (structural, testable). */
 export interface RawSyncApi {
@@ -80,11 +84,12 @@ export class NotebookGoneError extends Error {
 }
 
 /** Why a notebook was not updated in place: what is on a page would be lost. */
-export type InPlaceRefusal = "typed-text" | "unreadable-page";
+export type InPlaceRefusal = "typed-text" | "unreadable-page" | "text-not-diffable";
 
 /**
  * Rewriting a page of the notebook would destroy something the note does not
- * hold: text typed on the tablet, or a page that cannot be read at all.
+ * hold: text typed on the tablet, a page that cannot be read at all, or the
+ * place of the owner's ink in typed text that cannot be edited exactly.
  * Raised before anything is written; the note is not sent.
  */
 export class InPlaceRefusedError extends Error {
@@ -93,14 +98,32 @@ export class InPlaceRefusedError extends Error {
 		readonly reason: InPlaceRefusal,
 		/** 1-based page of the notebook as the plugin wrote it. */
 		readonly page: number,
+		/** What exactly could not be done, for "text-not-diffable". */
+		readonly detail?: string,
 	) {
 		super(
 			reason === "typed-text"
 				? `Not sent: page ${page} of its notebook has text typed on the reMarkable that is not in the note yet, and sending would overwrite it.`
-				: `Not sent: page ${page} of its notebook could not be read, and sending would overwrite what is on it.`,
+				: reason === "text-not-diffable"
+					? `Not sent: the typed text on page ${page} of its notebook could not be updated exactly (${detail ?? "unknown reason"}), and rewriting it would detach your ink from it.`
+					: `Not sent: page ${page} of its notebook could not be read, and sending would overwrite what is on it.`,
 		);
 		this.name = "InPlaceRefusedError";
 	}
+}
+
+/**
+ * Whether these paragraphs of typed text are all in the note: each one's
+ * text, emphasis included, whitespace aside — as the import put it in, or
+ * the owner moved it. Text edited in the vault since no longer counts.
+ */
+export function typedTextInNote(paragraphs: readonly TextParagraph[], noteText: string | undefined): boolean {
+	const typed = paragraphs.filter((paragraph) => paragraph.text.trim() !== "");
+	if (typed.length === 0) return true;
+	if (noteText === undefined) return false;
+	const squash = (text: string) => text.replace(/\s+/g, " ").trim();
+	const note = squash(noteText);
+	return typed.every((paragraph) => note.includes(squash(typedTextToMarkdown([{ style: "plain", spans: paragraph.spans }]))));
 }
 
 /** RFC4122-v4-shaped id from crypto randomness (same approach as docid.ts). */
@@ -315,17 +338,33 @@ export interface NotebookUpdateOptions {
 	 * new ids.
 	 */
 	pageIds: string[];
-	/** The note being sent: a page the owner added goes only once its ink is in here. */
+	/** The note being sent: a page the owner added goes only once its ink and typed text are in here. */
 	noteText?: string;
+	/**
+	 * Pages of typed text, by index (typed-text notebooks): a page whose
+	 * current version holds typed text is edited to read these paragraphs
+	 * (ink/textedit.ts), keeping its characters' ids and everything else on
+	 * it, instead of being replaced by `pages[index]`.
+	 */
+	typedPages?: readonly (readonly TypedParagraph[] | undefined)[];
 	/** Template of pages new to the notebook. */
 	template?: string;
 	now?: () => number;
 	/**
-	 * Called with the new entry hash and page ids once everything is
-	 * uploaded, just before the root write makes it count — the moment to
-	 * record the send as pending.
+	 * Called with the new entry hash, the page ids and the entry hashes of
+	 * the files this update wrote, once everything is uploaded, just before
+	 * the root write makes it count — the moment to record the send as
+	 * pending.
 	 */
-	beforeCommit?: (hash: string, pageIds: string[]) => Promise<void>;
+	beforeCommit?: (hash: string, pageIds: string[], written: string[]) => Promise<void>;
+	/**
+	 * Called (sendNotebookUpdate) with each hash `beforeCommit` was given
+	 * whose root write provably never happened — the update gave up on a
+	 * changed, gone or refused notebook, or on the account changing every
+	 * time — so that pending record can go. Not called when the root write
+	 * may have landed (a network error during it).
+	 */
+	abandoned?: (hash: string) => Promise<void>;
 }
 
 export interface NotebookUpdateResult {
@@ -434,9 +473,12 @@ function idxOf(page: CPage | undefined): string | null {
 
 /**
  * The device's per-page records for `finalIds`: a kept page keeps its record
- * (template, scroll, unknown fields); a page of ours the owner deleted comes
- * back; records of pages that go are removed, deleted owner pages stay.
- * Order keys stay when the order still holds, else every page is renumbered.
+ * (template, scroll, unknown fields); records of pages that go stay, marked
+ * deleted with a stamp later than theirs, as the tablet marks a page it
+ * deletes — a record left out or a field removed carries no stamp, and the
+ * tablet's merge would bring the page back. Deleted owner pages stay as
+ * they are. Order keys stay when the order still holds, else every page is
+ * renumbered.
  */
 function rebuildCPages(
 	old: NonNullable<DeviceContent["cPages"]>,
@@ -449,7 +491,11 @@ function rebuildCPages(
 	const others: CPage[] = [];
 	for (const page of oldPages) {
 		if (typeof page?.id === "string") {
-			if (dropped.has(page.id)) continue;
+			if (dropped.has(page.id) && page.deleted === undefined) {
+				const stamp = laterStamp(page.idx?.timestamp);
+				others.push({ ...page, deleted: { timestamp: stamp, value: 1 } });
+				continue;
+			}
 			if (finalIds.includes(page.id)) {
 				byId.set(page.id, page);
 				continue;
@@ -477,15 +523,7 @@ function rebuildCPages(
 	}, "");
 	const pages = finalIds.map((id, index): CPage => {
 		const page = byId.get(id);
-		let base: CPage;
-		if (page === undefined) {
-			base = { id, template: { timestamp: "1:1", value: template } };
-		} else if (page.deleted !== undefined) {
-			base = { ...page };
-			delete base.deleted;
-		} else {
-			base = page;
-		}
+		const base: CPage = page ?? { id, template: { timestamp: "1:1", value: template } };
 		const current = idxOf(page);
 		if (inOrder && current !== null) return base;
 		const value = inOrder ? (tail = keyAfter(tail)) : orderKey(index, finalIds.length);
@@ -602,13 +640,15 @@ export async function updateNotebook(
 		if (page !== null && !deleted.has(page) && !shown.includes(page)) shown.push(page);
 	}
 
-	const ids = options.pageIds.slice(0, pages.length);
+	// A page of ours the owner deleted comes back under a new id: the
+	// tablet's stamped delete of the old one stands.
+	const ids = options.pageIds.slice(0, pages.length).map((id) => (deleted.has(id) ? uuid4() : id));
 	while (ids.length < pages.length) ids.push(uuid4());
-	const dropped = new Set(options.pageIds.slice(pages.length));
+	const dropped = new Set(options.pageIds.slice(pages.length).filter((id) => !deleted.has(id)));
 	const ours = new Map(options.pageIds.map((id, index) => [id, index]));
 
-	// A page the owner added goes only when its ink is in the note already
-	// and it holds no typed text (the note has none of that yet).
+	// A page the owner added goes only when what it holds — ink, typed
+	// text — is in the note already.
 	const added: { id: string; after: number }[] = [];
 	let after = -1;
 	for (const id of shown) {
@@ -621,13 +661,14 @@ export async function updateNotebook(
 		if (file !== undefined && options.noteText !== undefined) {
 			const scene = parseRmScene(await read(file));
 			const textUnread = (scene.blockTypes[ROOT_TEXT_BLOCK] ?? 0) > 0 && scene.text === undefined;
-			const typed = scene.text?.paragraphs.some((paragraph) => paragraph.text.trim() !== "") === true;
+			const typed = scene.text?.paragraphs ?? [];
 			const strokes = scene.lines.map((line) => line.stroke);
+			const holds = strokes.length > 0 || typed.some((paragraph) => paragraph.text.trim() !== "");
 			if (
 				!textUnread &&
-				!typed &&
-				strokes.length > 0 &&
-				options.noteText.includes(`^${REMARK_ID_PREFIX}${remarkId(strokes)}`)
+				holds &&
+				(strokes.length === 0 || options.noteText.includes(`^${REMARK_ID_PREFIX}${remarkId(strokes)}`)) &&
+				typedTextInNote(typed, options.noteText)
 			) {
 				dropped.add(id);
 				continue;
@@ -641,27 +682,32 @@ export async function updateNotebook(
 	];
 
 	// What a rewritten page loses must be in the note already: text typed on
-	// the tablet is not (yet), an unreadable page cannot be told.
+	// the tablet once the import brought it in, never an unreadable page.
 	const assertRewritable = (bytes: Uint8Array, page: number): void => {
 		const scene = parseRmScene(bytes);
 		const v6 = decoder.decode(bytes.subarray(0, RM_V6_HEADER.length)) === RM_V6_HEADER;
 		if (!v6 || ((scene.blockTypes[ROOT_TEXT_BLOCK] ?? 0) > 0 && scene.text === undefined)) {
 			throw new InPlaceRefusedError(docId, "unreadable-page", page);
 		}
-		if (scene.text?.paragraphs.some((paragraph) => paragraph.charIds.some((id) => id.author !== INK_AUTHOR)) === true) {
-			throw new InPlaceRefusedError(docId, "typed-text", page);
-		}
+		const theirs = (scene.text?.paragraphs ?? []).filter((paragraph) => paragraph.charIds.some((id) => id.author !== INK_AUTHOR));
+		if (!typedTextInNote(theirs, options.noteText)) throw new InPlaceRefusedError(docId, "typed-text", page);
 	};
 	const writes: { id: string; bytes: Uint8Array }[] = [];
 	for (const [index, id] of ids.entries()) {
 		const file = strokesOf(id);
+		let bytes = pages[index];
 		if (file !== undefined) {
-			if (file.hash === (await sha256Hex(pages[index]))) continue;
+			if (file.hash === (await sha256Hex(bytes))) continue;
 			const current = await read(file);
-			if (sameBytes(current, pages[index])) continue;
-			if (!deleted.has(id)) assertRewritable(current, index + 1);
+			if (sameBytes(current, bytes)) continue;
+			const typed = options.typedPages?.[index];
+			const edit = typed === undefined ? null : editTypedPage(current, typed);
+			if (edit?.kind === "unchanged") continue;
+			if (edit?.kind === "refused") throw new InPlaceRefusedError(docId, "text-not-diffable", index + 1, edit.reason);
+			if (edit?.kind === "edited") bytes = edit.bytes;
+			else assertRewritable(current, index + 1);
 		}
-		writes.push({ id, bytes: pages[index] });
+		writes.push({ id, bytes });
 	}
 	for (const [index, id] of options.pageIds.entries()) {
 		const file = index < ids.length ? undefined : strokesOf(id);
@@ -685,13 +731,8 @@ export async function updateNotebook(
 		if (next.join("\n") !== lines.join("\n")) pagedata = next.join("\n") + "\n";
 	}
 	const parent = options.parentId ?? (typeof metadata.parent === "string" ? metadata.parent : "");
-	const droppedFiles = entries.some((entry) => {
-		const page = pageOfFile(docId, entry.id);
-		return page !== null && dropped.has(page);
-	});
 	if (
 		writes.length === 0 &&
-		!droppedFiles &&
 		!contentChanged &&
 		pagedata === null &&
 		metadata.visibleName === visibleName &&
@@ -710,11 +751,12 @@ export async function updateNotebook(
 	const replacements = new Map<string, RawEntry>();
 	for (const upload of uploads) if (upload !== null) replacements.set(upload[0].id, upload[0]);
 	const rewritten = new Set(writes.map((write) => write.id));
+	// A page that goes keeps its files, as a page the tablet deletes does:
+	// should its stamped delete lose the tablet's merge, it shows as it was.
 	const files = entries
 		.filter((entry) => {
 			const page = pageOfFile(docId, entry.id);
 			if (page === null) return true;
-			if (dropped.has(page)) return false;
 			// The tablet draws a new thumbnail for a page without one.
 			return !(rewritten.has(page) && entry.id.startsWith(`${docId}.thumbnails/`));
 		})
@@ -728,14 +770,17 @@ export async function updateNotebook(
 		4,
 	);
 	await Promise.all([...uploads.map((upload) => upload?.[1]), uploadCollection, uploadRoot]);
-	await options.beforeCommit?.(collection.hash, ids);
+	await options.beforeCommit?.(collection.hash, ids, [...replacements.values()].map((entry) => entry.hash));
 	await api.putRootHash(root.hash, generation);
 	return { docId, pageIds: ids, hash: collection.hash };
 }
 
 /**
  * Production in-place update: new page ids and the timestamp fixed before
- * the first attempt, so every attempt writes the same notebook.
+ * the first attempt, so every attempt writes the same notebook. When it
+ * fails, the pending record the last `beforeCommit` asked for is handed to
+ * `abandoned` if its root write provably did not happen: it lost to a
+ * changed account, and no later attempt got as far.
  */
 export async function sendNotebookUpdate(
 	api: RawSyncApi,
@@ -748,10 +793,26 @@ export async function sendNotebookUpdate(
 	const pageIds = [...update.pageIds];
 	while (pageIds.length < pages.length) pageIds.push(uuid4());
 	const stamp = (update.now ?? Date.now)();
-	return withGenerationRetry(
-		() => updateNotebook(api, docId, visibleName, pages, { ...update, pageIds, now: () => stamp }),
-		retry,
-	);
+	let latest: { hash: string; unwritten: boolean } | undefined;
+	const attempt = async () => {
+		let committing: string | undefined;
+		const beforeCommit = async (hash: string, ids: string[], written: string[]) => {
+			await update.beforeCommit?.(hash, ids, written);
+			committing = hash;
+		};
+		try {
+			return await updateNotebook(api, docId, visibleName, pages, { ...update, pageIds, now: () => stamp, beforeCommit });
+		} catch (error) {
+			if (committing !== undefined) latest = { hash: committing, unwritten: isGenerationConflict(error) };
+			throw error;
+		}
+	};
+	try {
+		return await withGenerationRetry(attempt, retry);
+	} catch (error) {
+		if (latest?.unwritten === true) await update.abandoned?.(latest.hash);
+		throw error;
+	}
 }
 
 /** One page of a notebook as stored on the account. */
