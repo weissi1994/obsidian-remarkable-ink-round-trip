@@ -213,11 +213,24 @@ export function isRemarkTextLine(line: string): boolean {
 	return line.startsWith(">") && !isTitle(line) && !line.includes("![[") && !isRemarkIdLine(line);
 }
 
+/** How many quote markers a line opens with: 2 for `> > text`. */
+function quoteDepth(line: string): number {
+	return /^(?:>[ \t]*)*/.exec(line)![0].split(">").length - 1;
+}
+
+/** The line without its first `depth` quote markers, and the space after each. */
+function unquoted(line: string, depth: number): string {
+	let rest = line;
+	for (let i = 0; i < depth; i++) rest = rest.replace(/^>[ \t]?/, "");
+	return rest;
+}
+
 /**
  * Find a remark in a note: the line with its id (or else its image), widened
  * to the block around it — up to a blank line or the next callout title; a
  * callout no further than its quoted lines, which a code fence or text can
- * follow straight on.
+ * follow straight on. A callout nested in another (`> > [!note]`) is read
+ * at its own depth: the lines around it at a shallower one are not its own.
  * Null when the note no longer has it.
  */
 export function findRemark(note: string, ref: RemarkRef): FoundRemark | null {
@@ -232,24 +245,27 @@ export function findRemark(note: string, ref: RemarkRef): FoundRemark | null {
 		if (at !== -1) break;
 	}
 	if (at === -1) return null;
-	const quoted = lines[at].startsWith(">");
-	const inBlock = (line: string) => line.trim() !== "" && (!quoted || line.startsWith(">"));
+	const depth = quoteDepth(lines[at]);
+	const inBlock = (line: string) => line.trim() !== "" && quoteDepth(line) >= depth;
+	// A summary entry is no callout: a callout's title next to it bounds it.
+	const titleAt = (line: string) => (depth === 0 ? isTitle(line) : quoteDepth(line) === depth && unquoted(line, depth).trimStart().startsWith("[!"));
 	let start = at;
-	while (start > 0 && inBlock(lines[start - 1]) && !isTitle(lines[start])) start--;
+	while (start > 0 && inBlock(lines[start - 1]) && !titleAt(lines[start])) start--;
 	let end = at;
-	while (end + 1 < lines.length && inBlock(lines[end + 1]) && !isTitle(lines[end + 1])) end++;
+	while (end + 1 < lines.length && inBlock(lines[end + 1]) && !titleAt(lines[end + 1])) end++;
 	const block = lines.slice(start, end + 1);
+	const titled = titleAt(lines[start]);
+	const own = depth === 0 ? block.filter(isRemarkTextLine) : block.filter((line, index) => !(titled && index === 0) && !line.includes("![[") && !isRemarkIdLine(line));
 	return {
 		start,
 		end,
-		titled: isTitle(lines[start]),
+		titled,
 		hasId: block.some(isRemarkIdLine),
-		text: block
-			.filter(isRemarkTextLine)
-			.map((line) => line.replace(/^>\s?/, "").trim())
+		text: own
+			.map((line) => (depth === 0 ? line.replace(/^>\s?/, "") : unquoted(line, depth)).trim())
 			.filter((line) => line !== "")
 			.join("\n"),
-		confirmed: isConfirmLine(lines[start]),
+		confirmed: titled ? lines[start].trimEnd().endsWith(CONFIRM_MARK) : isConfirmLine(lines[start]),
 	};
 }
 

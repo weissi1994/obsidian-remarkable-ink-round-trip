@@ -263,6 +263,22 @@ describe("renderImportReport", () => {
 		expect(report).toContain("Send it again");
 	});
 
+	it("does not claim the marks could not be placed when they were merged into the edited note", () => {
+		// Only the frontmatter changed (a timestamp plugin): the marks were placed in the text as sent.
+		const results: PullResult[] = [
+			{
+				ok: true,
+				docId: "a",
+				notePath: "Nota.md",
+				highlightCount: 0,
+				scan: scan({ sourceState: "changed", written: { form: "copy", conflicts: 0, pending: [] } }),
+			},
+		];
+		const report = renderImportReport({ ...base, results });
+		expect(report).toContain("merged into the note");
+		expect(report).not.toContain("cannot be placed");
+	});
+
 	it("says a moved note was found again, and stays quiet about an unchanged one", () => {
 		const moved: PullResult[] = [
 			{

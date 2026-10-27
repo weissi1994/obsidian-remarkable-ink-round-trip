@@ -107,7 +107,7 @@ export function renderImportReport(input: ImportReportInput): string {
 				...pending.map((line) => `      – ${line}`),
 			);
 		}
-		const state = describeSource(scan.sourceState);
+		const state = describeSource(scan.sourceState, scan.written?.form === "copy");
 		if (state !== "") lines.push(`    ${state}`);
 	}
 
@@ -185,15 +185,17 @@ function describeWrite(
 
 /**
  * How the note relates to the document that was annotated (F14). Silence
- * means "unchanged" — only a mismatch is worth a line.
+ * means "unchanged" — only a mismatch is worth a line. A note edited since
+ * it was sent is no mismatch once the tablet's changes were merged into it:
+ * they were placed in the text as sent, and the edits kept (sync/twoway.ts).
  */
-function describeSource(state: SourceState | undefined): string {
+function describeSource(state: SourceState | undefined, merged: boolean): string {
 	switch (state) {
 		case "changed":
-			return (
-				"source note: changed since it was sent — the marks cannot be placed in the " +
-				"text. Send it again to restore the link."
-			);
+			return merged
+				? ""
+				: "source note: changed since it was sent — the marks cannot be placed in the " +
+						"text. Send it again to restore the link.";
 		case "moved":
 			return "source note: moved in the vault; found again by its document id";
 		case "missing":

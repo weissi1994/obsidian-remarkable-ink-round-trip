@@ -16,6 +16,7 @@ import { PdfLayout, toWinAnsi } from "../convert/pdf";
 import type { PendingChange } from "./annotationnote";
 import { Bounds, deviceBoundsToPdf, strokeBounds } from "./anchor";
 import { Highlight, colorName, rgbName } from "./highlights";
+import type { EmptyTask } from "./marks";
 import { DEFAULT_MARK_STYLES, MarkStyle, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
 import { CONFIRM_MARK, remarkIdLine, typedIdLine } from "./remarkid";
@@ -557,6 +558,16 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 			.filter((id) => !erased.has(id))
 			.map((id) => ranges.get(id))
 			.filter(isRange);
+		if ((mark.kind === "checkbox" || mark.kind === "checkbox-cancel") && covered.length === 0 && mark.task !== undefined) {
+			const line = emptyTaskLine(mark.task, ranges, lineOf, sourceLines);
+			if (line === null) {
+				unapplied.push({ page: mark.page, text: `a task with no text ${DONE[mark.kind]} — not found in the note` });
+			} else {
+				(mark.kind === "checkbox" ? done : cancelled).add(line);
+				placed++;
+			}
+			continue;
+		}
 		if (covered.length === 0) {
 			// Words that are gone need no mark; words never found do.
 			const lost = (mark.words ?? []).some((id) => !ranges.has(id));
@@ -624,7 +635,8 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 			markdown += `- ==${highlight.text}==${color === undefined ? "" : ` ^[${color}]`}\n`;
 		}
 	}
-	return { markdown: markdown.trimEnd(), placed, unplaced, unapplied };
+	// Trailing line breaks go; spaces ending the last line are the note's own.
+	return { markdown: markdown.replace(/(\n[ \t]*)+$/, ""), placed, unplaced, unapplied };
 }
 
 /** What a mark did to its words, for the list of what could not be applied. */
@@ -641,6 +653,26 @@ const DONE: Record<string, string> = {
  * or callout (`> - [ ] task`, `> > - [ ] task`).
  */
 const TASK_LINE_RE = /^((?:\s*>\s?)*\s*[-*+]\s+)\[( |x|X)\]/;
+const EMPTY_TASK_RE = /^((?:\s*>\s?)*\s*[-*+]\s+)\[( |x|X)\]\s*$/;
+
+/**
+ * The source line of a task item with no text (marks.ts EmptyTask): the
+ * `nth` empty task line after the line of the word before it — the nearest
+ * earlier word the note still has — and before the word after it. Null
+ * when the note has no such line there.
+ */
+function emptyTaskLine(task: EmptyTask, ranges: Map<number, Range>, lineOf: (offset: number) => number, sourceLines: string[]): number | null {
+	let before = task.after;
+	while (before >= 0 && !ranges.has(before)) before--;
+	const from = before < 0 ? 0 : lineOf(ranges.get(before)!.start) + 1;
+	const next = ranges.get(task.after + 1);
+	const to = next === undefined ? sourceLines.length : lineOf(next.start);
+	let nth = task.nth;
+	for (let line = from; line < to; line++) {
+		if (EMPTY_TASK_RE.test(sourceLines[line]) && nth-- === 0) return line;
+	}
+	return null;
+}
 
 /**
  * Rewrite task markers in the annotated copy (GP_E5_S12): `[ ]` becomes
@@ -919,7 +951,9 @@ function applyBlockMarks(
 			// The ink's place on its page; an added page's ink is on a page of its own.
 			const device = mark.addedPage === undefined && mark.strokes !== undefined ? strokeBounds(mark.strokes.map((points) => ({ points }))) : null;
 			const ink = device === null ? null : deviceBoundsToPdf(device, input.layout);
-			const anchor = anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1);
+			// Written on a task with no text: its line, which no word leads to.
+			const onTask = mark.task === undefined ? null : emptyTaskLine(mark.task, ranges, lineOf, lines);
+			const anchor = onTask ?? anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1);
 			remarks.set(anchor, joinBlocks(remarks.get(anchor) ?? [], markLines(mark)));
 		}
 	}
@@ -936,7 +970,9 @@ function applyBlockMarks(
  * A block is set apart by one blank line on each side unless the note has
  * one there already; right after a closing fence or a heading with a line
  * straight after it, by one after only. So the blank lines it added can be
- * told from the note's own (typednote.ts typedBody takes them out again).
+ * told from the note's own (typednote.ts typedBody takes them out again) —
+ * all but the one after a block placed inside a run of lines, after a
+ * table a list follows straight on.
  */
 export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>, quoted: ReadonlySet<number> = new Set()): string {
 	const placed = new Map<number, string[]>();
@@ -960,19 +996,20 @@ export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>,
 			return;
 		}
 		out.push("", ...block);
+		// Text straight after would read as more of the callout.
+		const next = lines[index + 1] ?? "";
+		if (lineAfter && !FENCE.test(next) && !HEADING.test(next)) out.push("");
 	});
 	return out.join("\n");
 }
 
 /**
- * Two placed blocks one after the other: callouts follow each other as they
- * are, plain text is kept apart by a blank line — right after a callout it
- * would read as more of it.
+ * Two placed blocks one after the other, a blank line between: callouts
+ * straight after each other are one callout, and plain text right after a
+ * callout reads as more of it.
  */
 export function joinBlocks(first: string[], second: string[]): string[] {
-	if (first.length === 0) return second;
-	const quoted = first[first.length - 1].startsWith(">") && (second[0] ?? "").startsWith(">");
-	return quoted ? [...first, ...second] : [...first, "", ...second];
+	return first.length === 0 ? second : [...first, "", ...second];
 }
 
 /**
@@ -1010,13 +1047,14 @@ export function remarkCallout(mark: ImportedMark): string[] {
 const FENCE = /^\s*(`{3,}|~{3,})/;
 const HEADING = /^#{1,6}(\s|$)/;
 const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s/;
+const TABLE_DIVIDER = /^\s*\|?[\s:|-]+\|[\s:|-]*$/;
 
 /**
  * The last line of the markdown block holding line `at`: the closing fence
- * of a code block; a heading, which is a line of its own; else the end of
- * its run of non-blank lines up to a heading — a table, a callout, a
- * paragraph — carried across blank lines while a list goes on (a further
- * item, or an indented continuation).
+ * of a code block; a heading, which is a line of its own; a table's last
+ * row; else the end of its run of non-blank lines up to a heading — a
+ * callout, a paragraph — carried across blank lines while a list goes on
+ * (a further item, or an indented continuation).
  */
 export function blockEnd(lines: string[], at: number): number {
 	let open: { line: number; fence: string } | null = null;
@@ -1034,6 +1072,14 @@ export function blockEnd(lines: string[], at: number): number {
 		return lines.length - 1;
 	}
 	if (HEADING.test(lines[at])) return at;
+	// A table ends at its last row, whatever follows straight on: mdblocks.ts
+	// reads a header with a divider under it, then rows while they have a pipe.
+	for (let header = at; header >= 0 && header + 1 < lines.length && lines[header].includes("|"); header--) {
+		if (!TABLE_DIVIDER.test(lines[header + 1])) continue;
+		let end = Math.max(at, header + 1);
+		while (end + 1 < lines.length && lines[end + 1].trim() !== "" && lines[end + 1].includes("|")) end++;
+		return end;
+	}
 	let end = at;
 	const list = () => lines.slice(start(lines, at), end + 1).some((line) => LIST_ITEM.test(line));
 	for (;;) {

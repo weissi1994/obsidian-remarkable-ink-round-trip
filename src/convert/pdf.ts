@@ -38,9 +38,11 @@ import {
  * recorded `images` list, so pre-fork documents rebuild unchanged); version
  * 9 = handwriting only: check marks, crosses and arrows are drawn as such
  * instead of becoming "?" or "->"; version 10 = tables get a full grid —
- * border, column and row lines — with padded cells.
+ * border, column and row lines — with padded cells; version 11 = a task
+ * item with no text (`- [ ]`) gets its drawn box instead of the literal
+ * "[ ]".
  */
-export const TYPO_VERSION = 10;
+export const TYPO_VERSION = 11;
 
 /** Symbols a handwritten page draws itself since typo 9 (see glyphs.ts SHAPES). */
 const DRAWN_SYMBOLS = "✓✔☑✗✘✕✖→←↔↑↓";
@@ -713,7 +715,7 @@ function drawList(ts: Typesetter, items: ListItem[]): void {
 		const bullet = item.ordered ? `${counters[item.depth]}.` : "-";
 		// A task item renders a drawn checkbox instead of the literal "[ ]"
 		// (GP_E5_S6) — a square you can actually tick with the pen.
-		const task = ts.opts.typo >= 2 && !item.ordered ? parseTaskMarker(item.text) : null;
+		const task = ts.opts.typo >= 2 && !item.ordered ? parseTaskMarker(item.text, ts.opts.typo >= 11) : null;
 		const text = task ? task.rest : item.text;
 		// The "[ ]" marker's words are not drawn as text.
 		const skipped = task ? wordCount(item.text) - wordCount(text) : 0;
@@ -745,6 +747,21 @@ function drawList(ts: Typesetter, items: ListItem[]): void {
 					checked: task.checked,
 				};
 			}
+		} else if (task) {
+			// Only its box: still a line of the layout, so a tick in it is read.
+			ts.placed.push({
+				page: ts.pageIndex,
+				x: left(ts) + indent,
+				y: ts.y,
+				size,
+				text: "",
+				words: [],
+				block: ts.block,
+				role: ts.role,
+				level: ts.level,
+				ordered: ts.ordered,
+				checkbox: { ...checkboxRect(left(ts) + indent - 12, ts.y, size), checked: task.checked },
+			});
 		}
 		for (const line of lines.slice(1)) {
 			ensureRoom(ts, step);
@@ -756,11 +773,14 @@ function drawList(ts: Typesetter, items: ListItem[]): void {
 	ts.y -= size * 0.6;
 }
 
-/** Markdown task marker at the start of a list item: "[ ] …" or "[x] …". */
-export function parseTaskMarker(text: string): { checked: boolean; rest: string } | null {
-	const match = /^\[( |x|X)\]\s+(.*)$/.exec(text);
+/**
+ * Markdown task marker at the start of a list item: "[ ] …" or "[x] …";
+ * with `empty`, also the marker alone (typo 11).
+ */
+export function parseTaskMarker(text: string, empty = false): { checked: boolean; rest: string } | null {
+	const match = (empty ? /^\[( |x|X)\](?:\s+(.*))?$/ : /^\[( |x|X)\]\s+(.*)$/).exec(text);
 	if (!match) return null;
-	return { checked: match[1] !== " ", rest: match[2] };
+	return { checked: match[1] !== " ", rest: match[2] ?? "" };
 }
 
 /**

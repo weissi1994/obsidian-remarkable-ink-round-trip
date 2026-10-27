@@ -31,7 +31,7 @@ import { inkStrokesOf, type InkStrokes, type Picture } from "../ink/inkimage";
 import { inkOptionsFor } from "../ink/inkfonts";
 import { inkPagesToRm, type InkRender } from "../ink/inkrender";
 import { PEN } from "../ink/rmwrite";
-import { knownText, withEarlierReadings, type SampleStore } from "../ocr/samples";
+import { isReadingText, knownText, withEarlierReadings, type SampleStore } from "../ocr/samples";
 import { displayTextForLink } from "../preprocess/preprocess";
 import { DEFAULT_SETTINGS, type RoundTripSettings } from "../settingsmodel";
 import { CONFLICT_TITLE } from "../sync/merge3";
@@ -490,19 +490,20 @@ function inserted(base: string, body: string): { at: number; lines: string[] } |
 }
 
 /**
- * Where `body` is `base` with exactly `block` inserted (and the blank line
- * that sets it apart); -1 when no such place makes the two equal. Unlike
- * `inserted`, a block that repeats a neighbour's lines (a second remark
- * callout) is still found where it really went.
+ * Where `body` is `base` with exactly `block` inserted (and the blank lines
+ * that set it apart: before, after, or — inside a run of lines — both); -1
+ * when no such place makes the two equal. Unlike `inserted`, a block that
+ * repeats a neighbour's lines (a second remark callout) is still found where
+ * it really went.
  */
 function insertedBlock(base: string, body: string, block: string[]): number {
 	const lines = body.split("\n");
 	for (let at = 0; at + block.length <= lines.length; at++) {
 		if (block.some((line, k) => lines[at + k] !== line)) continue;
-		const rest = [...lines.slice(0, at), ...lines.slice(at + block.length)];
-		const blankBefore = at > 0 && rest[at - 1].trim() === "" ? [...rest.slice(0, at - 1), ...rest.slice(at)] : null;
-		const blankAfter = at < rest.length && rest[at].trim() === "" ? [...rest.slice(0, at), ...rest.slice(at + 1)] : null;
-		if ([rest, blankBefore, blankAfter].some((candidate) => candidate?.join("\n") === base)) return at;
+		const before = at > 0 && lines[at - 1].trim() === "" ? 1 : 0;
+		const after = at + block.length < lines.length && lines[at + block.length].trim() === "" ? 1 : 0;
+		const without = (drop: number, dropAfter: number) => [...lines.slice(0, at - drop), ...lines.slice(at + block.length + dropAfter)].join("\n");
+		if ([without(0, 0), without(before, 0), without(0, after), without(before, after)].includes(base)) return at;
 	}
 	return -1;
 }
@@ -732,6 +733,52 @@ describe.skipIf(ROOT === undefined)("the owner's real sync state", () => {
 						const between = got.split("\n").slice(Math.max(0, anchorLine - 1), at + 1);
 						if (between.slice(2).some((line) => /^#{1,6} /.test(line))) return `placed past the next heading (${why}): ${between.slice(0, 30).map(shape).join(" ")}`;
 					}
+					return null;
+				},
+			});
+		}
+
+		// Writing in a table cell, right of a row's last word: its callout goes right after the table, set apart from what follows straight on.
+		const cell = (() => {
+			for (let n = 1; n <= render.pages.length; n++) {
+				for (const row of rowsOf(layout, n)) {
+					if (!row.lines.every((line) => line.role === "table")) continue;
+					const word = row.lines.flatMap((line) => line.words).find((w) => WORDISH.test(w.text) && occurrences(body, w.text).length === 1);
+					if (word === undefined) continue;
+					const bodyLine = lineIndexAt(body, occurrences(body, word.text)[0]);
+					const left = row.right + row.size * 0.6;
+					if (!/^\s*\|/.test(lines[bodyLine]) || left + row.size * 2.5 > layout.pageWidth - 10) continue;
+					const top = row.y + row.size * 0.8;
+					const strokes = [0, 1, 2].map((k) => {
+						const x = left + k * row.size * 0.8;
+						return penLine([{ x, y: top }, { x: x + 3, y: top - row.size * 0.9 }, { x: x + 6, y: top - row.size * 0.3 }, { x: x + 9, y: top - row.size * 0.9 }].map((point) => toDevice(layout, point)));
+					});
+					const box = boxOf(strokes.map((line) => ({ points: line.points })));
+					const hits = render.pages[n - 1].some((stroke) => {
+						const ours = boxOf([stroke]);
+						return ours.maxX >= box.minX && ours.minX <= box.maxX && ours.maxY >= box.minY && ours.minY <= box.maxY;
+					});
+					if (!hits) return { n, bodyLine, strokes };
+				}
+			}
+			return undefined;
+		})();
+		if (cell !== undefined) {
+			let end = cell.bodyLine;
+			while (end + 1 < lines.length && lines[end + 1].trim() !== "" && lines[end + 1].includes("|")) end++;
+			const glued = end + 1 < lines.length && lines[end + 1].trim() !== "";
+			cases.push({
+				p,
+				kind: glued ? "remark in a table cell, text straight after the table" : "remark in a table cell",
+				pages: one(cell.n, page(cell.n).write(...cell.strokes)),
+				extra: reading(real.entry.deviceDocId),
+				expect: (got, changes) => {
+					const notes = changes.marks.filter((mark) => mark.kind === "note");
+					if (notes.length !== 1 || notes[0].id === undefined) return `${notes.length} remark mark(s), kinds ${changes.marks.map((m) => m.kind).join(",")}`;
+					const want = calloutLines("> [!note] Remark", READING, notes[0].path!, notes[0].id);
+					const at = insertedBlock(body, got, want);
+					if (at !== end + 2) return `placed at line ${at + 1}, not right after its table (last row ${end + 1})`;
+					if (glued && got.split("\n")[at + want.length] !== "") return "not set apart from the line after its table";
 					return null;
 				},
 			});
@@ -1157,8 +1204,14 @@ describe.skipIf(ROOT === undefined)("the owner's real sync state", () => {
 		}
 
 		// Remarks whose reading the owner corrected or confirmed, at the very place they were written.
+		// A "correction" holding note structure is no reading, and is read anew (samples.ts isReadingText).
 		const store = vault.samples;
-		const verified = Object.entries(store?.remarks ?? {}).filter(([, record]) => record.corrected === true || record.confirmed === true);
+		const verified = Object.entries(store?.remarks ?? {}).filter(([, record]) => {
+			if (record.corrected !== true && record.confirmed !== true) return false;
+			if (isReadingText(record.transcript)) return true;
+			bump("verified, but holding note structure: read anew");
+			return false;
+		});
 		for (const [key, record] of verified) {
 			const kind = `verified (${record.inserted === true ? "taken in as text" : record.confirmed === true ? "confirmed" : "corrected"})`;
 			bump(kind);

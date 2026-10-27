@@ -55,12 +55,39 @@ export interface Mark {
 	quote?: string;
 	/** A handwritten note: where it sits relative to the row it is quoted from. */
 	at?: { text: string; x: number; below: number };
+	/** On the row of a task item with no text (EmptyTask), which has no words to point at. */
+	task?: EmptyTask;
 	/** Strokes making up this mark, for the kinds that stay an image. */
 	strokes: Stroke[];
 	/** Device-unit bounds, for rendering. */
 	bounds: Bounds;
 	/** Vertical position in PDF points, for ordering down the page. */
 	orderY: number;
+}
+
+/**
+ * A task item with no text (typo 11) by its place among the words: it
+ * follows word `after` (-1: before every word), the `nth` such item after it.
+ */
+export interface EmptyTask {
+	after: number;
+	nth: number;
+}
+
+/** The empty task items of a layout, found by a row they are on. */
+function emptyTasks(layout: PdfLayout): (row: Row) => EmptyTask | undefined {
+	const found = new Map<LaidOutLine, EmptyTask>();
+	let after = -1;
+	let nth = 0;
+	for (const line of layout.lines) {
+		if (line.words.length > 0) {
+			after = Math.max(after, ...line.words.map((word) => word.id));
+			nth = 0;
+		} else if (line.checkbox !== undefined) {
+			found.set(line, { after, nth: nth++ });
+		}
+	}
+	return (row) => (row.lines.some((line) => line.words.length > 0) ? undefined : row.lines.map((line) => found.get(line)).find((task) => task !== undefined));
 }
 
 /** A row of text: everything placed at one baseline, left to right. */
@@ -246,6 +273,7 @@ export function readMarks(
 	if (candidates.length === 0) return [];
 
 	const rows = layout === null ? [] : rowsOf(layout, page);
+	const taskOf = layout === null ? () => undefined : emptyTasks(layout);
 	const marks: Mark[] = [];
 	const leftovers: Candidate[] = [];
 
@@ -259,7 +287,7 @@ export function readMarks(
 
 		const classified: Classified[] = [];
 		for (const candidate of candidates) {
-			const result = classify(candidate, rows, step, textLeft, textRight, scale);
+			const result = classify(candidate, rows, step, textLeft, textRight, scale, taskOf);
 			if (result === null) leftovers.push(candidate);
 			else classified.push(result);
 		}
@@ -268,7 +296,7 @@ export function readMarks(
 		leftovers.push(...candidates);
 	}
 
-	marks.push(...groupNotes(leftovers, rows, noteGap));
+	marks.push(...groupNotes(leftovers, rows, noteGap, taskOf));
 	return marks.sort((a, b) => b.orderY - a.orderY);
 }
 
@@ -286,6 +314,7 @@ function classify(
 	textLeft: number,
 	textRight: number,
 	scale: number,
+	taskOf: (row: Row) => EmptyTask | undefined,
 ): Classified | null {
 	const { pdf, device, stroke } = candidate;
 	const width = pdf.maxX - pdf.minX;
@@ -312,6 +341,7 @@ function classify(
 		// thirds up the box. A dot stays "done": too short to be a stripe.
 		const stripe =
 			height <= ticked.box.size * 0.35 && width >= ticked.box.size * 0.5;
+		const task = taskOf(ticked.row);
 		return {
 			mark: {
 				...base,
@@ -319,6 +349,7 @@ function classify(
 				target: ticked.row.text,
 				words: ticked.row.lines.flatMap((line) => line.words).map((word) => word.id),
 				quote: ticked.row.text,
+				...(task === undefined ? {} : { task }),
 			},
 			// The row rides along so joinFlatMarks can fold a cross (two
 			// strokes) or a re-traced tick into ONE mark per box.
@@ -546,36 +577,62 @@ function joinGroup(row: Row, pdf: Bounds, members: Mark[]): Mark {
 	};
 }
 
-/** Unclassified ink is handwriting: group it per remark and keep the image. */
-function groupNotes(leftovers: Candidate[], rows: Row[], gap: number): Mark[] {
+/**
+ * Unclassified ink is handwriting: group it per remark and keep the image.
+ * Lines of writing no further apart than `gap` are one remark — unless one
+ * is written on a printed row (beside its text, in a table cell, on a task)
+ * and the other in the free space off the rows: those are two places, two
+ * remarks.
+ */
+function groupNotes(leftovers: Candidate[], rows: Row[], gap: number, taskOf: (row: Row) => EmptyTask | undefined): Mark[] {
 	const sorted = [...leftovers].sort((a, b) => a.device.minY - b.device.minY);
-	const groups: { mark: Mark; pdf: Bounds }[] = [];
+	// Lines of writing: strokes overlapping in height, an i's dot with its letter.
+	const lines: { candidates: Candidate[]; device: Bounds; pdf: Bounds }[] = [];
 	for (const candidate of sorted) {
-		const last = groups[groups.length - 1];
-		if (last !== undefined && candidate.device.minY <= last.mark.bounds.maxY + gap) {
-			last.mark.strokes.push(candidate.stroke);
-			last.mark.bounds = merge(last.mark.bounds, candidate.device);
+		const last = lines[lines.length - 1];
+		if (last !== undefined && candidate.device.minY <= last.device.maxY + gap / 3) {
+			last.candidates.push(candidate);
+			last.device = merge(last.device, candidate.device);
 			last.pdf = merge(last.pdf, candidate.pdf);
+			continue;
+		}
+		lines.push({ candidates: [candidate], device: { ...candidate.device }, pdf: { ...candidate.pdf } });
+	}
+	const groups: { mark: Mark; pdf: Bounds; onRow: boolean }[] = [];
+	for (const line of lines) {
+		const last = groups[groups.length - 1];
+		// On a row: over half its band, or over half of a line smaller than that.
+		const lineOnRow = rows.some(
+			(row) => bandOverlap(row, line.pdf) >= Math.min(line.pdf.maxY - line.pdf.minY, row.size * 1.15) * 0.5,
+		);
+		if (last !== undefined && line.device.minY <= last.mark.bounds.maxY + gap && last.onRow === lineOnRow) {
+			last.mark.strokes.push(...line.candidates.map((candidate) => candidate.stroke));
+			last.mark.bounds = merge(last.mark.bounds, line.device);
+			last.pdf = merge(last.pdf, line.pdf);
 			last.mark.orderY = last.pdf.maxY;
 			continue;
 		}
 		groups.push({
 			mark: {
 				kind: "note",
-				strokes: [candidate.stroke],
-				bounds: { ...candidate.device },
-				orderY: candidate.pdf.maxY,
+				strokes: line.candidates.map((candidate) => candidate.stroke),
+				bounds: { ...line.device },
+				orderY: line.pdf.maxY,
 			},
-			pdf: { ...candidate.pdf },
+			pdf: { ...line.pdf },
+			onRow: lineOnRow,
 		});
 	}
 	// Quote each note once its full extent is known: the row it overlaps, or
 	// the nearest one above — where a remark written under a line points.
 	for (const group of groups) {
-		const row = rowFor(rows, group.pdf) ?? nearestRow(rows, group.pdf);
+		const on = rowFor(rows, group.pdf);
+		const row = on ?? nearestRow(rows, group.pdf);
 		if (row === undefined) continue;
-		group.mark.quote = row.text;
+		if (row.text !== "") group.mark.quote = row.text;
 		group.mark.at = { text: row.text, x: round1(group.pdf.minX), below: round1(row.y - group.pdf.maxY) };
+		const task = on === undefined ? undefined : taskOf(on);
+		if (task !== undefined) group.mark.task = task;
 	}
 	return groups.map((group) => group.mark);
 }

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **Fixes from the first device test of two-way sync:**
+  - Handwriting readings no longer become nested callouts. A remark inside a
+    callout (a clash callout, say) is read on its own: its text is no longer
+    taken with its neighbours' titles and readings. Such text was learned as
+    your "correction" and then sent to the vision model as a worked example,
+    and the model answered every new remark with it. Remark text that holds
+    callout or quote markup is no longer learned or sent as an example, and
+    existing bad records are skipped. A model answer with such markup is
+    dropped, and the remark keeps its image.
+  - Two remark callouts at the same place are separated by a blank line.
+    Without one, Obsidian shows them as one callout.
+  - Writing on a printed line (in a table cell, on a task, beside the text)
+    and writing in the free space below it are two remarks, even when they
+    are close together.
+  - A remark written in a table cell goes right after the table, not after
+    a list that follows the table directly. It is set apart by blank lines.
+  - An empty task (`- [ ]`) is drawn as a box you can tick, not as the text
+    "-[]". This applies to notes sent from now on; notebooks already on the
+    tablet keep their layout. A tick in the box is applied, and writing on
+    the task is tied to it.
+  - The import report no longer says a note "changed since it was sent — the
+    marks cannot be placed" when the tablet's changes were merged into it, for
+    example when only a frontmatter timestamp changed.
+  - A remark callout at the end of a note no longer picks up the trailing
+    space of the note's last line.
 - **Full two-way sync — renames, moves and deletes follow both ways:** renaming
   or moving a note renames or moves its notebook (metadata only, nothing is
   redrawn), and renaming or moving a notebook — or its folder — on the tablet

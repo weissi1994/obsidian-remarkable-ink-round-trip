@@ -12,7 +12,7 @@ import { PdfLayout } from "../convert/pdf";
 import { MappingEntry, MappingTable } from "../id/mapping";
 import type { AnnotationOutcome } from "./annotationnote";
 import type { Highlight } from "./highlights";
-import type { MarkKind } from "./marks";
+import type { EmptyTask, MarkKind } from "./marks";
 import type { Stroke } from "./rmlines";
 import type { InkRender } from "../ink/inkrender";
 import type { RemarkPlace } from "../ink/inkimage";
@@ -105,6 +105,8 @@ export interface ImportedMark {
 	blocks?: number[];
 	/** The line the mark sits against, for context. */
 	quote?: string;
+	/** On a task item with no text, which has no words to point at (marks.ts EmptyTask). */
+	task?: EmptyTask;
 	/** Vault path of the rendered ink; only kinds that need a picture have one. */
 	path?: string;
 	/**

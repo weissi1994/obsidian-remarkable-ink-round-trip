@@ -100,6 +100,7 @@ import {
 	knownText,
 	learnFromNotes,
 	notedReadings,
+	isReadingText,
 	isVerified,
 	refOf,
 	type ReaderName,
@@ -2519,7 +2520,9 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		const png = await this.strokesToPng(request.strokes);
 		if (png === null) return null;
-		const text = await this.ink.ocr(obsidianHttp, png, request.quote, request.wholePage === true, await this.ocrExamples());
+		const answer = await this.ink.ocr(obsidianHttp, png, request.quote, request.wholePage === true, await this.ocrExamples());
+		// A reply with note structure in it — a callout, an embed — is no reading of the ink.
+		const text = answer !== null && isReadingText(answer) ? answer : null;
 		// No confidence from a chat endpoint: its readings fill empty callouts
 		// but never replace text the note already shows.
 		await this.rememberReading(request, text, { by: "endpoint" });

@@ -322,9 +322,11 @@ export function mergeTabletChanges(input: TabletChanges): {
 			projected: null,
 		};
 	}
-	// The projection trims the end; the note keeps the base's.
-	const tail = input.base.slice(input.base.trimEnd().length);
-	const theirs = withoutPendingCallout(projected.markdown + tail);
+	// The projection ends on its last line; the note keeps the base's
+	// line breaks after it. A typed page's text ends trimmed: the base's
+	// spaces ending its last line come back with them.
+	const ended = typedPage === undefined ? input.base.replace(/(\n[ \t]*)+$/, "") : input.base.trimEnd();
+	const theirs = withoutPendingCallout(projected.markdown + input.base.slice(ended.length));
 	let base = withoutPendingCallout(input.base);
 	let tablet = theirs;
 	if (input.mergedBase !== undefined && complete) {

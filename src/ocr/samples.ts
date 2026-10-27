@@ -25,7 +25,7 @@
  */
 
 import type { ImportedMark } from "../incoming/pull";
-import { findRemark, remarkText, type RemarkRef } from "../incoming/remarkid";
+import { findRemark, isPluginIdLine, remarkText, type RemarkRef } from "../incoming/remarkid";
 import { cloudOf, cutLetters, matchDistance, splitLineInto, splitWords, type Point } from "./recognize";
 
 export { remarkText };
@@ -395,12 +395,28 @@ function prune(store: SampleStore): void {
 }
 
 /**
+ * Whether a text can be a remark's reading: no line of it is note structure
+ * — a quote or callout line, an embed, a block id. Such text came from a
+ * note whose callouts ran into one another, or from a reader copying it,
+ * never from the ink; kept as a correction it is worse than none, as a
+ * worked example the model answers with it.
+ */
+export function isReadingText(text: string): boolean {
+	return !text.split("\n").some((line) => /^\s*(>|\[!)/.test(line) || line.includes("![[") || isPluginIdLine(line));
+}
+
+/** A remark the owner corrected or confirmed to a text that can be its reading. */
+function isVerifiedReading(record: RemarkRecord): boolean {
+	return isVerified(record) && isReadingText(record.transcript);
+}
+
+/**
  * The text of a remark the owner corrected or confirmed: such a remark is
  * not read again — their text stands. Every other remark is read anew.
  */
 export function knownText(store: SampleStore, key: string): string | null {
 	const known = store.remarks[key];
-	return known !== undefined && isVerified(known) && known.transcript !== "" ? known.transcript : null;
+	return known !== undefined && isVerifiedReading(known) && known.transcript !== "" ? known.transcript : null;
 }
 
 /**
@@ -414,9 +430,10 @@ export function withEarlierReadings(store: SampleStore, marks: ImportedMark[]): 
 	return shown.map((mark) => {
 		const known = mark.id === undefined ? undefined : store.remarks[mark.id];
 		if (known === undefined) return mark;
-		if (isVerified(known)) return known.confirmed === true ? { ...mark, confirmed: true } : mark;
-		// Only a clearly better reading may replace text; an empty callout takes any.
-		const better = known.transcript === "" || isBetterReading(known, { score: known.readScore });
+		if (isVerifiedReading(known)) return known.confirmed === true ? { ...mark, confirmed: true } : mark;
+		// Only a clearly better reading may replace text; an empty callout takes any,
+		// and so does text that cannot be a reading (isReadingText).
+		const better = known.transcript === "" || !isReadingText(known.transcript) || isBetterReading(known, { score: known.readScore });
 		return better ? { ...mark, replaces: known.transcript } : mark;
 	});
 }
@@ -532,6 +549,8 @@ export function learnFromNotes(
 		const found = findRemark(note, refOf(key, record));
 		if (found === null) continue;
 		const text = found.text;
+		// Note structure in the callout is not what the owner read in the ink.
+		if (!isReadingText(text)) continue;
 		// A ✓ taken away again makes the reading the plugin's once more.
 		const newlyConfirmed = found.confirmed && record.confirmed !== true && text !== "";
 		record.confirmed = found.confirmed ? true : undefined;
@@ -574,6 +593,6 @@ export function learnFromNotes(
  */
 export function corrections(store: SampleStore): [string, RemarkRecord][] {
 	return Object.entries(store.remarks)
-		.filter(([, record]) => isVerified(record) && record.transcript !== "")
+		.filter(([, record]) => isVerifiedReading(record) && record.transcript !== "")
 		.sort(([, a], [, b]) => b.at.localeCompare(a.at));
 }

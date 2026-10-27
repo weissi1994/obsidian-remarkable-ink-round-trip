@@ -535,6 +535,7 @@ export async function collectInkAnnotations(
 						words: mark.words,
 						blocks: mark.blocks,
 						quote: mark.quote,
+						...(mark.task === undefined ? {} : { task: mark.task }),
 						...(picture ?? {}),
 					},
 				});
