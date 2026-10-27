@@ -482,4 +482,45 @@ describe("projectOntoSource lines words up exactly", () => {
 			{ page: 1, text: "marked in the margin beside “elsewhere” — not found in the note" },
 		]);
 	});
+
+	/** The ids of the typeset words with this text, in order. */
+	const idsIn = (layout: PdfLayout, text: string) => layout.lines.flatMap((line) => line.words).filter((word) => word.text === text).map((word) => word.id);
+
+	it("moves past the rest of a code line cut at the page edge", async () => {
+		const options = Array.from({ length: 12 }, (_, i) => `--option-${i} value.with.dots.${i}`).join(" ");
+		const source = ["Intro words here for the sync point.", "", "```bash", `run the tool ${options}`, "```", "", "Closing words."].join("\n");
+		const layout = (await renderPdf(parseBlocks(source), { title: "t", docId: "d" })).layout;
+		const code = layout.lines.find((line) => line.role === "code")!;
+		expect(code.text.length).toBeLessThan(`run the tool ${options}`.length - 200);
+		const result = projectOntoSource({ source, layout, marks: [{ kind: "strikethrough", page: 1, words: idsIn(layout, "Closing") }], highlights: [] })!;
+		expect(result.markdown).toBe(source.replace("Closing", "~~Closing~~"));
+		expect(result.unapplied).toEqual([]);
+	});
+
+	it("lines up a run of links, whose targets the page does not show", async () => {
+		const link = (n: number) => `[https://example.com/${n}](https://example.com/${"x".repeat(60)}/${n})`;
+		const source = ["Intro words here for the sync point.", "", ...[1, 2, 3, 4, 5, 6].flatMap((n) => [link(n), ""]), "Closing words of the note."].join("\n");
+		const layout = (await renderPdf(parseBlocks(source), { title: "t", docId: "d" })).layout;
+		const result = projectOntoSource({ source, layout, marks: [{ kind: "strikethrough", page: 1, words: idsIn(layout, "https://example.com/3") }], highlights: [] })!;
+		expect(result.markdown).toBe(source.replace("[https://example.com/3]", "[~~https://example.com/3~~]"));
+		expect(result.unapplied).toEqual([]);
+	});
+
+	it("does not take the title for the note's first heading when the page shows both", async () => {
+		const filler = "Filler sentence that keeps the later words far from the start. ".repeat(8).trim();
+		const body = ["# Weekly Review Notes", "", "Some opening words of the review.", "", "The quick brown fox jumps over the lazy dog.", "", filler, "", "Later on: the plan for next week is set."].join("\n");
+		const pre = preprocess(`---\nsummary: the plan for next week\n---\n${body}`, { resolveEmbed: () => ({ kind: "missing" }), frontmatterAsTitleBlock: true });
+		const layout = (await renderPdf(parseBlocks(pre.markdown), { title: "Weekly Review Notes", docId: "d" })).layout;
+		expect(layout.lines.filter((line) => line.text.trim() === "Weekly Review Notes").map((line) => line.role)).toEqual(["title", "heading"]);
+		const result = projectOntoSource({ source: body, layout, marks: [{ kind: "strikethrough", page: 1, words: idsIn(layout, "fox") }], highlights: [] })!;
+		expect(result.markdown).toBe(body.replace("fox", "~~fox~~"));
+	});
+
+	it("does not take the title's words for the note's own when the note does not open with it", async () => {
+		const body = ["Some words on the plan here.", "", "The quick brown fox jumps over the lazy dog.", "", "The next quarter budget is due soon."].join("\n");
+		const pre = preprocess(`---\nrelated: next quarter budget\n---\n${body}`, { resolveEmbed: () => ({ kind: "missing" }), frontmatterAsTitleBlock: true });
+		const layout = (await renderPdf(parseBlocks(pre.markdown), { title: "Notes on the plan", docId: "d" })).layout;
+		const result = projectOntoSource({ source: body, layout, marks: [{ kind: "strikethrough", page: 1, words: idsIn(layout, "fox") }], highlights: [] })!;
+		expect(result.markdown).toBe(body.replace("fox", "~~fox~~"));
+	});
 });

@@ -56,6 +56,11 @@ If you do send a pull request:
 - **Run the checks**: `npm test`, `npm run lint` and `npm run build`.
   The build refuses Node built-ins on purpose — the plugin has to work
   on mobile, so everything in the main path uses web APIs only.
+- **Sync changes: replay your own vault too.** `RM_SYNC_STATE=<vault>/reMarkable/.sync
+  npm run test:vault` regenerates your sent notes in your learned hand, applies
+  tablet edits to them and checks the merge (read-only; it prints ids and
+  counts, never note text). Set `RM_VAULT_SAMPLE=<n>` for more notes; a few
+  hundred need `NODE_OPTIONS=--max-old-space-size=32768`.
 - Changes that touch the reMarkable API or token handling get an extra
   security pass before they land, so those take a little longer.
 

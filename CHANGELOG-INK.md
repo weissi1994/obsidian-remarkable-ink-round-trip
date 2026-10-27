@@ -45,6 +45,16 @@
   the end of the note, and adding a stroke to a handwritten remark updates it
   instead of adding a second one. Words the typesetter broke across lines (long
   URLs, compounds) can be erased and marked again.
+- **Fixes found by replaying real notes in a learned hand:** a bar in the
+  margin quotes the lines beside it again (it was dropped without a trace); a
+  remark written under a code row goes after the code block, and importing it
+  again no longer duplicates the code; a page added on the tablet no longer
+  causes a false clash when the note ends in blank lines. Code lines cut at the
+  page edge are matched to their words, and so is the text after them. Marks on
+  and after runs of links land again (the page shows only the link text), a
+  first heading that repeats the title no longer throws placement off, nor do
+  title words or frontmatter values that recur in the body, and a remark
+  written under a heading goes right below it, not past the next one.
 - **Erased words are struck through by default** instead of removed (*A word you
   erase on the tablet becomes*). An existing install keeps the choice it has
   saved; pick *Struck through* there to switch.
@@ -53,7 +63,8 @@
 - **Typed-text notebooks (experimental):** *Notes go to the tablet as → Typed
   text* sends notes as the tablet's own keyboard text. Typed edits come back
   exactly; pen ink becomes remarks and stays attached to its text on the tablet.
-  Checked against rmscene, not yet on a device.
+  Typing works on pages that already hold ink. Checked against rmscene, not yet
+  on a device.
 - **Several copies of the vault:** the copy that syncs on its own holds a lease
   in the shared state folder; the others leave automatic syncs to it, and a
   manual sync there asks first (new setting *This device's name*). A send

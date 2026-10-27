@@ -89,6 +89,13 @@ describe("blockEnd", () => {
 		expect(blockEnd(fenced, 3)).toBe(4);
 		expect(blockEnd(fenced, 5)).toBe(5);
 	});
+
+	it("ends a block at a heading: a heading is a line of its own", () => {
+		const lines = ["## One", "## Two", "Text under two", "### Three"];
+		expect(blockEnd(lines, 0)).toBe(0);
+		expect(blockEnd(lines, 1)).toBe(1);
+		expect(blockEnd(lines, 2)).toBe(2);
+	});
 });
 
 describe("the table column under a remark", () => {

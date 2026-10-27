@@ -390,6 +390,17 @@ describe("merging again after a merge was written", () => {
 		expect(first.body).toBe(note.replace("```\n\n", "```\n\n> [!note] Remark\n> check this\n> ^ink-cccccccccccc\n\n"));
 	});
 
+	it("places a remark written under a heading right after it, not past the heading that follows", () => {
+		const note = "Intro words here.\n\n## Plans for spring\n### Garden work\nDig the beds early.\n\nLast line.";
+		const remark: ImportedMark = { kind: "note", page: 1, quote: "Plans for spring", transcript: "check this", id: "eeeeeeeeeeee" };
+		const changes = { layout: notebook(note).render.layout, highlights: [], marks: [remark] };
+		const first = mergeTabletChanges({ ...common, ...changes, base: note, ours: note });
+		expect(first.body).toBe(note.replace("spring\n", "spring\n> [!note] Remark\n> check this\n> ^ink-eeeeeeeeeeee\n\n"));
+		const again = mergeTabletChanges({ ...common, ...changes, base: note, ours: first.body, mergedBase: first.projected! });
+		expect(again.body).toBe(first.body);
+		expect(again.outcome.conflicts).toBe(0);
+	});
+
 	it("leaves a remark callout it placed as the owner left it: edited, or deleted", async () => {
 		const handwriting = { renderStrokes: async () => "img/r.png", transcribe: async () => ({ text: "check this" }) };
 		const changes = await readTablet(() => null, remarkStrokes(), handwriting);

@@ -295,6 +295,8 @@ describe("the typed body of a note with placed blocks", () => {
 		["Top line\n\nNext", new Map([[-1, callout]])],
 		["\nStarts blank", new Map([[-1, callout]])],
 		["Only line", new Map([[0, callout]])],
+		["## One\n## Two\nText", new Map([[0, callout]])],
+		["## One\nText\n\nMore", new Map([[0, callout]])],
 	];
 	it.each(bodies)("is the note's text again, blank lines included: %j", (body, blocks) => {
 		expect(typedBody(placeAfterBlocks(body.split("\n"), blocks))).toBe(body);

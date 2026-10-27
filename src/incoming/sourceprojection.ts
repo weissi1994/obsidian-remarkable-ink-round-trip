@@ -152,7 +152,8 @@ function consume(source: string, from: number, word: string, typo: number): numb
  * a compound in a narrow column): then `then`, the next laid-out word, is
  * its rest and carries on right there. A `cut` word ends a code line the
  * typesetter truncated at the page edge (pdf.ts): it is the start of its
- * source word, which runs on to the next space.
+ * source word, which runs on to the next space (the rest of the line is not
+ * on the page at all: the caller moves on past it).
  */
 function matchAt(source: string, from: number, word: string, typo: number, then?: string, cut = false): number | null {
 	const end = consume(source, from, word, typo);
@@ -238,6 +239,31 @@ export function hiddenRemarks(source: string, names: string[] | undefined): Rang
 }
 
 /**
+ * The targets of markdown links outside code, `](…)`: the page shows a
+ * link's text only (mdblocks.ts), so a run of links reads as words a whole
+ * URL apart in the note but side by side on the page.
+ */
+function hiddenLinkTargets(source: string): Range[] {
+	const out: Range[] = [];
+	let offset = 0;
+	let fence: string | null = null;
+	for (const line of source.split("\n")) {
+		const marker = /^\s*(?:>\s*)*(`{3,}|~{3,})/.exec(line)?.[1];
+		if (marker !== undefined && fence === null) fence = marker;
+		else if (marker !== undefined && fence !== null && marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+		else if (fence === null) {
+			for (const link of line.matchAll(/\[[^\]]+\](\([^)]*\))/g)) {
+				const at = link.index + link[0].length - link[1].length - 1;
+				// Inside inline code it is shown as typed.
+				if ((line.slice(0, link.index).split("`").length - 1) % 2 === 0) out.push({ start: offset + at, end: offset + link.index + link[0].length });
+			}
+		}
+		offset += line.length + 1;
+	}
+	return out;
+}
+
+/**
  * Where layout word `index` sits, from `from` on. `glued`: the word before
  * it ended inside a source word — broken at a line's end — so this one is
  * its rest, right at `from`.
@@ -247,26 +273,31 @@ type Locate = (from: number, index: number, glued: boolean, window: number) => R
 /**
  * Where the note's own text begins in the layout. The typeset document opens
  * with a title, and optionally with the frontmatter as a title block; neither
- * is part of the note body. Rather than special-casing them, look for the
- * first word that starts a run of three consecutive matches near the top of
- * the note — that is where the two texts genuinely meet.
+ * is part of the note body. Rather than special-casing them, look among the
+ * words from `first` on for runs of three consecutive matches near the top
+ * of the note, and take the one that starts earliest in the note — that is
+ * where the two texts genuinely meet. A frontmatter value the note repeats
+ * further down matches too, just later.
  */
-function syncPoint(source: string, count: number, locate: Locate): number {
-	const head = Math.min(count, 60);
-	for (let index = 0; index < head; index++) {
+function syncPoint(source: string, count: number, locate: Locate, first = 0): number {
+	const head = Math.min(count, first + 60);
+	let best: { index: number; at: number } | undefined;
+	for (let index = first; index < head; index++) {
 		let cursor = 0;
 		let glued = false;
 		let run = 0;
+		let at = 0;
 		for (let step = 0; step < 3 && index + step < count; step++) {
 			const hit = locate(cursor, index + step, glued, cursor === 0 ? 400 : 40);
 			if (hit === null) break;
+			if (step === 0) at = hit.start;
 			cursor = hit.end;
 			glued = insideWord(source, hit.end);
 			run++;
 		}
-		if (run === 3) return index;
+		if (run === 3 && (best === undefined || at < best.at)) best = { index, at };
 	}
-	return 0;
+	return best?.index ?? first;
 }
 
 export interface ProjectionInput {
@@ -331,7 +362,7 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	// where the source has an em dash, and mapping modern against it fails
 	// at the first typographic character.
 	const typo = input.layout.typo ?? 1;
-	const skip = hiddenRemarks(input.source, input.layout.remarksInPlace);
+	const skip = [...hiddenRemarks(input.source, input.layout.remarksInPlace), ...hiddenLinkTargets(input.source)];
 	const source = input.source;
 	// The last word of a laid-out line may be the first part of a word the
 	// typesetter broke; its next part starts the next line of the block.
@@ -340,21 +371,38 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 		const next = words[index + 1];
 		return next !== undefined && lineEnds.has(words[index].id) && next.block === words[index].block ? next.text : undefined;
 	};
-	// Code lines are truncated at the page edge, not broken.
+	// Code lines are truncated at the page edge, not broken: what follows
+	// a line's last word on its source line is not on the page.
 	const cutEnds = new Set(input.layout.lines.filter((line) => line.role === "code").flatMap((line) => line.words.slice(-1).map((word) => word.id)));
+	const past = (index: number, end: number) => {
+		if (!cutEnds.has(words[index].id)) return end;
+		const newline = source.indexOf("\n", end);
+		return newline === -1 ? source.length : newline;
+	};
 	const locate: Locate = (from, index, glued, window) => {
 		const cut = cutEnds.has(words[index].id);
 		const end = glued ? matchAt(source, from, words[index].text, typo, carried(index), cut) : null;
 		return end !== null ? { start: from, end } : findWord(source, from, words[index].text, typo, window, skip, carried(index), cut);
 	};
-	const start = syncPoint(source, words.length, locate);
+	// The title is not the note's text; it only stands for the note's first
+	// heading when the page dropped that as the same text (pdf.ts) — not when
+	// the page shows that heading as well, behind a frontmatter block.
+	const titles = input.layout.lines.filter((line) => line.role === "title");
+	const titleText = titles.map((line) => line.text.trim()).join(" ");
+	const titleIds = new Set(titles.flatMap((line) => line.words.map((word) => word.id)));
+	const opensWithHeading = /^#\s/.test(source.split("\n").find((line) => line.trim() !== "") ?? "");
+	let first = 0;
+	if (!opensWithHeading || input.layout.lines.some((line) => line.role === "heading" && line.text.trim() === titleText)) {
+		while (first < words.length && titleIds.has(words[first].id)) first++;
+	}
+	const start = syncPoint(source, words.length, locate, first);
 	const followed = (from: number, index: number, count: number) => {
 		if (index + count >= words.length) return false;
 		let at = from;
 		for (let next = index + 1; next <= index + count; next++) {
 			const hit = locate(at, next, insideWord(source, at), 40);
 			if (hit === null) return false;
-			at = hit.end;
+			at = past(next, hit.end);
 		}
 		return true;
 	};
@@ -366,11 +414,11 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 		let hit = locate(cursor, index, glued, WINDOW);
 		// Near the end of the layout there is nothing left to confirm with.
 		const lastWords = index + 2 >= words.length;
-		if (hit !== null && (missed > 0 || hit.start - cursor > JUMP) && !lastWords && !followed(hit.end, index, 2)) hit = null;
+		if (hit !== null && (missed > 0 || hit.start - cursor > JUMP) && !lastWords && !followed(past(index, hit.end), index, 2)) hit = null;
 		for (let from = cursor; hit === null && !lastWords; ) {
 			const far = findWord(source, from, words[index].text, typo, FAR - (from - cursor), skip, carried(index), cutEnds.has(words[index].id));
 			if (far === null) break;
-			if (followed(far.end, index, Math.min(4, words.length - 1 - index))) hit = far;
+			if (followed(past(index, far.end), index, Math.min(4, words.length - 1 - index))) hit = far;
 			from = far.start + 1;
 		}
 		if (hit === null) {
@@ -378,7 +426,7 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 			continue;
 		}
 		ranges.set(words[index].id, hit);
-		cursor = hit.end;
+		cursor = past(index, hit.end);
 		found++;
 		missed = 0;
 	}
@@ -886,9 +934,9 @@ function applyBlockMarks(
  * lines after it would run on into the callout. `quoted` lines become quotes.
  *
  * A block is set apart by one blank line on each side unless the note has
- * one there already; right after a closing fence with a line straight after
- * it, by one after only. So the blank lines it added can be told from the
- * note's own (typednote.ts typedBody takes them out again).
+ * one there already; right after a closing fence or a heading with a line
+ * straight after it, by one after only. So the blank lines it added can be
+ * told from the note's own (typednote.ts typedBody takes them out again).
  */
 export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>, quoted: ReadonlySet<number> = new Set()): string {
 	const placed = new Map<number, string[]>();
@@ -907,7 +955,7 @@ export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>,
 		const block = placed.get(index);
 		if (block === undefined) return;
 		const lineAfter = index + 1 < lines.length && lines[index + 1].trim() !== "";
-		if (lineAfter && FENCE.test(line)) {
+		if (lineAfter && (FENCE.test(line) || HEADING.test(line))) {
 			out.push(...block, "");
 			return;
 		}
@@ -960,13 +1008,15 @@ export function remarkCallout(mark: ImportedMark): string[] {
 }
 
 const FENCE = /^\s*(`{3,}|~{3,})/;
+const HEADING = /^#{1,6}(\s|$)/;
 const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s/;
 
 /**
  * The last line of the markdown block holding line `at`: the closing fence
- * of a code block; else the end of its run of non-blank lines — a table, a
- * callout, a paragraph — carried across blank lines while a list goes on
- * (a further item, or an indented continuation).
+ * of a code block; a heading, which is a line of its own; else the end of
+ * its run of non-blank lines up to a heading — a table, a callout, a
+ * paragraph — carried across blank lines while a list goes on (a further
+ * item, or an indented continuation).
  */
 export function blockEnd(lines: string[], at: number): number {
 	let open: { line: number; fence: string } | null = null;
@@ -983,10 +1033,11 @@ export function blockEnd(lines: string[], at: number): number {
 		}
 		return lines.length - 1;
 	}
+	if (HEADING.test(lines[at])) return at;
 	let end = at;
 	const list = () => lines.slice(start(lines, at), end + 1).some((line) => LIST_ITEM.test(line));
 	for (;;) {
-		while (end + 1 < lines.length && lines[end + 1].trim() !== "" && !FENCE.test(lines[end + 1])) end++;
+		while (end + 1 < lines.length && lines[end + 1].trim() !== "" && !FENCE.test(lines[end + 1]) && !HEADING.test(lines[end + 1])) end++;
 		if (!list()) return end;
 		let next = end + 1;
 		while (next < lines.length && lines[next].trim() === "") next++;
