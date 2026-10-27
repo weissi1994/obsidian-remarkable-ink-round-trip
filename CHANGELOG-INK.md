@@ -14,7 +14,9 @@
   a note restored in the vault brings its notebook back to the folder it was
   in, unless that folder now mirrors another vault folder (renamed on the
   tablet meanwhile). Nothing is ever deleted for good. An account or endpoint
-  switch archives, trashes and sends nothing.
+  switch archives, trashes and sends nothing. Notes deleted while Obsidian was
+  closed count as deleted once they have stayed missing for three syncs and an
+  hour.
 - **Notebooks are updated in place:** a changed note rewrites only the pages
   whose text changed, in the same notebook. Page tags, templates, bookmarks and
   pages you added stay (an added page goes only once its ink is in the note).

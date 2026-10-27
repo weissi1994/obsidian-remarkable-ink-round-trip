@@ -8,6 +8,7 @@
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && node scripts/check-bundle.mjs",
 		"test": "vitest run",
 		"test:watch": "vitest",
+		"test:vault": "vitest run src/__tests__/realvault.test.ts",
 		"lint": "npm run lint:js && npm run lint:css",
 		"lint:js": "eslint src/",
 		"lint:css": "stylelint styles.css --max-warnings 0"

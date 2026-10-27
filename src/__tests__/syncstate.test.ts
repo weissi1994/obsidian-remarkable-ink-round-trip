@@ -25,7 +25,7 @@ describe("shared sync state", () => {
 		const { fs, files, writes } = memoryFs();
 		const state = new SyncState(fs, ROOT);
 		await state.saveMappings({ [A]: entry(A, "d1"), [B]: entry(B, "d2") });
-		expect([...files.keys()].sort()).toEqual([`${ROOT}/notes/${A}.json`, `${ROOT}/notes/${B}.json`]);
+		expect([...files.keys()].sort()).toEqual([`${ROOT}/notes/${A}.json`, `${ROOT}/notes/${B}.json`, `${ROOT}/state.json`]);
 		const before = writes();
 		await state.saveMappings({ [A]: entry(A, "d1"), [B]: entry(B, "d3") });
 		expect(writes() - before).toBe(1);

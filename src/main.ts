@@ -28,9 +28,9 @@ import {
 } from "./notify";
 import type { ProgressCount } from "./status";
 import { LeaseConfirmModal, StopSyncingModal, SyncStatusModal } from "./syncstatusmodal";
-import { buildSyncStatusSummary, classifyNotes, type NoteFacts, type NoteStatus } from "./sync/statussummary";
+import { buildSyncStatusSummary, classifyNotes, heldAfterRun, type NoteFacts, type NoteStatus } from "./sync/statussummary";
 import { leaseDecision, leaseDuration, leaseStanding, renewedLease } from "./sync/lease";
-import { FailureStreak, NOTICE_AFTER, runFailure, type RunFailure } from "./sync/failures";
+import { FailureStreak, NOTICE_AFTER, RunQueue, runFailure, type RunFailure } from "./sync/failures";
 import { frontmatterTags } from "./sync/tags";
 import type { VaultNote } from "./sync/reconcile";
 import {
@@ -42,7 +42,7 @@ import {
 	settingsFrom,
 	storedFrom,
 } from "./settings";
-import { remarkable } from "rmapi-js";
+import { remarkable, type RemarkableApi } from "rmapi-js";
 import { HttpClient } from "./transport/http";
 import {
 	OFFICIAL_ENDPOINTS,
@@ -50,7 +50,7 @@ import {
 	rmfakecloudEndpoints,
 } from "./transport/cloud";
 import { installFetchShim, ShimTransport } from "./transport/fetchshim";
-import { toTransportError } from "./transport/mirror";
+import { handleRootQuirks, toTransportError } from "./transport/mirror";
 import { ensureFolderPath, editMetadata, editTags, readListing, readTags } from "./transport/metadata";
 import {
 	describeByteCompat,
@@ -187,9 +187,10 @@ export default class RoundTripPlugin extends Plugin {
 	private syncRunning: Promise<void> | null = null;
 	/**
 	 * Engine runs one at a time — a full sync, a watched note's send, a
-	 * manual send — so no two plan against the same notes at once.
+	 * manual send — so no two plan against the same notes at once. A run
+	 * that throws never stops the ones after it.
 	 */
-	private engineTail: Promise<void> = Promise.resolve();
+	private readonly engineRuns = new RunQueue((error) => console.error("reMarkable Ink Round-Trip: a sync run failed", error));
 	/** Progress of the upload batch running now, for the status panel. */
 	private uploading: { done: number; total: number } | null = null;
 	/** Built-in OCR: templates per handwriting version, the vault's words per run. */
@@ -211,8 +212,8 @@ export default class RoundTripPlugin extends Plugin {
 	private readonly noteErrors = new Map<string, string>();
 	/** Likewise a note whose notebook could not be read, until a read goes through. */
 	private readonly noteReadErrors = new Map<string, string>();
-	/** Notes the last sends held back, with why (SyncEngine.held). */
-	private readonly heldNotes = new Map<string, string>();
+	/** Notes the sends held back, with why (SyncEngine.held, sync/statussummary.ts heldAfterRun). */
+	private heldNotes = new Map<string, string>();
 	/**
 	 * Document ids of notes seen deleted in this session: a delete seen is
 	 * taken at once, a note merely missing only on a second sync
@@ -605,12 +606,14 @@ export default class RoundTripPlugin extends Plugin {
 				folders.some((folder) => isInWatchFolder(file.path, folder)) && !excluded.some((folder) => isInWatchFolder(file.path, folder));
 			const synced = isValidDocId(docId) && this.settings.mappings[docId] !== undefined;
 			if (!synced && !inSyncFolder) continue;
+			// A note deleted since it was listed is simply not read.
+			const text = await this.app.vault.cachedRead(file).catch(() => undefined);
 			facts.push({
 				path: file.path,
 				...(isValidDocId(docId) ? { docId } : {}),
 				...(isOptOut(getFrontmatterValue(frontmatter, OPT_OUT_FRONTMATTER_KEY)) ? { optOut: true } : {}),
 				inSyncFolder,
-				text: await this.app.vault.cachedRead(file),
+				...(text === undefined ? {} : { text }),
 			});
 		}
 		const waiting = new Map<string, string | undefined>(this.heldNotes);
@@ -963,12 +966,12 @@ export default class RoundTripPlugin extends Plugin {
 		return new Promise((resolve) => new LeaseConfirmModal(this.app, { device: lease.device, until: new Date(lease.expiresAt) }, resolve).open());
 	}
 
-	/** Take or renew the sync lease for this copy, while it syncs. */
+	/** Take or renew the sync lease for this copy while it syncs — only when it syncs on its own (sync/lease.ts renewedLease). */
 	private async renewLease(): Promise<void> {
 		const lease = await this.state.readLease();
 		const next = renewedLease(
 			lease,
-			{ installId: this.settings.installId, device: this.deviceLabel() },
+			{ installId: this.settings.installId, device: this.deviceLabel(), autoSync: this.settings.autoSync },
 			Date.now(),
 			leaseDuration(this.settings.syncIntervalMinutes),
 		);
@@ -979,10 +982,19 @@ export default class RoundTripPlugin extends Plugin {
 	 * Run one engine pass once the ones before it are done. What it did to
 	 * names, folders and the archive goes to the sync log note. What failed
 	 * is kept for the status panel and bar; background runs failing
-	 * NOTICE_AFTER times in a row say so (sync/failures.ts).
+	 * NOTICE_AFTER times in a row say so (sync/failures.ts). Each wrap-up
+	 * step stands alone: one failing (a note deleted mid-run, the log note
+	 * not writable) is logged and never stops the runs after it.
 	 */
 	private runEngine(run: (engine: SyncEngine) => Promise<void>, options: { background: boolean }): Promise<void> {
-		const next = this.engineTail.then(async () => {
+		const step = async (what: string, work: () => Promise<void>): Promise<void> => {
+			try {
+				await work();
+			} catch (error) {
+				console.warn(`reMarkable Ink Round-Trip: ${what} failed after a sync — ${String(error)}`);
+			}
+		};
+		return this.engineRuns.enqueue(async () => {
 			const lines: string[] = [];
 			const failures: RunFailure[] = [];
 			this.runFailures = failures;
@@ -996,22 +1008,23 @@ export default class RoundTripPlugin extends Plugin {
 			} finally {
 				window.clearInterval(renewing);
 				this.runFailures = null;
-				this.heldNotes.clear();
-				for (const [path, why] of engine.held) this.heldNotes.set(path, why);
+				this.heldNotes = heldAfterRun(this.heldNotes, { held: engine.held, covered: engine.covered, full: engine.fullRun });
 				if (lines.length > 0) {
 					const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-					await this.appendReport(`reMarkable Ink Round-Trip — notes and notebooks (${stamp})\n${lines.join("\n")}`);
+					await step("writing the sync log", () => this.appendReport(`reMarkable Ink Round-Trip — notes and notebooks (${stamp})\n${lines.join("\n")}`));
 					notify(`reMarkable sync:\n${lines.slice(0, 3).join("\n")}${lines.length > 3 ? "\n… see the sync log" : ""}`, 10000);
 				}
-				await this.runEnded(failures, options.background);
+				await this.runEnded(failures, options.background, step);
 			}
 		});
-		this.engineTail = next;
-		return next;
 	}
 
 	/** After a run: count its failures, tell the owner when it is time, clean up the state folder now and then. */
-	private async runEnded(failures: RunFailure[], background: boolean): Promise<void> {
+	private async runEnded(
+		failures: RunFailure[],
+		background: boolean,
+		step: (what: string, work: () => Promise<void>) => Promise<void>,
+	): Promise<void> {
 		const first = failures[0];
 		if (this.failures.ended(failures, background) && first !== undefined) {
 			notify(
@@ -1024,12 +1037,14 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		if (failures.length > 0) {
 			const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-			await this.appendReport(`reMarkable Ink Round-Trip — sync failed (${stamp})\n${failures.map((f) => `${f.what}: ${f.message}`).join("\n")}`);
+			await step("writing the sync log", () =>
+				this.appendReport(`reMarkable Ink Round-Trip — sync failed (${stamp})\n${failures.map((f) => `${f.what}: ${f.message}`).join("\n")}`),
+			);
 		} else if (Date.now() - this.lastGcAt > 24 * 60 * 60_000) {
 			this.lastGcAt = Date.now();
-			await this.collectStateGarbage();
+			await step("cleaning up the sync state folder", () => this.collectStateGarbage());
 		}
-		await this.refreshAlert();
+		await step("updating the status bar", () => this.refreshAlert());
 	}
 
 	/**
@@ -1037,16 +1052,17 @@ export default class RoundTripPlugin extends Plugin {
 	 * trash subfolder (SyncState.collectGarbage) — never deleted here.
 	 */
 	private async collectStateGarbage(): Promise<void> {
-		const inUse = new Set<string>();
-		for (const file of this.app.vault.getMarkdownFiles()) {
-			const cache = this.app.metadataCache.getFileCache(file);
-			const links =
-				cache === null
-					? [...(await this.app.vault.cachedRead(file)).matchAll(EMBED_SCAN_RE)].map((match) => match[1])
-					: (cache.embeds ?? []).map((embed) => embed.link);
-			for (const link of links) inUse.add(link.split(/[#|]/)[0].split("/").pop()?.trim() ?? "");
-		}
 		try {
+			// A note that cannot be read stops the clean-up: its pictures might look unused.
+			const inUse = new Set<string>();
+			for (const file of this.app.vault.getMarkdownFiles()) {
+				const cache = this.app.metadataCache.getFileCache(file);
+				const links =
+					cache === null
+						? [...(await this.app.vault.cachedRead(file)).matchAll(EMBED_SCAN_RE)].map((match) => match[1])
+						: (cache.embeds ?? []).map((embed) => embed.link);
+				for (const link of links) inUse.add(link.split(/[#|]/)[0].split("/").pop()?.trim() ?? "");
+			}
 			const result = await this.state.collectGarbage({ inkInUse: inUse });
 			if (result.moved.length > 0) {
 				await this.appendReport(
@@ -1062,7 +1078,7 @@ export default class RoundTripPlugin extends Plugin {
 	/** The engine on this vault and account, for one run: one cloud session, one listing cache. */
 	private createEngine(lines: string[]): SyncEngine {
 		let session: Promise<RawSyncApi> | null = null;
-		const raw = () => (session ??= remarkable(this.settings.deviceToken, this.rmapiOptions()).then((api) => api.raw));
+		const raw = () => (session ??= this.cloudSession().then((api) => api.raw));
 		let cache: Record<string, DeviceItem> | null = null;
 		// The send reads the notebook again on these; anything else is a transport failure.
 		const passThrough = (error: unknown): never => {
@@ -1201,6 +1217,13 @@ export default class RoundTripPlugin extends Plugin {
 				this.runFailures?.push(runFailure(what, error));
 			},
 			push: (work) => this.pushQueue.enqueue(work),
+			vanished: {
+				get: () => this.settings.vanishedNotes,
+				set: async (seen) => {
+					this.settings.vanishedNotes = seen;
+					await this.persistSettings();
+				},
+			},
 		};
 		return new SyncEngine(ports);
 	}
@@ -1687,10 +1710,7 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		const notice = this.progress("Reading your reMarkable cloud account…");
 		try {
-			const api = await remarkable(
-				this.settings.deviceToken,
-				this.rmapiOptions(),
-			);
+			const api = await this.cloudSession();
 			const diagnosis = await diagnoseCloud(
 				{
 					getRootHash: () => api.raw.getRootHash(),
@@ -1796,7 +1816,7 @@ export default class RoundTripPlugin extends Plugin {
 		const startedAt = new Date().toISOString().slice(0, 16).replace("T", " ");
 		const notice = quiet ? null : this.progress(`Checking ${mappings} notebook(s) on the reMarkable…`);
 		try {
-			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+			const api = await this.cloudSession();
 			const listing = await api.listIds(true);
 			await this.settlePendingSends(new Map(listing.map((item) => [item.id, item.hash])), (line) => log.push(line), async (id, hash) => {
 				const { entries } = await api.raw.getEntries(`${id}.docSchema`, hash);
@@ -2537,10 +2557,20 @@ export default class RoundTripPlugin extends Plugin {
 		);
 	}
 
+	/**
+	 * Open an rmapi-js session. Its raw sync API reads an account with no
+	 * root yet as an empty one and retries a root write refused with a bare
+	 * status (transport/mirror.ts handleRootQuirks).
+	 */
+	private async cloudSession(): Promise<RemarkableApi> {
+		const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+		handleRootQuirks(api.raw);
+		return api;
+	}
+
 	/** Open the rmapi-js session the raw sync API lives on. */
 	private async rawApi(): Promise<RawSyncApi> {
-		const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
-		return api.raw;
+		return (await this.cloudSession()).raw;
 	}
 
 	private requirePaired(): boolean {
@@ -2751,7 +2781,7 @@ export default class RoundTripPlugin extends Plugin {
 		if (!this.requirePaired()) return;
 		const notice = this.progress("Looking for a notebook made on your reMarkable…");
 		try {
-			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
+			const api = await this.cloudSession();
 			const items = await api.listItems(true);
 			// Notebooks only, newest first: a PDF page's scene info may describe
 			// the PDF rather than the tablet.

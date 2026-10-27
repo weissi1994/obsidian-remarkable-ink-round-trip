@@ -56,3 +56,27 @@ export class FailureStreak {
 		return this.streak === NOTICE_AFTER;
 	}
 }
+
+/**
+ * Sync runs one after another. A run that throws — or whose wrap-up does —
+ * neither stops the runs queued after it nor rejects for its caller: the
+ * error goes to `onError` (the console), and the queue moves on.
+ */
+export class RunQueue {
+	private tail: Promise<void> = Promise.resolve();
+
+	constructor(private readonly onError: (error: unknown) => void) {}
+
+	/** Run `run` once the runs queued before it are done; resolves when it is, never rejects. */
+	enqueue(run: () => Promise<void>): Promise<void> {
+		const next = this.tail.then(run).catch((error: unknown) => {
+			try {
+				this.onError(error);
+			} catch {
+				// Reporting failed too: the queue still moves on.
+			}
+		});
+		this.tail = next;
+		return next;
+	}
+}

@@ -4,6 +4,7 @@ import type { InkSnapshot, MappingEntry } from "../id/mapping";
 import { collectInkAnnotations } from "../incoming/inkpull";
 import { parsePageOrder } from "../incoming/pagemap";
 import type { PullDeps } from "../incoming/pull";
+import { typedIdLine, typedTextId } from "../incoming/remarkid";
 import { parseRmScene } from "../incoming/rmscene";
 import { inkOptionsFor } from "../ink/inkfonts";
 import { DEVICE_PROFILES, renderInk, toInkLines } from "../ink/inkrender";
@@ -71,9 +72,10 @@ const common = { sourcePath: "Ink.md", sourceName: "Ink", importedAt: "2026-10-1
 describe("typed text in handwritten notebooks", () => {
 	it("is taken into the note once, after the last block of its page", async () => {
 		const { highlights, marks } = await importOf({ "dev-1/page-1.rm": typedPage });
-		expect(marks).toEqual([{ kind: "note", page: 1, typed: TYPED }]);
+		const typedId = typedTextId("page-1", TYPED);
+		expect(marks).toEqual([{ kind: "note", page: 1, typed: TYPED, typedId }]);
 		const first = mergeTabletChanges({ ...common, highlights, marks, base: NOTE, ours: NOTE });
-		expect(first.body).toBe(`${NOTE}\n\n${TYPED}`);
+		expect(first.body).toBe(`${NOTE}\n\n${TYPED}\n\n${typedIdLine(typedId)}`);
 		// Read again before the next send: already in the note.
 		const again = mergeTabletChanges({ ...common, highlights, marks, base: NOTE, ours: first.body, mergedBase: first.projected! });
 		expect(again.body).toBe(first.body);
@@ -85,9 +87,9 @@ describe("typed text in handwritten notebooks", () => {
 	it("comes in from a page the owner added, and that page goes once the note has it", async () => {
 		const added = typedOnto(buildTextPageRm(markdownToTypedText(""), [], PAPER), "Thoughts typed on a new page");
 		const { highlights, marks } = await importOf({ "dev-1/page-1.rm": inkPage, "dev-1/owner.rm": added });
-		expect(marks).toEqual([{ kind: "note", page: 1, typed: "Thoughts typed on a new page" }]);
+		expect(marks).toEqual([{ kind: "note", page: 1, typed: "Thoughts typed on a new page", typedId: typedTextId("owner", "Thoughts typed on a new page") }]);
 		const { body } = mergeTabletChanges({ ...common, highlights, marks, base: NOTE, ours: NOTE });
-		expect(body.endsWith("Thoughts typed on a new page")).toBe(true);
+		expect(body).toContain("Thoughts typed on a new page\n\n^ink-typed-");
 
 		const cloud = fakeCloud();
 		const sent = await sendNotebook(cloud.api, "Ink", [inkPage], { retry: NO_WAIT });
@@ -109,6 +111,61 @@ describe("typed text in handwritten notebooks", () => {
 		await update(kept.hash, body);
 		expect(await shown()).toEqual([sent.pageIds[0]]);
 		expect(decodeJson<{ cPages: { pages: { id: string; deleted?: unknown }[] } }>((await filesOf(cloud, docId)).get(`${docId}.content`)).cPages.pages.find((page) => page.id === "owner")?.deleted).toBeDefined();
+	});
+
+	it("does not read a file the notebook's page list does not name as a page", async () => {
+		const added = typedOnto(buildTextPageRm(markdownToTypedText(""), [], PAPER), "Text of a page the plugin dropped");
+		const files = { "dev-1/page-1.rm": inkPage, "dev-1/gone.rm": added };
+		expect((await importOf(files, JSON.stringify({ pages: ["page-1"] }))).marks).toEqual([]);
+		expect((await importOf(files, JSON.stringify({ pages: ["page-1", "gone"] }))).marks).toHaveLength(1);
+	});
+
+	it("is not taken in twice once the owner edited it in the vault, and its page goes all the same", async () => {
+		const added = typedOnto(buildTextPageRm(markdownToTypedText(""), [], PAPER), "Thoughts typed on a new page");
+		const { highlights, marks } = await importOf({ "dev-1/page-1.rm": inkPage, "dev-1/owner.rm": added });
+		const first = mergeTabletChanges({ ...common, highlights, marks, base: NOTE, ours: NOTE });
+		const edited = first.body.replace("Thoughts typed", "Thoughts I typed");
+		expect(edited).not.toContain("Thoughts typed on a new page");
+
+		// Sent with the page still there (say its ink was not read): the text as sent is the note's.
+		const again = mergeTabletChanges({ ...common, highlights, marks, base: edited, ours: edited });
+		expect(again.body).toBe(edited);
+		const twice = mergeTabletChanges({ ...common, highlights, marks, base: edited, ours: again.body, mergedBase: again.projected ?? undefined });
+		expect(twice.body).toBe(edited);
+
+		// The send itself lets the page go: the note took its text in.
+		const cloud = fakeCloud();
+		const sent = await sendNotebook(cloud.api, "Ink", [inkPage], { retry: NO_WAIT });
+		const docId = sent.docId;
+		const withPage = await onTablet(cloud, docId, (files) => {
+			const content = decodeJson(files.get(`${docId}.content`));
+			const pages = [
+				{ id: sent.pageIds[0], idx: { timestamp: "1:2", value: "ba" } },
+				{ id: "owner", idx: { timestamp: "2:1", value: "bb" } },
+			];
+			files.set(`${docId}.content`, encodeJson({ ...content, cPages: { pages } }));
+			files.set(`${docId}/owner.rm`, added);
+		});
+		await sendNotebookUpdate(cloud.api, docId, "Ink", [inkPage], { expectedHash: withPage, pageIds: sent.pageIds, noteText: edited, retry: NO_WAIT });
+		expect(parsePageOrder(new TextDecoder().decode((await filesOf(cloud, docId)).get(`${docId}.content`)))).toEqual([sent.pageIds[0]]);
+	});
+
+	it("lets a page be rewritten once its typed text came in, edited in the vault since or not", async () => {
+		const cloud = fakeCloud();
+		const sent = await sendNotebook(cloud.api, "Ink", [inkPage], { retry: NO_WAIT });
+		const docId = sent.docId;
+		const [pageId] = sent.pageIds;
+		const typed = await onTablet(cloud, docId, (files) => files.set(`${docId}/${pageId}.rm`, typedPage));
+		const rewritten = buildInkPageRm(lines.slice(0, -1), PAPER);
+		const { highlights, marks } = await importOf({ [`dev-1/${pageId}.rm`]: typedPage });
+		const { body } = mergeTabletChanges({ ...common, highlights, marks, base: NOTE, ours: NOTE });
+		await sendNotebookUpdate(cloud.api, docId, "Ink", [rewritten], {
+			expectedHash: typed,
+			pageIds: sent.pageIds,
+			noteText: body.replace("Typed on the tablet", "Written on the tablet"),
+			retry: NO_WAIT,
+		});
+		expect((await filesOf(cloud, docId)).get(`${docId}/${pageId}.rm`)).toEqual(rewritten);
 	});
 
 	it("lets the page be rewritten once its typed text is in the note, and refuses before", async () => {

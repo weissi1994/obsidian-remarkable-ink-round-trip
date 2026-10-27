@@ -267,6 +267,14 @@ class Reader {
 				throw new Error(`unknown tag type ${tag.type}`);
 		}
 	}
+
+	/** The bytes left in this reader, consumed. */
+	rest(): Uint8Array {
+		const start = Math.min(this.offset, this.end);
+		const bytes = new Uint8Array(this.view.buffer, this.view.byteOffset + start, this.end - start).slice();
+		this.offset = this.end;
+		return bytes;
+	}
 }
 
 const LAYER_ROOT_KEYS = new Set(["0:1", "0:11"]);
@@ -349,6 +357,29 @@ export interface StyleEntry {
 	key: ItemId;
 	timestamp: ItemId;
 	code: number;
+	/** Bytes after the code in the entry's value this reader does not know. */
+	tail?: Uint8Array;
+}
+
+/**
+ * Bytes a RootText block holds past the fields this reader knows, each
+ * where it was found, so a rewrite (ink/textedit.ts) can put them back.
+ */
+export interface RootTextTails {
+	/** After the width: the block's own later fields. */
+	block: Uint8Array;
+	/** In the text body, after the style list. */
+	body: Uint8Array;
+	/** Around the item list: after it in its outer subblock, and after the last item in it. */
+	items: Uint8Array;
+	itemList: Uint8Array;
+	/** The same for the style list. */
+	styles: Uint8Array;
+	styleList: Uint8Array;
+	/** After x and y in the position. */
+	position: Uint8Array;
+	/** Per stored item: after its last known field, and after the string or format code in its value. */
+	perItem: { item: Uint8Array; value: Uint8Array }[];
 }
 
 export interface RawRootText {
@@ -361,6 +392,7 @@ export interface RawRootText {
 	x: number;
 	y: number;
 	width: number;
+	tails: RootTextTails;
 }
 
 /**
@@ -395,8 +427,10 @@ function expandTextItem(
 function readRootText(reader: Reader): RawRootText {
 	const blockId = reader.id(1);
 	const body = reader.sub(2);
-	const items = body.sub(1).sub(1);
+	const itemsOuter = body.sub(1);
+	const items = itemsOuter.sub(1);
 	const chars: TextChar[] = [];
+	const perItem: RootTextTails["perItem"] = [];
 	const itemCount = items.varuint();
 	for (let i = 0; i < itemCount; i++) {
 		const item = items.sub(0);
@@ -405,6 +439,7 @@ function readRootText(reader: Reader): RawRootText {
 		const right = item.id(4);
 		const deletedLength = item.int(5);
 		let value: string | number = "";
+		let valueTail: Uint8Array = new Uint8Array(0);
 		if (item.has(6, TAG_LENGTH4)) {
 			const string = item.sub(6);
 			const length = string.varuint();
@@ -412,12 +447,17 @@ function readRootText(reader: Reader): RawRootText {
 			value = string.utf8(length);
 			// A format code rides on an empty string (rmscene read_string_with_format).
 			if (string.has(2, TAG_BYTE4)) value = string.int(2);
+			valueTail = string.rest();
 		}
+		perItem.push({ item: item.rest(), value: valueTail });
 		expandTextItem(chars, i, id, left, right, deletedLength, value);
 	}
+	const itemList = items.rest();
+	const itemsTail = itemsOuter.rest();
 	const styles = new Map<string, number>();
 	const styleEntries: StyleEntry[] = [];
-	const formats = body.sub(2).sub(1);
+	const formatsOuter = body.sub(2);
+	const formats = formatsOuter.sub(1);
 	const styleCount = formats.varuint();
 	for (let i = 0; i < styleCount; i++) {
 		const charId = formats.crdtId();
@@ -425,13 +465,37 @@ function readRootText(reader: Reader): RawRootText {
 		const style = formats.sub(2);
 		style.expect(1, TAG_BYTE1);
 		const code = style.u8();
+		const tail = style.rest();
 		styles.set(idKey(charId), code);
-		styleEntries.push({ key: charId, timestamp, code });
+		styleEntries.push({ key: charId, timestamp, code, ...(tail.length > 0 ? { tail } : {}) });
 	}
+	const styleList = formats.rest();
+	const stylesTail = formatsOuter.rest();
+	const bodyTail = body.rest();
 	const position = reader.sub(3);
 	const x = position.f64();
 	const y = position.f64();
-	return { blockId, chars, styles, styleEntries, x, y, width: reader.float(4) };
+	const positionTail = position.rest();
+	const width = reader.float(4);
+	return {
+		blockId,
+		chars,
+		styles,
+		styleEntries,
+		x,
+		y,
+		width,
+		tails: {
+			block: reader.rest(),
+			body: bodyTail,
+			items: itemsTail,
+			itemList,
+			styles: stylesTail,
+			styleList,
+			position: positionTail,
+			perItem,
+		},
+	};
 }
 
 /** Read the body of a RootText block (`start`–`end` of `bytes`); throws when it is malformed. */

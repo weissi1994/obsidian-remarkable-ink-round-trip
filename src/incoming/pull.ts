@@ -147,6 +147,13 @@ export interface ImportedMark {
 	 */
 	typed?: string;
 	/**
+	 * Ink fork, with `typed`: its page's id and text as a block id
+	 * (remarkid.ts typedTextId), written after the text in the note, so text
+	 * the note took in is not placed a second time once the owner edited it,
+	 * and its page goes on the next send.
+	 */
+	typedId?: string;
+	/**
 	 * Ink fork, typed-text notebooks: the whole typed text of the notebook's
 	 * page as markdown, the tablet's side of the merge (sync/twoway.ts). One
 	 * mark per import carries it.

@@ -128,18 +128,42 @@ export function foreignListing(records: MappingTable, device: readonly DeviceIte
 	return (folders.length > 0 && present === 0) || (synced.length >= 2 && present === 0) || (synced.length >= 5 && present * 5 < synced.length);
 }
 
+/** Synced notes missing from the vault with no delete seen. */
+export function vanishedIds(records: MappingTable, vault: readonly VaultNote[], deleted?: (docId: string) => boolean): string[] {
+	const ids = new Set(vault.map((note) => note.docId));
+	return syncedRecords(records)
+		.filter((record) => !ids.has(record.docId) && deleted?.(record.docId) !== true)
+		.map((record) => record.docId)
+		.sort();
+}
+
 /**
  * Whether most synced notes went from the vault at once, with no delete
  * seen: more likely a vault still arriving on this device (its sync state
  * came before its notes) than the owner deleting them. None is then taken
- * as deleted.
+ * as deleted — until the same notes stayed away long enough (VanishedNotes).
  */
 export function vanishedAtOnce(records: MappingTable, vault: readonly VaultNote[], deleted?: (docId: string) => boolean): boolean {
-	const ids = new Set(vault.map((note) => note.docId));
-	const synced = syncedRecords(records);
-	const missing = synced.filter((record) => !ids.has(record.docId) && deleted?.(record.docId) !== true).length;
-	return missing >= 3 && missing * 2 > synced.length;
+	const missing = vanishedIds(records, vault, deleted).length;
+	return missing >= 3 && missing * 2 > syncedRecords(records).length;
 }
+
+/**
+ * Notes vanished at once, as runs saw them: which, since when, over how
+ * many runs. The same notes still away after VANISH_SETTLE_RUNS runs and
+ * VANISH_SETTLE_MS were deleted by the owner (Obsidian closed meanwhile),
+ * not a vault still arriving: they are taken as deleted then.
+ */
+export interface VanishedNotes {
+	ids: string[];
+	since: number;
+	runs: number;
+	/** Taken as deleted since (logged once). */
+	settled: boolean;
+}
+
+export const VANISH_SETTLE_RUNS = 3;
+export const VANISH_SETTLE_MS = 60 * 60 * 1000;
 
 /**
  * The actions that bring every record's note and notebook back together.
@@ -147,7 +171,8 @@ export function vanishedAtOnce(records: MappingTable, vault: readonly VaultNote[
  * side is judged. An empty listing (a fresh pairing), another account's
  * listing (foreignListing), an empty vault (not loaded yet) and a vault
  * most of whose synced notes vanished at once (vanishedAtOnce) are never
- * read as "everything was deleted". A note missing without a delete seen
+ * read as "everything was deleted" — the latter until the vanish settled
+ * (`vanishSettled`, VanishedNotes). A note missing without a delete seen
  * (`deleted`) counts as deleted only when still missing on the next sync.
  * A notebook another copy of the vault replaced by a send whose record has
  * not arrived yet is not taken as trashed; nothing is decided for it until
@@ -159,6 +184,7 @@ export function plan(
 	device: readonly DeviceItem[] | null,
 	policy: ReconcilePolicy,
 	deleted?: (docId: string) => boolean,
+	vanishSettled = false,
 ): Action[] {
 	const notesById = new Map<string, VaultNote[]>();
 	for (const note of vault) {
@@ -171,7 +197,7 @@ export function plan(
 	// Another account's listing says nothing about these notebooks: as if it could not be read.
 	const judged = device !== null && !foreignListing(records, device);
 	const listed = judged && device.length > 0;
-	const vaultSeen = vault.length > 0 && !vanishedAtOnce(records, vault, deleted);
+	const vaultSeen = vault.length > 0 && (vanishSettled || !vanishedAtOnce(records, vault, deleted));
 	const known = new Set(Object.values(records).map((record) => record.deviceDocId));
 	const archive = clean(policy.archiveFolder);
 	const inArchive = (path: string) => archive !== "" && isInWatchFolder(path, archive);

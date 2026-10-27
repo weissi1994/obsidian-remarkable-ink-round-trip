@@ -97,7 +97,14 @@ function hash(text: string): string {
 }
 
 /** A send in flight this long is no longer on its way: another copy of the vault may drop it. */
-const PENDING_STALE_MS = 60 * 60 * 1000;
+export const PENDING_STALE_MS = 60 * 60 * 1000;
+
+/**
+ * A file always in the state folder once it holds notes: a sync tool that
+ * drops an emptied `notes/` folder (git keeps no empty folders) leaves it,
+ * so "every note's file went" is told from "the state folder moved".
+ */
+const MARKER_FILE = "state.json";
 
 /** An unused file in the state folder is moved to its trash after this long unused. */
 export const GC_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -209,6 +216,7 @@ export class SyncState {
 				continue;
 			}
 			await this.writeJson(this.noteFile(docId), { ...note, mapping });
+			await this.markState();
 			this.seen.set(docId, text);
 		}
 		for (const docId of [...this.seen.keys()]) {
@@ -233,16 +241,24 @@ export class SyncState {
 		}
 	}
 
+	/** Write the state folder's marker (MARKER_FILE) where it is missing. */
+	private async markState(): Promise<void> {
+		const marker = this.path(MARKER_FILE);
+		if (!(await this.fs.exists(marker))) await this.writeJson(marker, { syncState: 1 });
+	}
+
 	/**
 	 * Take in what another device wrote since: a mapping whose file changed on
 	 * disk (a pull brought it) replaces ours; a new file adds one; a file
 	 * that went away removes it. Mappings this device changed since are kept.
-	 * The notes folder gone altogether (the state folder moved or renamed
-	 * along with its parent) is not "every mapping removed": nothing is taken
-	 * in then.
+	 * The notes folder gone while the state folder's marker is there is every
+	 * note's file removed (a sync tool drops the emptied folder); the marker
+	 * gone too (the state folder moved or renamed along with its parent) is
+	 * not: nothing is taken in then.
 	 */
 	async refresh(table: MappingTable): Promise<MappingTable> {
-		if (this.seen.size > 0 && !(await this.fs.exists(this.path("notes")))) return table;
+		if (await this.fs.exists(this.path("notes"))) await this.markState();
+		else if (this.seen.size > 0 && !(await this.fs.exists(this.path(MARKER_FILE)))) return table;
 		const onDisk = await this.loadMappingsRaw();
 		const merged: MappingTable = { ...table };
 		for (const [docId, mapping] of Object.entries(onDisk)) {

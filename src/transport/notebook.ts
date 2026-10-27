@@ -12,17 +12,18 @@
  * same page ids by index, the owner's page tags, templates and added pages
  * kept, only changed files written. A page of typed text is edited in place
  * (ink/textedit.ts) rather than replaced, so the owner's ink keeps its
- * anchors; a page that goes is marked deleted, as the tablet does it.
+ * anchors; a page that goes is marked deleted, as the tablet does it, or
+ * its files removed where `.content` has no per-page records to mark.
  *
  * rmapi-js speaks the same protocol to the official cloud and to rmfakecloud,
  * so this module serves both endpoints unchanged.
  */
 
 import { parsePageOrder } from "../incoming/pagemap";
-import { REMARK_ID_PREFIX, remarkId } from "../incoming/remarkid";
+import { REMARK_ID_PREFIX, remarkId, typedIdLine, typedTextId } from "../incoming/remarkid";
 import { RM_V6_HEADER } from "../incoming/rmlines";
-import { parseRmScene, type TextParagraph, type TypedParagraph } from "../incoming/rmscene";
-import { typedTextToMarkdown } from "../incoming/typedtext";
+import { parseRmScene, type RmScene, type TextParagraph, type TypedParagraph } from "../incoming/rmscene";
+import { pageTypedMarkdown, typedTextToMarkdown } from "../incoming/typedtext";
 import { editTypedPage } from "../ink/textedit";
 import { INK_AUTHOR } from "../ink/rmwrite";
 import { isGenerationConflict, withGenerationRetry, type RetryOptions } from "./mirror";
@@ -124,6 +125,16 @@ export function typedTextInNote(paragraphs: readonly TextParagraph[], noteText: 
 	const squash = (text: string) => text.replace(/\s+/g, " ").trim();
 	const note = squash(noteText);
 	return typed.every((paragraph) => note.includes(squash(typedTextToMarkdown([{ style: "plain", spans: paragraph.spans }]))));
+}
+
+/**
+ * Whether the note carries the block id the import gave this page's typed
+ * text (remarkid.ts typedTextId): it came in, edited in the vault since or not.
+ */
+function typedIdInNote(pageId: string, scene: RmScene, noteText: string | undefined): boolean {
+	const typed = pageTypedMarkdown(scene);
+	if (typed === null || typed === "unreadable" || noteText === undefined) return false;
+	return noteText.includes(typedIdLine(typedTextId(pageId, typed.markdown)));
 }
 
 /** RFC4122-v4-shaped id from crypto randomness (same approach as docid.ts). */
@@ -628,16 +639,22 @@ export async function updateNotebook(
 
 	// The pages as the tablet shows them; a page it deleted keeps its record.
 	const deleted = new Set<string>();
+	const recorded = new Set<string>();
 	const records = content?.cPages?.pages;
 	if (Array.isArray(records)) {
 		for (const page of records as (CPage | null)[]) {
-			if (typeof page?.id === "string" && page.deleted !== undefined) deleted.add(page.id);
+			if (typeof page?.id !== "string") continue;
+			recorded.add(page.id);
+			if (page.deleted !== undefined) deleted.add(page.id);
 		}
 	}
+	// Files outside a known page order are left over, not pages.
 	const shown = parsePageOrder(contentText);
-	for (const entry of entries) {
-		const page = entry.id.startsWith(`${docId}/`) && entry.id.endsWith(".rm") ? pageOfFile(docId, entry.id) : null;
-		if (page !== null && !deleted.has(page) && !shown.includes(page)) shown.push(page);
+	if (shown.length === 0) {
+		for (const entry of entries) {
+			const page = entry.id.startsWith(`${docId}/`) && entry.id.endsWith(".rm") ? pageOfFile(docId, entry.id) : null;
+			if (page !== null && !deleted.has(page) && !shown.includes(page)) shown.push(page);
+		}
 	}
 
 	// A page of ours the owner deleted comes back under a new id: the
@@ -649,6 +666,8 @@ export async function updateNotebook(
 
 	// A page the owner added goes only when what it holds — ink, typed
 	// text — is in the note already.
+	const typedImported = (pageId: string, scene: RmScene, paragraphs: readonly TextParagraph[]) =>
+		typedTextInNote(paragraphs, options.noteText) || typedIdInNote(pageId, scene, options.noteText);
 	const added: { id: string; after: number }[] = [];
 	let after = -1;
 	for (const id of shown) {
@@ -668,7 +687,7 @@ export async function updateNotebook(
 				!textUnread &&
 				holds &&
 				(strokes.length === 0 || options.noteText.includes(`^${REMARK_ID_PREFIX}${remarkId(strokes)}`)) &&
-				typedTextInNote(typed, options.noteText)
+				typedImported(id, scene, typed)
 			) {
 				dropped.add(id);
 				continue;
@@ -683,41 +702,47 @@ export async function updateNotebook(
 
 	// What a rewritten page loses must be in the note already: text typed on
 	// the tablet once the import brought it in, never an unreadable page.
-	const assertRewritable = (bytes: Uint8Array, page: number): void => {
+	const assertRewritable = (bytes: Uint8Array, pageId: string, page: number): void => {
 		const scene = parseRmScene(bytes);
 		const v6 = decoder.decode(bytes.subarray(0, RM_V6_HEADER.length)) === RM_V6_HEADER;
 		if (!v6 || ((scene.blockTypes[ROOT_TEXT_BLOCK] ?? 0) > 0 && scene.text === undefined)) {
 			throw new InPlaceRefusedError(docId, "unreadable-page", page);
 		}
 		const theirs = (scene.text?.paragraphs ?? []).filter((paragraph) => paragraph.charIds.some((id) => id.author !== INK_AUTHOR));
-		if (!typedTextInNote(theirs, options.noteText)) throw new InPlaceRefusedError(docId, "typed-text", page);
+		if (!typedImported(pageId, scene, theirs)) throw new InPlaceRefusedError(docId, "typed-text", page);
 	};
 	const writes: { id: string; bytes: Uint8Array }[] = [];
+	let size = 0;
 	for (const [index, id] of ids.entries()) {
 		const file = strokesOf(id);
 		let bytes = pages[index];
 		if (file !== undefined) {
-			if (file.hash === (await sha256Hex(bytes))) continue;
+			if (file.hash === (await sha256Hex(bytes))) {
+				size += bytes.length;
+				continue;
+			}
 			const current = await read(file);
+			size += current.length;
 			if (sameBytes(current, bytes)) continue;
 			const typed = options.typedPages?.[index];
 			const edit = typed === undefined ? null : editTypedPage(current, typed);
 			if (edit?.kind === "unchanged") continue;
 			if (edit?.kind === "refused") throw new InPlaceRefusedError(docId, "text-not-diffable", index + 1, edit.reason);
 			if (edit?.kind === "edited") bytes = edit.bytes;
-			else assertRewritable(current, index + 1);
+			else assertRewritable(current, id, index + 1);
+			size -= current.length;
 		}
+		size += bytes.length;
 		writes.push({ id, bytes });
 	}
 	for (const [index, id] of options.pageIds.entries()) {
 		const file = index < ids.length ? undefined : strokesOf(id);
-		if (file !== undefined && !deleted.has(id)) assertRewritable(await read(file), index + 1);
+		if (file !== undefined && !deleted.has(id)) assertRewritable(await read(file), id, index + 1);
 	}
 
-	const size = pages.reduce((sum, page) => sum + page.length, 0);
-	const nextContent =
+	let nextContent =
 		content === null ? notebookContent(finalIds, size) : rebuildContent(content, shown, finalIds, dropped, template);
-	const contentChanged = content === null || JSON.stringify(nextContent) !== JSON.stringify(content);
+	let contentChanged = content === null || JSON.stringify(nextContent) !== JSON.stringify(content);
 	const pagedataEntry = fileOf.get(`${docId}.pagedata`);
 	let pagedata: string | null = null;
 	if (pagedataEntry !== undefined) {
@@ -740,6 +765,11 @@ export async function updateNotebook(
 	) {
 		return { docId, pageIds: ids, hash: docEntry.hash };
 	}
+	// Only alongside another change: the tablet keeps its own count.
+	if (content !== null && "sizeInBytes" in content && content.sizeInBytes !== size.toFixed()) {
+		nextContent = { ...nextContent, sizeInBytes: size.toFixed() };
+		contentChanged = true;
+	}
 
 	const timestamp = (options.now ?? Date.now)().toFixed();
 	const uploads = await Promise.all([
@@ -751,12 +781,15 @@ export async function updateNotebook(
 	const replacements = new Map<string, RawEntry>();
 	for (const upload of uploads) if (upload !== null) replacements.set(upload[0].id, upload[0]);
 	const rewritten = new Set(writes.map((write) => write.id));
-	// A page that goes keeps its files, as a page the tablet deletes does:
-	// should its stamped delete lose the tablet's merge, it shows as it was.
+	// A page that goes keeps its files where its record can be marked deleted,
+	// as a page the tablet deletes does: should that stamped delete lose the
+	// tablet's merge, the page shows as it was. Without a record (a flat
+	// `pages` list), a file left behind would read as a page again.
 	const files = entries
 		.filter((entry) => {
 			const page = pageOfFile(docId, entry.id);
 			if (page === null) return true;
+			if (dropped.has(page) && !recorded.has(page)) return false;
 			// The tablet draws a new thumbnail for a page without one.
 			return !(rewritten.has(page) && entry.id.startsWith(`${docId}.thumbnails/`));
 		})

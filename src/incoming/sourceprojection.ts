@@ -18,7 +18,7 @@ import { Bounds, deviceBoundsToPdf, strokeBounds } from "./anchor";
 import { Highlight, colorName, rgbName } from "./highlights";
 import { DEFAULT_MARK_STYLES, MarkStyle, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
-import { CONFIRM_MARK, remarkIdLine } from "./remarkid";
+import { CONFIRM_MARK, remarkIdLine, typedIdLine } from "./remarkid";
 
 /** Markdown punctuation that carries no text and may sit between words. */
 const SYNTAX = new Set([
@@ -860,8 +860,7 @@ function applyBlockMarks(
 			const device = mark.addedPage === undefined && mark.strokes !== undefined ? strokeBounds(mark.strokes.map((points) => ({ points }))) : null;
 			const ink = device === null ? null : deviceBoundsToPdf(device, input.layout);
 			const anchor = anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1);
-			// Typed text is the note's own text: plain lines, not a callout.
-			remarks.set(anchor, joinBlocks(remarks.get(anchor) ?? [], mark.typed?.split("\n") ?? remarkCallout(mark)));
+			remarks.set(anchor, joinBlocks(remarks.get(anchor) ?? [], markLines(mark)));
 		}
 	}
 
@@ -873,6 +872,11 @@ function applyBlockMarks(
  * them all) — after the whole markdown block that line is in: a callout in
  * the middle of a table, list, callout or code fence would split it, and the
  * lines after it would run on into the callout. `quoted` lines become quotes.
+ *
+ * A block is set apart by one blank line on each side unless the note has
+ * one there already; right after a closing fence with a line straight after
+ * it, by one after only. So the blank lines it added can be told from the
+ * note's own (typednote.ts typedBody takes them out again).
  */
 export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>, quoted: ReadonlySet<number> = new Set()): string {
 	const placed = new Map<number, string[]>();
@@ -882,13 +886,17 @@ export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>,
 	}
 	const out: string[] = [];
 	const top = placed.get(-1);
-	if (top !== undefined) out.push(...top, ...(lines[0].trim() === "" ? [] : [""]));
+	if (top !== undefined) out.push(...top, "");
 	lines.forEach((line, index) => {
 		out.push(quoted.has(index) && !line.startsWith(">") ? `> ${line}` : line);
 		const block = placed.get(index);
 		if (block === undefined) return;
+		const lineAfter = index + 1 < lines.length && lines[index + 1].trim() !== "";
+		if (lineAfter && FENCE.test(line)) {
+			out.push(...block, "");
+			return;
+		}
 		out.push("", ...block);
-		if (index + 1 < lines.length && lines[index + 1].trim() !== "") out.push("");
 	});
 	return out.join("\n");
 }
@@ -902,6 +910,16 @@ export function joinBlocks(first: string[], second: string[]): string[] {
 	if (first.length === 0) return second;
 	const quoted = first[first.length - 1].startsWith(">") && (second[0] ?? "").startsWith(">");
 	return quoted ? [...first, ...second] : [...first, "", ...second];
+}
+
+/**
+ * The lines a note mark goes into the note as: typed text as it is, plain
+ * lines, then its block id (remarkid.ts typedIdLine) on a line of its own;
+ * a remark as its callout.
+ */
+export function markLines(mark: ImportedMark): string[] {
+	if (mark.typed === undefined) return remarkCallout(mark);
+	return [...mark.typed.split("\n"), ...(mark.typedId === undefined ? [] : ["", typedIdLine(mark.typedId)])];
 }
 
 /** A remark's callout: title, its reading, its image, its id (remarkid.ts). */

@@ -13,8 +13,8 @@
 import { markdownToTypedText } from "../ink/roottext";
 import type { PendingChange } from "../incoming/annotationnote";
 import type { ImportedMark } from "../incoming/pull";
-import { isPluginIdLine } from "../incoming/remarkid";
-import { placeAfterBlocks, remarkCallout, joinBlocks, type ProjectionResult } from "../incoming/sourceprojection";
+import { isPluginIdLine, isTypedIdLine } from "../incoming/remarkid";
+import { joinBlocks, markLines, placeAfterBlocks, type ProjectionResult } from "../incoming/sourceprojection";
 import { typedTextToMarkdown } from "../incoming/typedtext";
 
 const CALLOUT_HEAD = /^>\s*\[!/;
@@ -25,6 +25,8 @@ export function typedBody(body: string): string {
 	const lines = body.split("\n");
 	const out: string[] = [];
 	let fence: string | null = null;
+	// Last line of what was just taken out, so a callout right after another is one placed block.
+	let removedTo = -2;
 	for (let at = 0; at < lines.length; at++) {
 		const line = lines[at];
 		const marker = FENCE.exec(line)?.[1];
@@ -38,17 +40,24 @@ export function typedBody(body: string): string {
 			out.push(line);
 			continue;
 		}
+		let end = at;
 		if (CALLOUT_HEAD.test(line)) {
-			let end = at;
 			while (end + 1 < lines.length && lines[end + 1].startsWith(">") && !CALLOUT_HEAD.test(lines[end + 1])) end++;
-			if (lines.slice(at, end + 1).some(isPluginIdLine)) {
-				// With the blank line it was put in with (sourceprojection's placeAfterBlocks).
-				const blankAfter = end + 1 >= lines.length || lines[end + 1].trim() === "";
-				if (out.length > 0 && out[out.length - 1].trim() === "" && blankAfter) out.pop();
-				else if (out.length === 0 && end + 1 < lines.length && blankAfter) end++;
-				at = end;
-				continue;
+			if (!lines.slice(at, end + 1).some(isPluginIdLine)) end = -1;
+		} else if (!isTypedIdLine(line)) {
+			end = -1;
+		}
+		if (end !== -1) {
+			// With the blank line placeAfterBlocks (sourceprojection.ts) set it
+			// apart by: the one before it, else — at the top, after a fence — the one after.
+			let blankAfter = false;
+			if (at !== removedTo + 1) {
+				if (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
+				else blankAfter = end + 1 < lines.length && lines[end + 1].trim() === "";
 			}
+			removedTo = end;
+			at = blankAfter ? end + 1 : end;
+			continue;
 		}
 		if (isPluginIdLine(line)) continue;
 		out.push(line);
@@ -85,7 +94,7 @@ export function projectTyped(base: string, tabletText: string, marks: ImportedMa
 			continue;
 		}
 		const at = Math.min(mark.afterParagraph, lines.length - 1);
-		blocks.set(at, joinBlocks(blocks.get(at) ?? [], mark.typed?.split("\n") ?? remarkCallout(mark)));
+		blocks.set(at, joinBlocks(blocks.get(at) ?? [], markLines(mark)));
 		placed++;
 	}
 	return { markdown: placeAfterBlocks(lines, blocks), placed, unplaced: [], unapplied };

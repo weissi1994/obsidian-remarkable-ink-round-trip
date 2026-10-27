@@ -10,7 +10,67 @@
 import { GenerationError } from "rmapi-js";
 
 import { TransportError } from "./http";
-import { adviseFailure, classifyFailure } from "./failure";
+import { adviseFailure, classifyFailure, statusOf } from "./failure";
+import type { RawSyncApi } from "./notebook";
+
+/** The root an account without one yet (a fresh account) reads as: nothing on it. */
+export const EMPTY_ROOT_HASH = "0".repeat(64);
+
+/** Statuses a refused root write comes back with: 412 from reMarkable, 409 or a bare 500 from rmfakecloud. */
+const REFUSED_ROOT_WRITE = [409, 412, 500];
+
+/**
+ * A root write the server refused with a bare status rather than rmapi-js'
+ * "precondition failed": taken as a generation conflict, so the write is
+ * tried again on a freshly read root — safe, as every retry re-reads the
+ * root and checks what it expects there again.
+ */
+export class RootWriteRefusedError extends GenerationError {
+	constructor(readonly status: number) {
+		super();
+		this.message = `the reMarkable cloud refused the root write (HTTP ${status}); root generation was stale?`;
+	}
+}
+
+/**
+ * Teach rmapi-js' raw API (in place, so its high-level calls get it too) two
+ * things the servers do: an account with no root yet answers without a hash
+ * — read as an empty account at generation 0, whose first write makes the
+ * root, as a tablet's would; and a refused root write may come back as a
+ * bare 409/412/500 (RootWriteRefusedError). Any other unexpected root answer
+ * becomes a readable error instead of the validator's.
+ */
+export function handleRootQuirks<T extends Pick<RawSyncApi, "getRootHash" | "getEntries" | "putRootHash">>(api: T): T {
+	const getRootHash = api.getRootHash.bind(api);
+	const getEntries = api.getEntries.bind(api);
+	const putRootHash = api.putRootHash.bind(api);
+	const patch: Pick<RawSyncApi, "getRootHash" | "getEntries" | "putRootHash"> = {
+		getRootHash: async () => {
+			try {
+				return await getRootHash();
+			} catch (error) {
+				if (!(error instanceof Error) || error.name !== "ZodError") throw error;
+				const fields = ((error as Error & { issues?: { path?: unknown[] }[] }).issues ?? []).map((issue) => (issue.path ?? []).join("."));
+				if (fields.length > 0 && fields.every((field) => field === "hash")) return [EMPTY_ROOT_HASH, 0, 3];
+				throw new Error(
+					`The reMarkable cloud answered with an account root this plugin cannot read (${fields.join(", ") || "unexpected form"}). ` +
+						"Is the address of a self-hosted cloud right?",
+				);
+			}
+		},
+		getEntries: (id, hash) => (hash === EMPTY_ROOT_HASH ? Promise.resolve({ entries: [] }) : getEntries(id, hash)),
+		putRootHash: async (hash, generation) => {
+			try {
+				return await putRootHash(hash, generation);
+			} catch (error) {
+				const status = statusOf(error);
+				if (status !== undefined && REFUSED_ROOT_WRITE.includes(status)) throw new RootWriteRefusedError(status);
+				throw error;
+			}
+		},
+	};
+	return Object.assign(api, patch);
+}
 
 /**
  * Writing to the cloud means updating the account's shared root listing. If

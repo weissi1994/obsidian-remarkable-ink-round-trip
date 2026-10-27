@@ -8,6 +8,7 @@
 
 import type { MappingTable } from "./id/mapping";
 import type { PendingSheet } from "./ink/handsheet";
+import type { VanishedNotes } from "./sync/reconcile";
 import {
 	DEFAULT_MARK_STYLES,
 	MARK_STYLE_LABELS,
@@ -52,6 +53,8 @@ export interface RoundTripSettings {
 	 * another copy of the vault leaves them alone (SyncState.settlePending).
 	 */
 	installId: string;
+	/** Synced notes the last syncs found missing from this vault at once (SyncEngine vanishSettled); this device's own. */
+	vanishedNotes: VanishedNotes | null;
 	/**
 	 * This device syncs on its own: at startup, on the interval and when a
 	 * note changes — while no other copy of the vault holds the sync lease
@@ -159,6 +162,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	syncStateFolder: "reMarkable/.sync",
 	archiveFolder: "reMarkable/Archive",
 	installId: "",
+	vanishedNotes: null,
 	autoSync: true,
 	deviceLabel: "",
 	notebookMode: "handwriting",

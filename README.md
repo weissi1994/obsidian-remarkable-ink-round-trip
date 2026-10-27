@@ -109,8 +109,11 @@ what was read, what went into which note, and what was sent.
 Nothing is ever deleted for good: notes go to the archive folder, notebooks to the
 tablet's trash. A note that disappears without Obsidian seeing it deleted (a
 vault sync still catching up, say) has its notebook trashed only if it is still
-missing on the next sync. Switching to a different reMarkable account or a
-self-hosted endpoint archives, trashes and sends nothing.
+missing on the next sync; when many notes disappear at once (deleted while
+Obsidian was closed), only once they have stayed missing for three syncs and an
+hour. Switching to a different reMarkable account or a self-hosted endpoint
+archives, trashes and sends nothing. A fresh self-hosted account that no tablet
+has synced to yet works too.
 
 ### Typed-text notebooks (experimental)
 

@@ -391,4 +391,26 @@ describe("updating a notebook in place", () => {
 		expect(announced[1]).toEqual({ hash: result.hash, pageIds: result.pageIds });
 		expect(cloud.hashOf(docId)).toBe(result.hash);
 	});
+
+	it("removes a page that goes from a notebook the tablet never gave per-page records, and keeps its size current", async () => {
+		const cloud = fakeCloud();
+		const sent = await sendNotebook(cloud.api, "Plan", [page(100), page(300), page(500)], { retry: NO_WAIT });
+		const [p1, p2, p3] = sent.pageIds;
+		const update = (hash: string) =>
+			sendNotebookUpdate(cloud.api, sent.docId, "Plan", [page(100), page(320)], { expectedHash: hash, pageIds: sent.pageIds, retry: NO_WAIT });
+		const first = await update(sent.hash);
+		const { files, content, order } = await contentOf(cloud, sent.docId);
+		expect(order).toEqual([p1, p2]);
+		expect(files.has(`${sent.docId}/${p3}.rm`)).toBe(false);
+		expect(content.sizeInBytes).toBe(String(page(100).length + page(320).length));
+		// Sent again as it is: the page stays gone, nothing is written.
+		const writes = cloud.rootWrites();
+		await update(first.hash);
+		expect((await contentOf(cloud, sent.docId)).order).toEqual([p1, p2]);
+		expect(cloud.rootWrites()).toBe(writes);
+		// A file the page list does not name (left by an earlier version) is not a page.
+		const orphaned = await onTablet(cloud, sent.docId, (files) => files.set(`${sent.docId}/${p3}.rm`, page(500)));
+		await update(orphaned);
+		expect((await contentOf(cloud, sent.docId)).order).toEqual([p1, p2]);
+	});
 });

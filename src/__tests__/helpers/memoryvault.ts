@@ -147,6 +147,10 @@ export function memoryVault() {
 			const docId = docIdOf(file.content);
 			if (docId !== undefined) deleted.add(docId);
 		},
+		/** Gone without a delete event: deleted while Obsidian was closed, or by a sync tool. */
+		removeUnseen(path: string): void {
+			if (!files.delete(path)) throw new Error(`no ${path}`);
+		},
 		restore(path: string): string {
 			const file = trash.get(path);
 			if (file === undefined) throw new Error(`nothing to restore at ${path}`);

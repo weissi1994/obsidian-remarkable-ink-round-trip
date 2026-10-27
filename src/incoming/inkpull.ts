@@ -31,7 +31,7 @@ import type { DocumentFile, DocumentScan, ImportedMark, InkHighlight, PullDeps, 
 import { TEXT_ONLY_KINDS } from "./pull";
 import type { Stroke } from "./rmlines";
 import { idKey, parseRmScene, SceneLine } from "./rmscene";
-import { remarkId } from "./remarkid";
+import { remarkId, typedTextId } from "./remarkid";
 import { pageTypedMarkdown, typedTextToMarkdown } from "./typedtext";
 
 /** Freehand highlighter pens (rmscene HIGHLIGHTER_1 / HIGHLIGHTER_2). */
@@ -304,7 +304,8 @@ export async function collectInkAnnotations(
 	}
 
 	// The device's own page order, for numbering pages the owner added, and
-	// the pages it deleted, whose files may stay.
+	// the pages it deleted, whose files may stay. A file the order does not
+	// list is not a page.
 	let deviceOrder: string[] = [];
 	let deletedPages = new Set<string>();
 	const contentFile = allFiles.find((file) => file.id === `${entry.deviceDocId}.content`);
@@ -317,7 +318,10 @@ export async function collectInkAnnotations(
 			deviceOrder = [];
 		}
 	}
-	const shownFiles = strokeFiles.filter((file) => !deletedPages.has(pageIdOfFile(file.id) ?? ""));
+	const shownFiles = strokeFiles.filter((file) => {
+		const id = pageIdOfFile(file.id) ?? "";
+		return deviceOrder.length > 0 ? deviceOrder.includes(id) : !deletedPages.has(id);
+	});
 	if (entry.ink?.mode === "typed") return collectTypedText(entry, shownFiles, deviceOrder, scan, deps);
 
 	let render: InkRender | null = null;
@@ -370,7 +374,8 @@ export async function collectInkAnnotations(
 			if (typed === "unreadable") {
 				skip(typedAt, typedOrder, `text typed on ${page === undefined ? "a page you added" : `page ${page}`} — not read: its text could not be read`, true);
 			} else if (typed !== null) {
-				collected.push({ page: typedAt, order: typedOrder, mark: { kind: "note", page: typedAt, typed: typed.markdown } });
+				const typedId = typedTextId(pageId ?? file.id, typed.markdown);
+				collected.push({ page: typedAt, order: typedOrder, mark: { kind: "note", page: typedAt, typed: typed.markdown, typedId } });
 				scan.interpretedMarks++;
 				deps.log?.(`  ${file.id}: typed text, ${typed.markdown.split("\n").length} paragraph(s)`);
 			}
@@ -591,7 +596,9 @@ async function collectTypedText(
 				const position = deviceOrder.indexOf(id ?? "") + 1 || index + 1;
 				const typed = pageTypedMarkdown(scene);
 				if (typed === "unreadable") skip(`text typed on the page you added (page ${position}) — not read: its text could not be read`);
-				else if (typed !== null) marks.push({ kind: "note", page: 1, afterParagraph: END, typed: typed.markdown });
+				else if (typed !== null) {
+					marks.push({ kind: "note", page: 1, afterParagraph: END, typed: typed.markdown, typedId: typedTextId(id ?? file.id, typed.markdown) });
+				}
 				const strokes = scene.lines.map((line) => line.stroke);
 				if (strokes.length === 0) continue;
 				const picture = await pictureOf(

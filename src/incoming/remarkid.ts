@@ -75,6 +75,28 @@ export const CONFLICT_ID_PREFIX = `${REMARK_ID_PREFIX}conflict-`;
 /** Block id of the note's one callout of tablet changes not applied (sync/twoway.ts). */
 export const PENDING_ID = `${REMARK_ID_PREFIX}pending`;
 
+/**
+ * Block-id prefix of text typed on the tablet and imported (sync/twoway.ts):
+ * the rest is typedTextId, so the note knows the text came in even after
+ * the owner edited it.
+ */
+export const TYPED_ID_PREFIX = `${REMARK_ID_PREFIX}typed-`;
+
+/** 12 hex digits naming the typed text of one page as imported: its page id and its markdown. */
+export function typedTextId(pageId: string, markdown: string): string {
+	return textId(`${pageId}\n${markdown}`);
+}
+
+/** The block-id line placed after imported typed text (`^ink-typed-…`). */
+export function typedIdLine(id: string): string {
+	return `^${TYPED_ID_PREFIX}${id}`;
+}
+
+/** Whether a note line is imported typed text's block-id line. */
+export function isTypedIdLine(line: string): boolean {
+	return new RegExp(`^\\^${TYPED_ID_PREFIX}[0-9a-f]+\\s*$`).test(line.trim());
+}
+
 /** A block-id line of another kind the plugin writes (`> ^ink-conflict-…`, `> ^ink-pending`). */
 export function blockIdLine(id: string, quoted = true): string {
 	return `${quoted ? "> " : ""}^${id}`;
@@ -82,11 +104,13 @@ export function blockIdLine(id: string, quoted = true): string {
 
 /**
  * Whether a line is any block-id line the plugin writes — a remark's, a
- * clash's or the pending callout's. They are for Obsidian; on paper they
- * would be stray "^ink-…" lines.
+ * clash's, the pending callout's or imported typed text's. They are for
+ * Obsidian; on paper they would be stray "^ink-…" lines.
  */
 export function isPluginIdLine(line: string): boolean {
-	return new RegExp(`^(>\\s*)*\\^${REMARK_ID_PREFIX}(conflict-[0-9a-f]+(-\\d+)?|pending|[0-9a-f]+)\\s*$`).test(line.trim());
+	return new RegExp(`^(>\\s*)*\\^${REMARK_ID_PREFIX}(conflict-[0-9a-f]+(-\\d+)?|pending|typed-[0-9a-f]+|[0-9a-f]+)\\s*$`).test(
+		line.trim(),
+	);
 }
 
 /** A remark's ink as an earlier import kept it: device units, absolute or from its own corner. */

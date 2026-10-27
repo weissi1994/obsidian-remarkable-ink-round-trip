@@ -34,8 +34,10 @@
  * last merge's, that page's changes would look undone.
  *
  * Text typed on a handwritten page comes in as a mark carrying it, placed
- * like a free remark on its page. A typed-text notebook needs no
- * projection: the page's text is the tablet's side as it is
+ * like a free remark on its page, with a block id after it (remarkid.ts
+ * typedTextId): once the note has that id, the text is the note's, and an
+ * edit in the vault does not make it come in a second time. A typed-text
+ * notebook needs no projection: the page's text is the tablet's side as it is
  * (sync/typednote.ts projectTyped), its ink placed after the paragraph it
  * belongs to.
  *
@@ -63,6 +65,7 @@ import {
 	isSameRemark,
 	REMARK_ID_PREFIX,
 	remarkIdLine,
+	typedIdLine,
 } from "../incoming/remarkid";
 import { projectOntoSource } from "../incoming/sourceprojection";
 import { merge3 } from "./merge3";
@@ -267,20 +270,30 @@ export function mergeTabletChanges(input: TabletChanges): {
 			projected: null,
 		};
 	}
+	const complete = !input.marks.some((mark) => mark.kind === "skipped" && mark.unreadPage === true);
 	const settled = settleRemarks(ours, marks, input.remarkInk);
+	// Typed text whose block id the merge base has is the tablet's side
+	// already when the text projected onto has it too; one the base lacks
+	// came in since and is the note's, however the owner changed it.
+	const mergeBase = input.mergedBase !== undefined && complete ? input.mergedBase : input.base;
+	const toPlace = settled.marks.filter((mark) => {
+		if (mark.typedId === undefined) return true;
+		const line = typedIdLine(mark.typedId);
+		return mergeBase?.includes(line) === true ? input.base?.includes(line) !== true : !ours.includes(line);
+	});
 	const typedPage = marks.find((mark) => mark.tabletText !== undefined)?.tabletText;
 	const projected =
 		input.base === null
 			? null
 			: typedPage !== undefined
-				? projectTyped(input.base, typedPage, settled.marks)
+				? projectTyped(input.base, typedPage, toPlace)
 				: input.layout === null
 					? null
 					: projectOntoSource({
 							source: input.base,
 							layout: input.layout,
 							highlights: input.highlights,
-							marks: settled.marks,
+							marks: toPlace,
 							styles: input.styles,
 							erasedAs: input.erasedAs,
 							listUnplaced: false,
@@ -312,7 +325,6 @@ export function mergeTabletChanges(input: TabletChanges): {
 	// The projection trims the end; the note keeps the base's.
 	const tail = input.base.slice(input.base.trimEnd().length);
 	const theirs = withoutPendingCallout(projected.markdown + tail);
-	const complete = !input.marks.some((mark) => mark.kind === "skipped" && mark.unreadPage === true);
 	let base = withoutPendingCallout(input.base);
 	let tablet = theirs;
 	if (input.mergedBase !== undefined && complete) {

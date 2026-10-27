@@ -14,6 +14,7 @@ import { editTypedPage } from "../ink/textedit";
 import { splitNote } from "../preprocess/preprocess";
 import { notesNeedingUpload, sendNote, type NoteInput, type SendDeps, type SentRecord } from "../sync/send";
 import { mergeTabletChanges } from "../sync/twoway";
+import { placeAfterBlocks, markLines } from "../incoming/sourceprojection";
 import { typedBody } from "../sync/typednote";
 import { sendNotebook, sendNotebookUpdate } from "../transport/notebook";
 import { fakeCloud } from "./helpers/fakecloud";
@@ -279,5 +280,29 @@ describe("typed-text notebooks", () => {
 		const scene = parseRmScene(await rig.page());
 		expect(scene.text).toBeUndefined();
 		expect(scene.lines.length).toBeGreaterThan(0);
+	});
+});
+
+describe("the typed body of a note with placed blocks", () => {
+	const callout = ["> [!note] Remark", "> ![[r.png]]", "> ^ink-3f9a2c1b0d4e"];
+	const other = ["> [!note] Remark", "> ^ink-0123456789ab"];
+	const bodies: [string, Map<number, string[]>][] = [
+		["Text\n```\ncode\n```\nRight after", new Map([[2, callout]])],
+		["Text\n```\ncode\n```\n\nAfter a blank", new Map([[2, callout]])],
+		["Text\n```\ncode\n```", new Map([[2, callout]])],
+		["Para\n```\ncode\n```", new Map([[0, callout]])],
+		["Para one\n\nPara two\n", new Map([[0, [...callout, ...other]]])],
+		["Top line\n\nNext", new Map([[-1, callout]])],
+		["\nStarts blank", new Map([[-1, callout]])],
+		["Only line", new Map([[0, callout]])],
+	];
+	it.each(bodies)("is the note's text again, blank lines included: %j", (body, blocks) => {
+		expect(typedBody(placeAfterBlocks(body.split("\n"), blocks))).toBe(body);
+	});
+
+	it("drops imported typed text's block id with the blank line before it", () => {
+		const placed = placeAfterBlocks(["Para", "", "Next"], new Map([[0, markLines({ kind: "note", typed: "Typed", typedId: "abcdef012345" })]]));
+		expect(placed).toBe("Para\n\nTyped\n\n^ink-typed-abcdef012345\n\nNext");
+		expect(typedBody(placed)).toBe("Para\n\nTyped\n\nNext");
 	});
 });

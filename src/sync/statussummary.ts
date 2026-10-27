@@ -142,3 +142,18 @@ export function classifyNotes(input: {
 	}
 	return out;
 }
+
+/**
+ * Why notes are held back, after a run (SyncEngine.held): a full sync
+ * looked at every note, so its holds replace all; a run over some notes (a
+ * watched change, a send by hand) only replaces those notes' holds — the
+ * others' still stand.
+ */
+export function heldAfterRun(
+	before: ReadonlyMap<string, string>,
+	run: { held: ReadonlyMap<string, string>; covered: ReadonlySet<string>; full: boolean },
+): Map<string, string> {
+	const after = run.full ? new Map<string, string>() : new Map([...before].filter(([path]) => !run.covered.has(path)));
+	for (const [path, why] of run.held) after.set(path, why);
+	return after;
+}

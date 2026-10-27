@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { MappingEntry } from "../id/mapping";
 import type { DeviceItem } from "../sync/deviceimport";
-import { FailureStreak, NOTICE_AFTER, runFailure } from "../sync/failures";
+import { FailureStreak, NOTICE_AFTER, RunQueue, runFailure } from "../sync/failures";
 import { leaseDecision, leaseDuration, leaseStanding, parseLease, renewedLease } from "../sync/lease";
-import { foreignListing, plan, type ReconcilePolicy } from "../sync/reconcile";
-import { classifyNotes } from "../sync/statussummary";
-import { SyncState } from "../sync/syncstate";
+import { foreignListing, plan, VANISH_SETTLE_MS, type ReconcilePolicy } from "../sync/reconcile";
+import { classifyNotes, heldAfterRun } from "../sync/statussummary";
+import { PENDING_STALE_MS, SyncState } from "../sync/syncstate";
 import { frontmatterTags, mergeTags } from "../sync/tags";
 import { createFolder, editTags, readTags } from "../transport/metadata";
 import { NotebookChangedError } from "../transport/notebook";
@@ -55,12 +55,21 @@ describe("the sync lease", () => {
 
 	it("is taken when free or another copy's, renewed only past half its time", () => {
 		const duration = leaseDuration(5);
+		const self = { ...ME, autoSync: true };
 		expect(duration).toBe(15 * 60_000);
 		expect(leaseDuration(20)).toBe(60 * 60_000);
-		expect(renewedLease(null, ME, now, duration)).toEqual({ ...ME, expiresAt: now + duration });
-		expect(renewedLease({ installId: "other", device: "Desktop", expiresAt: now + duration }, ME, now, duration)?.installId).toBe("me");
-		expect(renewedLease({ ...ME, expiresAt: now + duration * 0.6 }, ME, now, duration)).toBeNull();
-		expect(renewedLease({ ...ME, expiresAt: now + duration * 0.4 }, ME, now, duration)).toEqual({ ...ME, expiresAt: now + duration });
+		expect(renewedLease(null, self, now, duration)).toEqual({ ...ME, expiresAt: now + duration });
+		expect(renewedLease({ installId: "other", device: "Desktop", expiresAt: now + duration }, self, now, duration)?.installId).toBe("me");
+		expect(renewedLease({ ...ME, expiresAt: now + duration * 0.6 }, self, now, duration)).toBeNull();
+		expect(renewedLease({ ...ME, expiresAt: now + duration * 0.4 }, self, now, duration)).toEqual({ ...ME, expiresAt: now + duration });
+	});
+
+	it("is never taken by a copy that does not sync on its own, even on a manual run", () => {
+		const duration = leaseDuration(5);
+		const self = { ...ME, autoSync: false };
+		expect(renewedLease(null, self, now, duration)).toBeNull();
+		expect(renewedLease({ installId: "other", device: "Desktop", expiresAt: now - 1 }, self, now, duration)).toBeNull();
+		expect(renewedLease({ installId: "other", device: "Desktop", expiresAt: now + duration }, self, now, duration)).toBeNull();
 	});
 
 	it("reads a damaged or conflicted lease file as no lease", async () => {
@@ -225,6 +234,26 @@ describe("another copy of the vault", () => {
 		expect((await rig.tablet.listing()).filter((item) => item.type === "DocumentType")).toHaveLength(1);
 		expect(rig.engine.held.get("Notes/Plan.md")).toMatch(/sync state has not arrived/);
 		expect(docId).toBeDefined();
+	});
+
+	it("sends such a note once the notebook of its name is older than a send in flight can be", async () => {
+		// As after Stop syncing with the notebook kept and a first send cut short, or a fresh sync state on the account.
+		const { rig, id } = await synced();
+		await rig.ports.records.set({});
+		rig.later(PENDING_STALE_MS);
+		await rig.engine.sync();
+		expect(rig.engine.held.size).toBe(0);
+		const record = rig.recordOf("Notes/Plan.md");
+		expect(record?.deviceDocId).not.toBe(id);
+		expect((await rig.tablet.describe(id))?.parent).not.toBe("trash");
+	});
+
+	it("sends such a note at once when the owner asks for it by hand", async () => {
+		const { rig, id } = await synced();
+		await rig.ports.records.set({});
+		await rig.engine.send(["Notes/Plan.md"], { optIn: true });
+		expect(rig.engine.held.size).toBe(0);
+		expect(rig.recordOf("Notes/Plan.md")?.deviceDocId).not.toBe(id);
 	});
 
 	it("sends a note it has no record of when the notebook of its name nobody knows lies outside the folder its note mirrors", async () => {
@@ -431,5 +460,117 @@ describe("engine regressions", () => {
 		expect(rig.table[docId]).toMatchObject({ notePath: "Notes/Sub/Roadmap.md", devicePath: "Obsidian/Notes/Sub" });
 		expect(await rig.tablet.describe(id)).toMatchObject({ name: "Roadmap" });
 		await expectQuiet(rig);
+	});
+});
+
+describe("synced notes deleted while Obsidian was closed", () => {
+	async function fourSynced() {
+		const rig = syncRig();
+		for (const name of ["A", "B", "C", "D"]) rig.vault.create(`Notes/${name}.md`, note(name));
+		await rig.engine.sync();
+		const ids = ["A", "B", "C"].map((name) => rig.recordOf(`Notes/${name}.md`)?.deviceDocId ?? "");
+		const kept = ["A", "B", "C"].map((name) => [`Notes/${name}.md`, rig.vault.read(`Notes/${name}.md`) ?? ""] as const);
+		for (const [path] of kept) rig.vault.removeUnseen(path);
+		return { rig, ids, kept };
+	}
+	const parents = async (rig: SyncRig, ids: string[]) => Promise.all(ids.map(async (id) => (await rig.tablet.describe(id))?.parent));
+	const vanishLines = (rig: SyncRig) => rig.log.filter((line) => /synced notes (are not in|stayed away from) the vault/.test(line));
+
+	it("are held as still arriving at first, then taken as deleted once the same notes stayed away; each said once", async () => {
+		const { rig, ids } = await fourSynced();
+		for (let run = 0; run < 4; run++) await rig.engine.sync();
+		expect(await parents(rig, ids)).not.toContain("trash");
+		expect(vanishLines(rig)).toHaveLength(1);
+		rig.later(VANISH_SETTLE_MS);
+		await rig.engine.sync();
+		await rig.engine.sync();
+		expect(await parents(rig, ids)).toEqual(["trash", "trash", "trash"]);
+		expect(vanishLines(rig)).toHaveLength(2);
+		expect(rig.recordOf("Notes/D.md")?.state).toBeUndefined();
+		await expectQuiet(rig);
+	});
+
+	it("are not taken as deleted when they arrive after all", async () => {
+		const { rig, ids, kept } = await fourSynced();
+		await rig.engine.sync();
+		await rig.engine.sync();
+		for (const [path, content] of kept) rig.vault.create(path, content);
+		rig.later(VANISH_SETTLE_MS);
+		await rig.engine.sync();
+		await rig.engine.sync();
+		expect(await parents(rig, ids)).not.toContain("trash");
+		expect(rig.ports.vanished?.get()).toBeNull();
+	});
+});
+
+describe("engine runs one after another", () => {
+	it("go on after a run, or its wrap-up, throws; no run rejects", async () => {
+		const errors: unknown[] = [];
+		const queue = new RunQueue((error) => errors.push(error));
+		const ran: string[] = [];
+		const first = queue.enqueue(() => Promise.reject(new Error("ENOENT: note deleted mid-run")));
+		const second = queue.enqueue(async () => {
+			ran.push("second");
+		});
+		await expect(first).resolves.toBeUndefined();
+		await second;
+		expect(ran).toEqual(["second"]);
+		expect(errors).toHaveLength(1);
+		const failingReport = new RunQueue(() => {
+			throw new Error("console gone");
+		});
+		await failingReport.enqueue(() => Promise.reject(new Error("x")));
+		await failingReport.enqueue(async () => {
+			ran.push("third");
+		});
+		expect(ran).toEqual(["second", "third"]);
+	});
+});
+
+describe("why notes are held back", () => {
+	it("keeps other notes' reasons through a run over some notes, and starts over after a full sync", () => {
+		const before = new Map([
+			["Notes/A.md", "another copy of the vault is sending it right now"],
+			["Notes/B.md", "its notebook's name or folder could not be brought along yet"],
+		]);
+		const partial = heldAfterRun(before, { held: new Map(), covered: new Set(["Notes/B.md"]), full: false });
+		expect([...partial]).toEqual([["Notes/A.md", "another copy of the vault is sending it right now"]]);
+		const full = heldAfterRun(before, { held: new Map([["Notes/C.md", "c"]]), covered: new Set(), full: true });
+		expect([...full]).toEqual([["Notes/C.md", "c"]]);
+	});
+
+	it("are told by the engine: which notes a run looked at, and whether it was a full sync", async () => {
+		const { rig } = await synced();
+		await rig.restart();
+		await rig.engine.send(["Notes/Plan.md"], { auto: true });
+		expect([...rig.engine.covered]).toEqual(["Notes/Plan.md"]);
+		expect(rig.engine.fullRun).toBe(false);
+		await rig.engine.sync();
+		expect(rig.engine.fullRun).toBe(true);
+	});
+});
+
+describe("the shared state folder emptied by another copy", () => {
+	const entry = (docId: string): MappingEntry => ({ docId, notePath: `Notes/${docId}.md`, deviceDocId: `nb-${docId}`, uploadedAt: "", contentHash: "", format: "ink" });
+	const X = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+	it("drops the last record once its file is gone with the emptied notes folder", async () => {
+		const { fs, files } = memoryFs();
+		const here = new SyncState(fs, "state", "a");
+		await here.saveMappings({ [X]: entry(X) });
+		const table = await here.loadMappings();
+		// The other copy removed the note's file (Stop syncing there); git drops the emptied folder with it.
+		files.delete(`state/notes/${X}.json`);
+		expect(await fs.exists("state/notes")).toBe(false);
+		expect(await here.refresh(table)).toEqual({});
+	});
+
+	it("keeps the records when the whole state folder is gone (moved or renamed)", async () => {
+		const { fs, files } = memoryFs();
+		const here = new SyncState(fs, "state", "a");
+		await here.saveMappings({ [X]: entry(X) });
+		const table = await here.loadMappings();
+		for (const path of [...files.keys()]) files.delete(path);
+		expect(await here.refresh(table)).toEqual(table);
 	});
 });

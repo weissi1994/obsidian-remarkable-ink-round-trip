@@ -53,16 +53,20 @@ export function leaseDuration(intervalMinutes: number): number {
 }
 
 /**
- * The lease this copy writes, or null when the one there is ours with more
- * than half its time left: renewing on every run would make every sync a
- * change for the vault's own sync to carry.
+ * The lease this copy writes after a run, or null when it writes none: a
+ * copy that does not sync on its own (`autoSync` off) never takes it — a
+ * manual run there would keep the copy that does from syncing — and one
+ * that is ours with more than half its time left is not renewed: renewing
+ * on every run would make every sync a change for the vault's own sync to
+ * carry.
  */
 export function renewedLease(
 	lease: SyncLease | null,
-	self: { installId: string; device: string },
+	self: { installId: string; device: string; autoSync: boolean },
 	now: number,
 	durationMs: number,
 ): SyncLease | null {
+	if (!self.autoSync) return null;
 	if (lease !== null && lease.installId === self.installId && lease.device === self.device && lease.expiresAt - now > durationMs / 2) {
 		return null;
 	}

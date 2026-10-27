@@ -10,6 +10,7 @@
 
 import { generateDocId } from "../../id/docid";
 import type { MappingTable } from "../../id/mapping";
+import type { VanishedNotes } from "../../sync/reconcile";
 import { buildInkPageRm } from "../../ink/rmwrite";
 import { DEVICE_PROFILES } from "../../ink/inkrender";
 import { findNewNotebooks, noteFileName, type DeviceItem } from "../../sync/deviceimport";
@@ -73,6 +74,10 @@ export function syncRig(options: RigOptions = {}) {
 	/** The account the plugin is paired with: switchable, as an endpoint or account switch. */
 	let account = cloud;
 	let api = cloud.api;
+	/** The engine's clock runs this far ahead of the wall clock (sends stamp the wall clock). */
+	let ahead = 0;
+	/** This copy's own data: survives a restart, unlike the engine. */
+	let vanished: VanishedNotes | null = null;
 
 	const records: RecordStore = {
 		get: () => table,
@@ -215,6 +220,13 @@ export function syncRig(options: RigOptions = {}) {
 		},
 		policy,
 		log: (line) => log.push(line),
+		now: () => Date.now() + ahead,
+		vanished: {
+			get: () => vanished,
+			set: async (seen) => {
+				vanished = seen;
+			},
+		},
 	};
 	let engine = new SyncEngine(ports);
 
@@ -265,6 +277,10 @@ export function syncRig(options: RigOptions = {}) {
 		},
 		get table() {
 			return table;
+		},
+		/** Move the engine's clock on. */
+		later(ms: number): void {
+			ahead += ms;
 		},
 		/** Make every state write (and whatever else calls it) fail from now on; null heals. */
 		failWrites(hook: (() => void) | null): void {

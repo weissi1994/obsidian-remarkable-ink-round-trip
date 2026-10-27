@@ -4,13 +4,15 @@
  *
  * Rewriting the page from scratch would give every character a new id, and
  * the owner's ink anchored to a character would lose its place. So the
- * page's text sequence is diffed against the new text, character by
- * character with its emphasis and paragraph style, and only the difference
- * is written as CRDT operations under the plugin's author: removed
- * characters become tombstones (deleted_length) under their own ids, new
- * runs are inserted between their neighbours (left/right ids), a changed
- * paragraph style is a new paragraph break. Every other block of the page —
- * the owner's strokes, groups, anchors, layers — is kept byte for byte.
+ * page's text sequence is diffed against the new text — paragraphs first,
+ * then character by character with its emphasis and paragraph style inside
+ * the paragraphs that changed, a range too large to diff replaced whole —
+ * and only the difference is written as CRDT operations under the plugin's
+ * author: removed characters become tombstones (deleted_length) under their
+ * own ids, new runs are inserted between their neighbours (left/right ids),
+ * a changed paragraph style is a new paragraph break. Every other block of
+ * the page — the owner's strokes, groups, anchors, layers — is kept byte for
+ * byte, and so are the text block's fields this does not know, where they were.
  *
  * Anything this cannot do exactly is refused, never approximated: the edit
  * is read back with the page reader and must order and read as intended.
@@ -27,6 +29,7 @@ import {
 	parseRmScene,
 	type RawRootText,
 	readRootTextBlock,
+	type RootTextTails,
 	SEQUENCE_END,
 	type StyleEntry,
 	type TextChar,
@@ -85,6 +88,8 @@ interface Item {
 	right: ItemId;
 	deletedLength: number;
 	value: string | number;
+	/** Fields the page had on this item that the reader does not know, written back as they were. */
+	tails?: RootTextTails["perItem"][number];
 }
 
 interface Block {
@@ -108,6 +113,69 @@ function blocksOf(page: Uint8Array): Block[] | null {
 }
 
 const sameId = (a: ItemId, b: ItemId) => a.author === b.author && a.counter === b.counter;
+
+/** A base range `o` replaced by the new range `x`. */
+interface Hunk {
+	oStart: number;
+	oEnd: number;
+	xStart: number;
+	xEnd: number;
+}
+
+/**
+ * Most items one Myers diff takes on: its trace grows with the square of
+ * the edit, so a range larger than this is replaced whole instead.
+ */
+const MAX_DIFF = 2000;
+
+/**
+ * The hunks turning `a` into `b`, offset by `ao`/`bo`: common ends left out,
+ * the rest by Myers' diff (merge3.ts diffHunks) while it is small enough,
+ * else one replacement.
+ */
+function boundedHunks(a: readonly string[], b: readonly string[], ao = 0, bo = 0): Hunk[] {
+	let start = 0;
+	while (start < a.length && start < b.length && a[start] === b[start]) start++;
+	let end = 0;
+	while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) end++;
+	const restA = a.slice(start, a.length - end);
+	const restB = b.slice(start, b.length - end);
+	if (restA.length === 0 && restB.length === 0) return [];
+	const at = (hunk: Hunk): Hunk => ({
+		oStart: ao + start + hunk.oStart,
+		oEnd: ao + start + hunk.oEnd,
+		xStart: bo + start + hunk.xStart,
+		xEnd: bo + start + hunk.xEnd,
+	});
+	if (restA.length + restB.length > MAX_DIFF) return [at({ oStart: 0, oEnd: restA.length, xStart: 0, xEnd: restB.length })];
+	return diffHunks(restA, restB).map(at);
+}
+
+/**
+ * Token hunks, paragraphs first: paragraphs that are the same are left
+ * alone, and characters are diffed only inside the paragraphs that changed.
+ * Time and memory stay bounded by MAX_DIFF whatever the size of the page.
+ */
+function tokenHunks(a: readonly string[], b: readonly string[]): Hunk[] {
+	// Paragraph units: a break token and the characters up to the next one.
+	const unitsOf = (keys: readonly string[]) => {
+		const starts = [0];
+		keys.forEach((key, at) => {
+			if (key.startsWith("n") && at > 0) starts.push(at);
+		});
+		return { starts, keys: starts.map((from, i) => JSON.stringify(keys.slice(from, starts[i + 1] ?? keys.length))) };
+	};
+	const unitsA = unitsOf(a);
+	const unitsB = unitsOf(b);
+	const tokenAt = (units: { starts: number[] }, unit: number, length: number) => units.starts[unit] ?? length;
+	return boundedHunks(unitsA.keys, unitsB.keys).flatMap((hunk) => {
+		const oStart = tokenAt(unitsA, hunk.oStart, a.length);
+		const oEnd = tokenAt(unitsA, hunk.oEnd, a.length);
+		const xStart = tokenAt(unitsB, hunk.xStart, b.length);
+		const xEnd = tokenAt(unitsB, hunk.xEnd, b.length);
+		return boundedHunks(a.slice(oStart, oEnd), b.slice(xStart, xEnd), oStart, xStart);
+	});
+}
 
 /**
  * Edit the typed text of `page` to read `paragraphs`, as `author` — the
@@ -163,7 +231,7 @@ export function editTypedPage(page: Uint8Array, paragraphs: readonly TypedParagr
 	});
 	const target = tokensOf(paragraphs);
 	const firstStyle = paragraphs[0]?.style ?? "plain";
-	const hunks = diffHunks(
+	const hunks = tokenHunks(
 		device.map((entry) => entry.token.key),
 		target.map((token) => token.key),
 	);
@@ -229,13 +297,18 @@ export function editTypedPage(page: Uint8Array, paragraphs: readonly TypedParagr
 	}
 	if (restyle) {
 		const at = styles.findIndex((entry) => sameId(entry.key, SEQUENCE_END));
+		if (styles[at]?.tail !== undefined) return { kind: "refused", reason: "its first paragraph's style holds fields this cannot keep" };
 		const entry = { key: SEQUENCE_END, timestamp: fresh(), code: PARAGRAPH_STYLES.indexOf(firstStyle) };
 		if (at === -1) styles.unshift(entry);
 		else styles[at] = entry;
 	}
 
-	// The stored items again, split where some of a run's characters went.
+	// The stored items again, split where some of a run's characters went;
+	// an item kept whole keeps the fields this does not know.
 	const items: Item[] = [];
+	const itemSize = new Array<number>(raw.tails.perItem.length).fill(0);
+	for (const char of raw.chars) itemSize[char.item]++;
+	if (itemSize.includes(0)) return { kind: "refused", reason: "its text has an item without characters" };
 	const deadAt = (index: number) => raw.chars[index].value === null || deleted.has(idKey(raw.chars[index].id));
 	for (let start = 0; start < raw.chars.length; ) {
 		const char = raw.chars[start];
@@ -251,12 +324,18 @@ export function editTypedPage(page: Uint8Array, paragraphs: readonly TypedParagr
 			end++;
 		}
 		const run = raw.chars.slice(start, end);
+		const tails = raw.tails.perItem[char.item];
+		const kept = run.length === itemSize[char.item] && dead === (char.value === null);
+		if (!kept && tails.item.length + tails.value.length > 0) {
+			return { kind: "refused", reason: "its text holds fields this cannot keep through the edit" };
+		}
 		items.push({
 			id: char.id,
 			left: char.left,
 			right: run[run.length - 1].right,
 			deletedLength: dead ? run.length : 0,
 			value: dead ? "" : typeof char.value === "number" ? char.value : run.map((one) => one.value as string).join(""),
+			...(kept ? { tails } : {}),
 		});
 		start = end;
 	}
@@ -297,12 +376,13 @@ export function editTypedPage(page: Uint8Array, paragraphs: readonly TypedParagr
 	return { kind: "edited", bytes };
 }
 
-/** The RootText block body, as rmscene writes it (roottext.ts encodeRootText). */
+/** The RootText block body, as rmscene writes it (roottext.ts encodeRootText), with the bytes it does not know where they were. */
 function writeRootText(w: ByteWriter, raw: RawRootText, items: Item[], styles: StyleEntry[]): void {
 	const crdt = (id: ItemId) => ({ part1: id.author, part2: id.counter });
+	const { tails } = raw;
 	w.taggedId(1, crdt(raw.blockId));
 	w.subblock(2, (body) => {
-		body.subblock(1, (outer) =>
+		body.subblock(1, (outer) => {
 			outer.subblock(1, (list) => {
 				list.varuint(items.length);
 				for (const item of items) {
@@ -312,36 +392,55 @@ function writeRootText(w: ByteWriter, raw: RawRootText, items: Item[], styles: S
 						s.taggedId(4, crdt(item.right));
 						s.taggedInt(5, item.deletedLength);
 						const value = item.value;
+						const valueTail = item.tails?.value ?? new Uint8Array(0);
 						if (typeof value === "string") {
-							if (value !== "") s.taggedString(6, value);
+							if (value !== "" || valueTail.length > 0) {
+								const encoded = new TextEncoder().encode(value);
+								s.subblock(6, (v) => {
+									v.varuint(encoded.length);
+									v.u8(1);
+									v.raw(encoded);
+									v.raw(valueTail);
+								});
+							}
 						} else {
 							s.subblock(6, (v) => {
 								v.varuint(0);
 								v.u8(1);
 								v.taggedInt(2, value);
+								v.raw(valueTail);
 							});
 						}
+						if (item.tails !== undefined) s.raw(item.tails.item);
 					});
 				}
-			}),
-		);
-		body.subblock(2, (outer) =>
+				list.raw(tails.itemList);
+			});
+			outer.raw(tails.items);
+		});
+		body.subblock(2, (outer) => {
 			outer.subblock(1, (list) => {
 				list.varuint(styles.length);
-				for (const { key, timestamp, code } of styles) {
+				for (const { key, timestamp, code, tail } of styles) {
 					list.crdtId(crdt(key));
 					list.taggedId(1, crdt(timestamp));
 					list.subblock(2, (v) => {
 						v.tag(1, TAG_BYTE1);
 						v.u8(code);
+						if (tail !== undefined) v.raw(tail);
 					});
 				}
-			}),
-		);
+				list.raw(tails.styleList);
+			});
+			outer.raw(tails.styles);
+		});
+		body.raw(tails.body);
 	});
 	w.subblock(3, (s) => {
 		s.f64(raw.x);
 		s.f64(raw.y);
+		s.raw(tails.position);
 	});
 	w.taggedFloat(4, raw.width);
+	w.raw(tails.block);
 }

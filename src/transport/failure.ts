@@ -56,7 +56,18 @@ function isMissingBytesMethod(message: string): boolean {
 	);
 }
 
+/** The HTTP status a failed request carries (rmapi-js' ResponseError), if any. */
+export function statusOf(error: unknown): number | undefined {
+	const status = (error as { status?: unknown } | null)?.status;
+	return typeof status === "number" && Number.isInteger(status) ? status : undefined;
+}
+
 export function classifyFailure(error: unknown): FailureKind {
+	// rmapi-js' ResponseError keeps the status apart: its message may be just "failed reMarkable request: ".
+	const status = statusOf(error);
+	if (status === 401 || status === 403) return "auth";
+	if (status === 429) return "rate-limit";
+	if (status !== undefined && status >= 500) return "server";
 	const message = textOf(error);
 	// Name resolution first: an offline device produces messages that also
 	// contain the word "failed", which the other buckets would happily claim.

@@ -27,12 +27,17 @@ import {
 	mirroredVaultFolder,
 	plan,
 	vanishedAtOnce,
+	vanishedIds,
+	VANISH_SETTLE_MS,
+	VANISH_SETTLE_RUNS,
+	type VanishedNotes,
 	type Action,
 	type RecordPatch,
 	type ReconcilePolicy,
 	type VaultNote,
 } from "./reconcile";
 import { optedOut, relativeFolderPath } from "./selection";
+import { PENDING_STALE_MS } from "./syncstate";
 import { devicePathOf } from "../transport/metadata";
 import { notesNeedingUpload, sendBatch, type NoteInput, type SendDeps, type SendResult } from "./send";
 import { mergeTags, normalTags, sameTags } from "./tags";
@@ -140,6 +145,14 @@ export interface EnginePorts {
 	failed?: (what: string, error: unknown) => void;
 	/** Run a send in the shared cloud lane (sync/queues.ts PushQueue); run directly when absent. */
 	push?: (work: PushWork) => Promise<void>;
+	/** The clock (epoch ms); Date.now when absent. */
+	now?: () => number;
+	/**
+	 * Notes vanished at once as the last runs saw them, kept with this copy's
+	 * own data (not the shared state: it is about this copy's vault). Absent:
+	 * such notes are never taken as deleted.
+	 */
+	vanished?: { get(): VanishedNotes | null; set(seen: VanishedNotes | null): Promise<void> };
 }
 
 export interface SendOptions {
@@ -170,6 +183,9 @@ function patched(entry: MappingEntry, patch: RecordPatch): MappingEntry {
 export class SyncEngine {
 	/** Notes this engine held back from a send, with why (SyncEngine.send). */
 	readonly held = new Map<string, string>();
+	/** Notes this engine's sends looked at; every note once `fullRun` (a sync). */
+	readonly covered = new Set<string>();
+	fullRun = false;
 	/**
 	 * Notes whose rename, move or archive failed in this engine's run: a send
 	 * now would record the note's name and place as the notebook's while the
@@ -205,12 +221,15 @@ export class SyncEngine {
 	 * Whether a note waits instead of being sent: another copy of the vault
 	 * is sending it right now, or another copy sent it and its record has not
 	 * arrived — the note has a document id this copy has no record of, and a
-	 * notebook of its name no record knows is on the account; or its
-	 * notebook is in the trash without the lifecycle having archived it,
-	 * replaced by another copy's send (sync/reconcile.ts plan). Sending it
-	 * now would put a second notebook beside that one.
+	 * notebook of its name no record knows, made within the last
+	 * PENDING_STALE_MS, is on the account (an older one is the owner's own,
+	 * or one kept after "Stop syncing"; a send asked for by hand, `optIn`,
+	 * goes ahead regardless); or its notebook is in the trash without the
+	 * lifecycle having archived it, replaced by another copy's send
+	 * (sync/reconcile.ts plan). Sending it now would put a second notebook
+	 * beside that one.
 	 */
-	private heldBack(note: NoteInput, listing: readonly DeviceItem[]): boolean {
+	private heldBack(note: NoteInput, listing: readonly DeviceItem[], optIn: boolean): boolean {
 		const docId = note.existingDocId;
 		if (typeof docId !== "string") return false;
 		const record = this.ports.records.get()[docId];
@@ -229,16 +248,18 @@ export class SyncEngine {
 			return true;
 		}
 		const table = this.ports.records.get();
-		if (table[docId] !== undefined) return false;
+		if (table[docId] !== undefined || optIn) return false;
 		const known = new Set(Object.values(table).map((entry) => entry.deviceDocId));
 		// Another copy sent it where the note's folder mirrors; one elsewhere is the owner's own.
 		const { baseFolder } = this.ports.policy();
+		const now = (this.ports.now ?? Date.now)();
 		const stranger = listing.find(
 			(item) =>
 				item.type === "DocumentType" &&
 				item.visibleName === note.basename &&
 				!known.has(item.id) &&
 				!inTrash(item.parent, byId) &&
+				now - Number(item.createdTime ?? item.lastModified) < PENDING_STALE_MS &&
 				(baseFolder === null || mirroredVaultFolder(item.parent, byId, baseFolder) === folderOf(note.path)),
 		);
 		if (stranger === undefined) return false;
@@ -301,10 +322,8 @@ export class SyncEngine {
 			);
 		}
 		const deleted = this.ports.vault.deleted?.bind(this.ports.vault);
-		if (notes.length > 0 && vanishedAtOnce(records, notes, deleted)) {
-			this.ports.log("most synced notes are not in the vault (still arriving on this device?) — none is taken as deleted for now");
-		}
-		const actions = plan(records, notes, listing, this.ports.policy(), deleted);
+		const settled = await this.vanishSettled(records, notes, deleted);
+		const actions = plan(records, notes, listing, this.ports.policy(), deleted, settled);
 		// A note's later actions build on its earlier ones: after one fails, the next run plans again from what is there.
 		const failed = new Set<string>();
 		for (const action of actions) {
@@ -319,6 +338,38 @@ export class SyncEngine {
 	private fail(what: string, error: unknown): void {
 		if (this.ports.failed !== undefined) this.ports.failed(what, error);
 		else this.ports.log(`${what}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+
+	/**
+	 * Most synced notes missing from the vault at once (vanishedAtOnce): a
+	 * vault still arriving, until the same notes stayed away for
+	 * VANISH_SETTLE_RUNS runs and VANISH_SETTLE_MS — then the owner deleted
+	 * them while Obsidian was closed, and they are taken as deleted (their
+	 * notebooks go to the tablet's trash only while unchanged since read).
+	 * Resolves to whether that point is reached; logs once per change.
+	 */
+	private async vanishSettled(records: MappingTable, notes: VaultNote[], deleted: ((docId: string) => boolean) | undefined): Promise<boolean> {
+		const store = this.ports.vanished;
+		const last = store?.get() ?? null;
+		if (notes.length === 0 || !vanishedAtOnce(records, notes, deleted)) {
+			if (last !== null) await store?.set(null);
+			return false;
+		}
+		const ids = vanishedIds(records, notes, deleted);
+		const now = (this.ports.now ?? Date.now)();
+		const seen: VanishedNotes =
+			last !== null && last.ids.join("\n") === ids.join("\n") ? { ...last, runs: last.runs + 1 } : { ids, since: now, runs: 1, settled: false };
+		if (store !== undefined && !seen.settled && seen.runs >= VANISH_SETTLE_RUNS && now - seen.since >= VANISH_SETTLE_MS) {
+			seen.settled = true;
+			this.ports.log(`${ids.length} synced notes stayed away from the vault since ${new Date(seen.since).toISOString().slice(0, 16).replace("T", " ")} — taken as deleted now`);
+		} else if (seen.runs === 1) {
+			this.ports.log(
+				`${ids.length} synced notes are not in the vault (still arriving on this device?) — none is taken as deleted for now` +
+					(store === undefined ? "" : "; if they stay away, they are after a while"),
+			);
+		}
+		await store?.set(seen);
+		return seen.settled;
 	}
 
 	/** Carry out one action; resolves to whether it was done. */
@@ -417,6 +468,7 @@ export class SyncEngine {
 	 */
 	async sync(options: { background?: boolean } = {}): Promise<void> {
 		const background = options.background === true;
+		this.fullRun = true;
 		const { listing, notes, foreign } = await this.reconcile();
 		if (foreign) return;
 		const table = this.ports.records.get();
@@ -545,6 +597,7 @@ export class SyncEngine {
 		const { vault, records, content, cloud } = this.ports;
 		const auto = options.auto === true;
 		const background = options.background === true;
+		for (const path of paths) this.covered.add(path);
 		if (options.reconcile !== false && (await this.reconcile()).foreign) {
 			if (!background) await this.ports.send.report([], { auto, background, failure: "None of the synced notes' notebooks are on this reMarkable account." });
 			return;
@@ -608,7 +661,7 @@ export class SyncEngine {
 				await this.ports.send.prepare?.();
 				const listing = await cloud.listing();
 				for (const line of await records.settle(new Map(listing.map((item) => [item.id, item.hash])))) this.ports.log(line);
-				notes = notes.filter((note) => !this.heldBack(note, listing));
+				notes = notes.filter((note) => !this.heldBack(note, listing, options.optIn === true));
 				const byId = new Map(listing.map((item) => [item.id, item]));
 				for (const note of notes) {
 					const record = recordOf(note);
