@@ -242,7 +242,7 @@ export function editTypedPage(page: Uint8Array, paragraphs: readonly TypedParagr
 		1 +
 		Math.max(
 			0,
-			...blocks.map((block) => maxCounterInBlock(page, block.bodyStart, block.end, author)),
+			...blocks.map((block) => maxCounterInBlock(page, block.bodyStart, block.end, author, block.type)),
 			...raw.chars.filter((char) => char.id.author === author).map((char) => char.id.counter),
 			...raw.styleEntries.flatMap((entry) => [entry.key, entry.timestamp]).filter((id) => id.author === author).map((id) => id.counter),
 		);

@@ -55,18 +55,15 @@ export class ByteWriter {
 		for (let i = 0; i < 8; i++) this.u8(buf.getUint8(i));
 	}
 
+	/** Exact for every safe integer: CRDT counters are 64-bit on the tablet (rmscene CrdtId). */
 	varuint(value: number): void {
-		let v = value >>> 0;
-		for (;;) {
-			const byte = v & 0x7f;
-			v >>>= 7;
-			if (v !== 0) {
-				this.u8(byte | 0x80);
-			} else {
-				this.u8(byte);
-				break;
-			}
+		if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`varuint out of range: ${value}`);
+		let v = value;
+		while (v >= 0x80) {
+			this.u8((v % 0x80) | 0x80);
+			v = Math.floor(v / 0x80);
 		}
+		this.u8(v);
 	}
 
 	raw(bytes: Uint8Array | number[]): void {

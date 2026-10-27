@@ -128,6 +128,7 @@ const TAG_ID = 0xf;
 const BLOCK_AUTHOR_IDS = 0x09;
 const BLOCK_SCENE_INFO = 0x0d;
 const BLOCK_TREE_NODE = 0x02;
+const BLOCK_GLYPH_ITEM = 0x03;
 const BLOCK_GROUP_ITEM = 0x04;
 const BLOCK_LINE_ITEM = 0x05;
 const BLOCK_ROOT_TEXT = 0x07;
@@ -503,42 +504,63 @@ export function readRootTextBlock(bytes: Uint8Array, start: number, end: number)
 	return readRootText(new Reader(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), start, end));
 }
 
+/** Subblocks of a scene item's value that hold raw data, not fields: a line's points, a glyph's text and rectangles. */
+const ITEM_PAYLOADS: Partial<Record<number, readonly number[]>> = {
+	[BLOCK_GLYPH_ITEM]: [4, 5],
+	[BLOCK_LINE_ITEM]: [5],
+};
+
 /**
- * The highest counter of `author` in any id of a block body, walking every
- * tagged field and every subblock that reads as tagged fields; a byte that
- * starts no field (a list count, an item type) is stepped over. Over-counts
- * rather than misses: a payload that happens to parse adds its own ids.
+ * The highest counter of `author` in the id fields of a block of this type.
+ * A body or subblock counts only when it reads as tagged fields to its very
+ * end — directly, or after one leading number (an item type, a list count);
+ * anything else is data (points, strings) whose bytes would read as ids
+ * that are not there. Author ids hold none.
  */
-export function maxCounterInBlock(bytes: Uint8Array, start: number, end: number, author: number): number {
+export function maxCounterInBlock(bytes: Uint8Array, start: number, end: number, author: number, type: number): number {
+	if (type === BLOCK_AUTHOR_IDS) return 0;
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-	let max = 0;
-	const walk = (from: number, to: number, depth: number): void => {
+	const payloads = ITEM_PAYLOADS[type] ?? [];
+	/** Counters found in fields `from`–`to`, or null when they are not fields. */
+	const fields = (from: number, to: number, path: readonly number[]): number[] | null => {
 		const reader = new Reader(view, from, to);
-		while (reader.remaining > 0) {
-			const at = reader.offset;
-			try {
+		const found: number[] = [];
+		try {
+			while (reader.remaining > 0) {
 				const tag = reader.tag();
 				if (tag.type === TAG_ID) {
 					const id = reader.crdtId();
-					if (id.author === author && id.counter < 2 ** 40) max = Math.max(max, id.counter);
+					if (id.author === author) found.push(id.counter);
 				} else if (tag.type === TAG_LENGTH4) {
 					const length = reader.u32();
-					if (length > reader.remaining) throw new Error("not a subblock");
-					if (depth < 8) walk(reader.offset, reader.offset + length, depth + 1);
+					if (length > reader.remaining) return null;
+					const inner = [...path, tag.index];
+					const payload = inner.length === 2 && inner[0] === 6 && payloads.includes(inner[1]);
+					if (!payload && inner.length <= 8) found.push(...block(reader.offset, reader.offset + length, inner));
 					reader.offset += length;
 				} else if (tag.type === TAG_BYTE1 || tag.type === TAG_BYTE4 || tag.type === TAG_BYTE8) {
 					reader.offset += tag.type;
 				} else {
-					throw new Error("not a field");
+					return null;
 				}
-				if (reader.offset > to) return;
-			} catch {
-				reader.offset = at + 1;
 			}
+		} catch {
+			return null;
 		}
+		return reader.offset === to ? found : null;
 	};
-	walk(start, end, 0);
-	return max;
+	const block = (from: number, to: number, path: readonly number[]): number[] => {
+		const direct = fields(from, to, path);
+		if (direct !== null) return direct;
+		const reader = new Reader(view, from, to);
+		try {
+			reader.varuint();
+		} catch {
+			return [];
+		}
+		return fields(reader.offset, to, path) ?? [];
+	};
+	return Math.max(0, ...block(start, end, []));
 }
 
 /** (0, 0): the start and end of every CRDT sequence, and the first paragraph's key. */

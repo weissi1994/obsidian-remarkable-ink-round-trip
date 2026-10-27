@@ -346,6 +346,7 @@ function classify(
 				mark: {
 					...base,
 					kind: "margin",
+					blocks: [...new Set(beside.flatMap((row) => row.lines.map((line) => line.block)))],
 					quote: beside.map((row) => row.text).join(" "),
 				},
 			};

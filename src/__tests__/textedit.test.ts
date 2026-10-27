@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { idKey, parseRmScene, readRootTextBlock, type TypedParagraph } from "../incoming/rmscene";
+import type { InkSnapshot } from "../id/mapping";
+import { parseBlocks } from "../convert/mdblocks";
+import { idKey, maxCounterInBlock, parseRmScene, readRootTextBlock, type TypedParagraph } from "../incoming/rmscene";
+import { parseRmLines } from "../incoming/rmlines";
+import { inkOptionsFor } from "../ink/inkfonts";
+import { DEVICE_PROFILES, renderInk, toInkLines } from "../ink/inkrender";
 import { HEADER } from "../ink/rmbytes";
 import { buildTextPageRm, markdownToTypedText } from "../ink/roottext";
+import { buildScenePageRm } from "../ink/rmwrite";
 import { editTypedPage } from "../ink/textedit";
 import { typedTextToMarkdown } from "../incoming/typedtext";
+import { preprocess } from "../preprocess/preprocess";
 
 const fixture = (name: string) =>
 	new Uint8Array(readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))));
@@ -192,5 +199,29 @@ describe("typed text edited in place", () => {
 		const rewritten = edited(single, letters("n", 12000));
 		expect(performance.now() - started).toBeLessThan(1500);
 		expect(markdownOf(rewritten)).toBe(letters("n", 12000));
+	});
+
+	it("types on a page full of handwriting: the ink's point bytes are not read as ids", () => {
+		const snapshot: InkSnapshot = { pageIds: ["page-1"], font: "readability", fallbackFont: "readability", pen: "medium", color: 0, jitter: 0.5, profile: DEVICE_PROFILES.rm2, shape: 1 };
+		const options = inkOptionsFor(snapshot, "doc-1", () => null)!;
+		const note = Array.from({ length: 6 }, () => "alpha brown quick seven lazy jumps over river ".repeat(12).trim()).join("\n\n");
+		const render = renderInk(parseBlocks(preprocess(note).markdown), "Ink", {}, options);
+		const page = buildTextPageRm(markdownToTypedText(""), toInkLines(render.pages[0], options.pen), PAPER);
+		const view = new DataView(page.buffer, page.byteOffset, page.byteLength);
+		for (let offset = HEADER.length; offset + 8 <= page.length; offset += 8 + view.getUint32(offset, true)) {
+			expect(maxCounterInBlock(page, offset + 8, offset + 8 + view.getUint32(offset, true), 2, page[offset + 7])).toBe(0);
+		}
+		const typed = editTypedPage(page, markdownToTypedText("x"), 2);
+		expect(typed.kind).toBe("edited");
+		if (typed.kind !== "edited") return;
+		expect(markdownOf(typed.bytes)).toBe("x");
+		expect(idsOf(typed.bytes)).toEqual(["2:1"]);
+	});
+
+	it("writes and reads counters past 2^32 exactly", () => {
+		const line = { tool: 15, color: 0, thicknessScale: 2, points: [{ x: 1, y: 2, width: 16, pressure: 200, speed: 5, direction: 0 }] };
+		const page = buildScenePageRm([{ author: 2, counter: 2 ** 40 + 3, line }], PAPER);
+		expect(parseRmScene(page).lines.map((one) => one.id)).toEqual([{ author: 2, counter: 2 ** 40 + 3 }]);
+		expect(parseRmLines(page)).toHaveLength(1);
 	});
 });

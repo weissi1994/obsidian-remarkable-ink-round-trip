@@ -143,10 +143,10 @@ class Cursor {
 		let value = 0;
 		for (;;) {
 			const byte = this.u8();
-			value |= (byte & 0x7f) << shift;
+			value += (byte & 0x7f) * 2 ** shift;
 			if ((byte & 0x80) === 0) return value;
 			shift += 7;
-			if (shift > 28) throw new Error("varuint too long");
+			if (shift > 49) throw new Error("varuint too long");
 		}
 	}
 

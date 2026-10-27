@@ -150,11 +150,18 @@ function consume(source: string, from: number, word: string, typo: number): numb
  * match ending inside a longer word is not it — "the" is not in "theory" —
  * unless the typesetter broke that word at the end of its line (a long URL,
  * a compound in a narrow column): then `then`, the next laid-out word, is
- * its rest and carries on right there.
+ * its rest and carries on right there. A `cut` word ends a code line the
+ * typesetter truncated at the page edge (pdf.ts): it is the start of its
+ * source word, which runs on to the next space.
  */
-function matchAt(source: string, from: number, word: string, typo: number, then?: string): number | null {
+function matchAt(source: string, from: number, word: string, typo: number, then?: string, cut = false): number | null {
 	const end = consume(source, from, word, typo);
 	if (end === null || !insideWord(source, end)) return end;
+	if (cut) {
+		let at = end;
+		while (at < source.length && !/\s/.test(source[at])) at++;
+		return at;
+	}
 	return then !== undefined && consume(source, end, then, typo) !== null ? end : null;
 }
 
@@ -182,6 +189,7 @@ function findWord(
 	window = WINDOW,
 	skip: Range[] = [],
 	then?: string,
+	cut = false,
 ): Range | null {
 	let limit = Math.min(source.length, from + window);
 	for (let at = from; at < limit; at++) {
@@ -194,7 +202,7 @@ function findWord(
 		// Syntax is stepped over — unless the word itself starts with it (`#tag`, `(see`).
 		if (SYNTAX.has(source[at]) && source[at] !== word[0]) continue;
 		if (insideWord(source, at)) continue;
-		const end = matchAt(source, at, word, typo, then);
+		const end = matchAt(source, at, word, typo, then, cut);
 		if (end !== null) return { start: at, end };
 	}
 	return null;
@@ -332,9 +340,12 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 		const next = words[index + 1];
 		return next !== undefined && lineEnds.has(words[index].id) && next.block === words[index].block ? next.text : undefined;
 	};
+	// Code lines are truncated at the page edge, not broken.
+	const cutEnds = new Set(input.layout.lines.filter((line) => line.role === "code").flatMap((line) => line.words.slice(-1).map((word) => word.id)));
 	const locate: Locate = (from, index, glued, window) => {
-		const end = glued ? matchAt(source, from, words[index].text, typo, carried(index)) : null;
-		return end !== null ? { start: from, end } : findWord(source, from, words[index].text, typo, window, skip, carried(index));
+		const cut = cutEnds.has(words[index].id);
+		const end = glued ? matchAt(source, from, words[index].text, typo, carried(index), cut) : null;
+		return end !== null ? { start: from, end } : findWord(source, from, words[index].text, typo, window, skip, carried(index), cut);
 	};
 	const start = syncPoint(source, words.length, locate);
 	const followed = (from: number, index: number, count: number) => {
@@ -357,7 +368,7 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 		const lastWords = index + 2 >= words.length;
 		if (hit !== null && (missed > 0 || hit.start - cursor > JUMP) && !lastWords && !followed(hit.end, index, 2)) hit = null;
 		for (let from = cursor; hit === null && !lastWords; ) {
-			const far = findWord(source, from, words[index].text, typo, FAR - (from - cursor), skip, carried(index));
+			const far = findWord(source, from, words[index].text, typo, FAR - (from - cursor), skip, carried(index), cutEnds.has(words[index].id));
 			if (far === null) break;
 			if (followed(far.end, index, Math.min(4, words.length - 1 - index))) hit = far;
 			from = far.start + 1;
@@ -847,8 +858,9 @@ function applyBlockMarks(
 		const touched = own.map((word) => lineOf(ranges.get(word.id)!.start));
 
 		if (mark.kind === "margin") {
-			if (touched.length === 0 && blocks.size > 0) {
+			if (touched.length === 0) {
 				unapplied.push({ page: mark.page, text: `marked in the margin beside “${mark.quote ?? ""}” — not found in the note` });
+				continue;
 			}
 			for (let line = Math.min(...touched); line <= Math.max(...touched); line++) {
 				quoted.add(line);
@@ -881,7 +893,10 @@ function applyBlockMarks(
 export function placeAfterBlocks(lines: string[], blocks: Map<number, string[]>, quoted: ReadonlySet<number> = new Set()): string {
 	const placed = new Map<number, string[]>();
 	for (const [line, block] of blocks) {
-		const end = line < 0 ? -1 : blockEnd(lines, Math.min(line, lines.length - 1));
+		// A blank line belongs to no block: the block is the one above it.
+		let at = Math.min(line, lines.length - 1);
+		while (at >= 0 && lines[at].trim() === "") at--;
+		const end = at < 0 ? -1 : blockEnd(lines, at);
 		placed.set(end, joinBlocks(placed.get(end) ?? [], block));
 	}
 	const out: string[] = [];

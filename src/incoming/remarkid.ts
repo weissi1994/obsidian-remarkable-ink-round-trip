@@ -215,7 +215,9 @@ export function isRemarkTextLine(line: string): boolean {
 
 /**
  * Find a remark in a note: the line with its id (or else its image), widened
- * to the block around it — up to a blank line or the next callout title.
+ * to the block around it — up to a blank line or the next callout title; a
+ * callout no further than its quoted lines, which a code fence or text can
+ * follow straight on.
  * Null when the note no longer has it.
  */
 export function findRemark(note: string, ref: RemarkRef): FoundRemark | null {
@@ -230,10 +232,12 @@ export function findRemark(note: string, ref: RemarkRef): FoundRemark | null {
 		if (at !== -1) break;
 	}
 	if (at === -1) return null;
+	const quoted = lines[at].startsWith(">");
+	const inBlock = (line: string) => line.trim() !== "" && (!quoted || line.startsWith(">"));
 	let start = at;
-	while (start > 0 && lines[start - 1].trim() !== "" && !isTitle(lines[start])) start--;
+	while (start > 0 && inBlock(lines[start - 1]) && !isTitle(lines[start])) start--;
 	let end = at;
-	while (end + 1 < lines.length && lines[end + 1].trim() !== "" && !isTitle(lines[end + 1])) end++;
+	while (end + 1 < lines.length && inBlock(lines[end + 1]) && !isTitle(lines[end + 1])) end++;
 	const block = lines.slice(start, end + 1);
 	return {
 		start,

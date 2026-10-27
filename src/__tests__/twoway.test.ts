@@ -186,6 +186,25 @@ describe("two-way sync", () => {
 	});
 });
 
+describe("a bar in the margin", () => {
+	const barred = notebook("Some intro words here.\n\nThe quick brown fox jumps over the lazy dog.\n\nLast line.");
+
+	it("quotes the paragraph it ran along, and the same import again changes nothing", async () => {
+		const points = barred.render.pages[0].filter((stroke) => stroke.wordId === wordOf(barred.render, "The").id).flatMap((stroke) => stroke.points);
+		const x = Math.min(...points.map((p) => p.x)) - 30;
+		const top = Math.min(...points.map((p) => p.y)) - 10;
+		const bottom = Math.max(...points.map((p) => p.y)) + 10;
+		const bar = userLine(900, Array.from({ length: 21 }, (_, k) => ({ x, y: top + ((bottom - top) * k) / 20 })));
+		const changes = await readTablet(() => null, [bar], {}, barred);
+		expect(changes.marks.map((mark) => mark.kind)).toEqual(["margin"]);
+		const first = mergeTabletChanges({ ...common, ...changes, base: barred.note, ours: barred.note });
+		expect(first.body).toBe("Some intro words here.\n\n> The quick brown fox jumps over the lazy dog.\n\nLast line.");
+		expect(first.outcome.pending ?? []).toEqual([]);
+		const again = mergeTabletChanges({ ...common, ...changes, base: barred.note, ours: first.body, mergedBase: first.projected! });
+		expect(again.body).toBe(first.body);
+	});
+});
+
 describe("tablet changes the note does not show", () => {
 	const jumps = sent.pages[0].filter((stroke) => stroke.wordId === wordOf(sent, "jumps").id).map((stroke) => stroke.counter);
 	/** Erased "quick", lassoed "brown" into the empty bottom of the page, rubbed at a corner of "jumps". */
@@ -327,6 +346,48 @@ describe("merging again after a merge was written", () => {
 		const again = merge(both, edited, { mergedBase: first.projected! });
 		expect(again.body).toBe(edited.replace("lazy ", ""));
 		expect(again.outcome.conflicts).toBe(0);
+	});
+
+	it("finds no clash with a page the owner added to a note ending in blank lines", async () => {
+		const ending = notebook("Some text here.\n\nMore text here.\n\n");
+		const paper = { paperSize: { width: 1404, height: 1872 } };
+		const files: Record<string, Uint8Array> = {
+			"dev-1/page-1.rm": buildScenePageRm(ending.render.pages[0].map((stroke, index) => ({ author: INK_AUTHOR, counter: stroke.counter, line: ending.lines[index] })), paper),
+			"dev-1/added.rm": buildScenePageRm([userLine(1000, [{ x: 300, y: 500 }, { x: 330, y: 530 }, { x: 360, y: 500 }, { x: 390, y: 530 }])], paper),
+		};
+		const changes = await readTablet(() => null, [], {
+			listDocumentFiles: async () => Object.keys(files).map((id) => ({ id, hash: id })),
+			readBytes: async (file) => files[file.id],
+			renderStrokes: async () => "img/r.png",
+			transcribe: async () => ({ text: "page thoughts" }),
+		}, ending);
+		const first = mergeTabletChanges({ ...common, ...changes, base: ending.note, ours: ending.note });
+		expect(first.body).toMatch(/^Some text here\.\n\nMore text here\.\n\n> \[!note\] Page added on the reMarkable \(page 2\)\n> page thoughts\n> !\[\[img\/r\.png\]\]\n> \^ink-[0-9a-f]+\n\n$/);
+		expect(first.outcome.conflicts).toBe(0);
+		const again = mergeTabletChanges({ ...common, ...changes, base: ending.note, ours: first.body, mergedBase: first.projected! });
+		expect(again.body).toBe(first.body);
+		expect(again.outcome.conflicts).toBe(0);
+	});
+
+	it("leaves the code alone below a remark placed between a paragraph and the fence it runs into", () => {
+		const note = "Some intro words here.\n\nRun this first:\n```bash\necho one\necho two\n```\n\nLast line.";
+		const remark: ImportedMark = { kind: "note", page: 1, quote: "Run this first:", transcript: "check this", id: "bbbbbbbbbbbb" };
+		const changes = { layout: notebook(note).render.layout, highlights: [], marks: [remark] };
+		const first = mergeTabletChanges({ ...common, ...changes, base: note, ours: note });
+		expect(first.body).toBe(note.replace("first:\n", "first:\n\n> [!note] Remark\n> check this\n> ^ink-bbbbbbbbbbbb\n"));
+		const again = mergeTabletChanges({ ...common, ...changes, base: note, ours: first.body, mergedBase: first.projected! });
+		expect(again.body).toBe(first.body);
+		expect(again.outcome.conflicts).toBe(0);
+	});
+
+	it("places a remark written under a code row after its code block, the code's lines cut at the page edge", () => {
+		const long = (name: string) => `  ${name}_with_a_very_long_identifier=value.with.dots.and.more.dots.to.make.it.run.past.the.page.edge`;
+		const note = ["Run this first:", "```bash", long("first"), '  "short_key=-abc1d -abc1d",', long("second"), "```", "", "Last line."].join("\n");
+		const { layout } = notebook(note).render;
+		const row = layout.lines.find((line) => line.text.includes("short_key"))!;
+		const remark: ImportedMark = { kind: "note", page: 1, quote: row.text, transcript: "check this", id: "cccccccccccc" };
+		const first = mergeTabletChanges({ ...common, layout, highlights: [], marks: [remark], base: note, ours: note });
+		expect(first.body).toBe(note.replace("```\n\n", "```\n\n> [!note] Remark\n> check this\n> ^ink-cccccccccccc\n\n"));
 	});
 
 	it("leaves a remark callout it placed as the owner left it: edited, or deleted", async () => {
