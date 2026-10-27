@@ -14,6 +14,8 @@ export interface SyncStatusSummary {
 	trackedNotes: number;
 	localTrackedNotes: number;
 	missingLocalNotes: number;
+	/** Notes whose note or notebook was deleted on one side; not synced until it comes back. */
+	archivedNotes: number;
 	watchNotes: number;
 	untrackedWatchNotes: number;
 	lastUploadedAt: string | null;
@@ -25,7 +27,8 @@ export function buildSyncStatusSummary(input: {
 	watchPaths: ReadonlySet<string>;
 	live: LiveSyncStatus;
 }): SyncStatusSummary {
-	const entries = Object.values(input.mappings);
+	const all = Object.values(input.mappings);
+	const entries = all.filter((entry) => entry.state !== "archived");
 	const mappedPaths = new Set(entries.map((entry) => entry.notePath));
 	const localTrackedNotes = entries.filter((entry) =>
 		input.localPaths.has(entry.notePath),
@@ -60,6 +63,7 @@ export function buildSyncStatusSummary(input: {
 		trackedNotes: entries.length,
 		localTrackedNotes,
 		missingLocalNotes: entries.length - localTrackedNotes,
+		archivedNotes: all.length - entries.length,
 		watchNotes: input.watchPaths.size,
 		untrackedWatchNotes: [...input.watchPaths].filter(
 			(path) => !mappedPaths.has(path),

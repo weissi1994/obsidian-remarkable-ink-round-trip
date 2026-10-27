@@ -42,11 +42,24 @@ export function isInWatchFolder(path: string, folder: string): boolean {
 	return path === prefix || path.startsWith(`${prefix}/`);
 }
 
+/**
+ * The comma-separated folder setting after the vault folder `from` was
+ * renamed to `to` (the folders in it and below it follow); null when it
+ * names neither.
+ */
+export function renameInFolderList(value: string, from: string, to: string): string | null {
+	const folders = parseFolderList(value);
+	const renamed = folders.map((folder) => (isInWatchFolder(folder, from) ? `${to}${folder.slice(from.length)}` : folder));
+	return renamed.some((folder, i) => folder !== folders[i]) ? [...new Set(renamed)].join(", ") : null;
+}
+
 export class WatchQueue {
 	private readonly pending = new Set<string>();
 	private timer: number | null = null;
 	private firstPendingAt: number | null = null;
 	private readonly suppressedUntil = new Map<string, number>();
+	/** The batch waiting runs even with no note left in it: something was renamed, moved or deleted. */
+	private structural = false;
 
 	constructor(private readonly opts: WatchQueueOptions) {}
 
@@ -63,12 +76,17 @@ export class WatchQueue {
 		}
 		this.pending.add(path);
 		if (this.firstPendingAt === null) this.firstPendingAt = now;
+		this.schedule(now);
+	}
+
+	private schedule(now: number): void {
 		if (this.timer !== null) this.opts.clearTimer(this.timer);
 		const maxWait = this.opts.maxWaitMs ?? 60_000;
-		const left = Math.max(0, this.firstPendingAt + maxWait - now);
+		const left = Math.max(0, (this.firstPendingAt ?? now) + maxWait - now);
 		this.timer = this.opts.setTimer(() => {
 			this.timer = null;
 			this.firstPendingAt = null;
+			this.structural = false;
 			const paths = [...this.pending];
 			this.pending.clear();
 			this.opts.onReady(paths);
@@ -91,11 +109,23 @@ export class WatchQueue {
 	/** A rename/delete out of the folder cancels the pending send. */
 	noteRemoved(path: string): void {
 		this.pending.delete(path);
-		if (this.pending.size === 0 && this.timer !== null) {
+		if (this.pending.size === 0 && !this.structural && this.timer !== null) {
 			this.opts.clearTimer(this.timer);
 			this.timer = null;
 			this.firstPendingAt = null;
 		}
+	}
+
+	/**
+	 * A synced note or a folder was renamed, moved or deleted: run a batch
+	 * after the quiet period even with no note to send, so the notebooks
+	 * follow (sync/reconcile.ts).
+	 */
+	structureChanged(): void {
+		const now = this.now();
+		this.structural = true;
+		if (this.firstPendingAt === null) this.firstPendingAt = now;
+		this.schedule(now);
 	}
 
 	/** Read-only count of the sends waiting for the debounce timer. */
@@ -108,6 +138,7 @@ export class WatchQueue {
 		if (this.timer !== null) this.opts.clearTimer(this.timer);
 		this.timer = null;
 		this.firstPendingAt = null;
+		this.structural = false;
 		this.pending.clear();
 		this.suppressedUntil.clear();
 	}

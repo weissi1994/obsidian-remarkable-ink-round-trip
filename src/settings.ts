@@ -28,6 +28,7 @@ import {
 	type SettingSpec,
 	checkEndpoint,
 	cleanPath,
+	checkArchiveFolder,
 	isVisible,
 	readSetting,
 	writeSetting,
@@ -278,7 +279,11 @@ export class RoundTripSettingTab extends PluginSettingTab {
 						validate:
 							spec.control.sanitise === "url"
 								? (value: string) => checkEndpoint(value)
-								: undefined,
+								: spec.key === "archiveFolder"
+									? (value: string) => checkArchiveFolder(value, this.plugin.settings.watchFolderPath)
+									: spec.key === "watchFolderPath"
+										? (value: string) => checkArchiveFolder(this.plugin.settings.archiveFolder, value)
+										: undefined,
 					},
 				};
 		}
@@ -296,7 +301,14 @@ export class RoundTripSettingTab extends PluginSettingTab {
 			this.pairingCode = String(value);
 			return;
 		}
-		this.plugin.settings = writeSetting(this.plugin.settings, key, sanitise(key, value));
+		const next = writeSetting(this.plugin.settings, key, sanitise(key, value));
+		// A sync folder holding the archive (or the reverse) is never stored.
+		const clash = key === "archiveFolder" || key === "watchFolderPath" ? checkArchiveFolder(next.archiveFolder, next.watchFolderPath) : undefined;
+		if (clash !== undefined) {
+			notify(clash);
+			return;
+		}
+		this.plugin.settings = next;
 		await this.plugin.saveSettings();
 	}
 

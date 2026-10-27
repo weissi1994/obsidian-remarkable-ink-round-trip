@@ -14,6 +14,7 @@ import {
 	type MarkStyle,
 	type MarkStyles,
 } from "./incoming/markstyles";
+import { checkArchiveFolder } from "./settingschema";
 
 export type { MarkStyle, MarkStyles };
 export { DEFAULT_MARK_STYLES, MARK_STYLE_LABELS };
@@ -41,6 +42,16 @@ export interface RoundTripSettings {
 	 * ties notes to notebooks. Synced with the notes (git, Obsidian Sync…).
 	 */
 	syncStateFolder: string;
+	/**
+	 * Vault folder notes go to when their notebook was trashed or deleted on
+	 * the tablet; never inside a sync folder (checkArchiveFolder).
+	 */
+	archiveFolder: string;
+	/**
+	 * This install's own id, made once: stamped on its sends in flight so
+	 * another copy of the vault leaves them alone (SyncState.settlePending).
+	 */
+	installId: string;
 	/**
 	 * This device syncs on its own: at startup, on the interval and when a
 	 * note changes. Off on all but one device when several copies of the
@@ -139,6 +150,8 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	syncIntervalMinutes: 5,
 	backupFolder: "reMarkable-in/previous",
 	syncStateFolder: "reMarkable/.sync",
+	archiveFolder: "reMarkable/Archive",
+	installId: "",
 	autoSync: true,
 	importHandwriting: true,
 	markStyles: { ...DEFAULT_MARK_STYLES },
@@ -198,6 +211,10 @@ export function settingsFrom(stored: Partial<RoundTripSettings>): RoundTripSetti
 	if (stored.ocrMode === undefined && legacy.ocrEnabled === true) settings.ocrMode = "endpoint";
 	if (legacy.inkDevice === "auto" || legacy.inkDevice === undefined) {
 		settings.inkDevice = legacy.deviceModel === "paperpro" ? "paperpro" : "rm2";
+	}
+	// A vault syncing a folder that holds the default archive gets one beside it.
+	if (stored.archiveFolder === undefined && checkArchiveFolder(settings.archiveFolder, settings.watchFolderPath) !== undefined) {
+		settings.archiveFolder = "reMarkable archive";
 	}
 	return settings;
 }

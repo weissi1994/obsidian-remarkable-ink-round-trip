@@ -43,7 +43,13 @@ import { captureItems, type CaptureItem } from "./ocr/testcapture";
 import type { DeviceItem } from "./sync/deviceimport";
 import type { SyncState } from "./sync/syncstate";
 import type { HttpClient } from "./transport/http";
-import { readNotebook, sendNotebook, type RawSyncApi } from "./transport/notebook";
+import {
+	readNotebook,
+	sendNotebook,
+	sendNotebookUpdate,
+	type NotebookUpdateOptions,
+	type RawSyncApi,
+} from "./transport/notebook";
 import { transcribe, type OcrExample } from "./transport/ocr";
 
 /** What the edge needs from the plugin; structural, so main.ts stays the owner. */
@@ -212,6 +218,15 @@ export class InkEdge {
 			pageIds: result.pageIds,
 			hash: result.hash,
 			replaced: result.replaced === true,
+		}));
+	}
+
+	/** Write a note's pages into its existing notebook (sendNotebookUpdate). */
+	update(api: RawSyncApi, deviceDocId: string, name: string, pages: Uint8Array[], options: NotebookUpdateOptions) {
+		return sendNotebookUpdate(api, deviceDocId, name, pages, options).then((result) => ({
+			deviceDocId: result.docId,
+			pageIds: result.pageIds,
+			hash: result.hash,
 		}));
 	}
 

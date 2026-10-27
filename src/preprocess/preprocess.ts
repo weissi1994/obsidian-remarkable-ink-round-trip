@@ -15,7 +15,7 @@
  * is pure and unit-testable (and mobile-safe per N7 — no Node APIs).
  */
 
-import { isRemarkIdLine } from "../incoming/remarkid";
+import { isPluginIdLine, isRemarkIdLine } from "../incoming/remarkid";
 
 export type EmbedContent =
 	| { kind: "markdown"; content: string }
@@ -298,8 +298,8 @@ function remarksInPlace(markdown: string, resolveEmbed: EmbedResolver): string {
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
-		// A remark's id is for Obsidian; on paper it would be a stray "^ink-…" line.
-		if (!fenced && isRemarkIdLine(line)) continue;
+		// Plugin block ids (remarks, clashes, pending) are for Obsidian; on paper they'd be stray "^ink-…" lines.
+		if (!fenced && isPluginIdLine(line)) continue;
 		if (fenced || !CALLOUT_HEAD_RE.test(line)) {
 			out.push(line);
 			continue;

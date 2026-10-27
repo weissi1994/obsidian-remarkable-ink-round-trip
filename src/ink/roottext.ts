@@ -201,19 +201,20 @@ export function linePrefixStyle(line: string): ParagraphStyle | undefined {
 
 /**
  * Markdown as typed-text paragraphs, one per line (an empty line is an empty
- * paragraph, as pressing Enter twice on the tablet). A backslash before a
- * line prefix keeps the line plain, the way markdown escapes it.
+ * paragraph, as pressing Enter twice on the tablet). A backslash after the
+ * line prefix (or before it) keeps the line from reading as another style,
+ * the way markdown escapes it: `- \[x] milk` is a bullet saying "[x] milk".
  */
 export function markdownToTypedText(markdown: string): TypedParagraph[] {
 	return markdown.split("\n").map((raw) => {
 		const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
 		const style = linePrefixStyle(line);
-		if (style !== undefined) {
-			return { style, spans: parseInlineMarkdown(line.slice(STYLE_PREFIX[style].length)) };
-		}
-		const escapes = /^\\+/.exec(line)?.[0].length ?? 0;
-		const plain = escapes > 0 && linePrefixStyle(line.slice(escapes)) !== undefined ? line.slice(1) : line;
-		return { style: "plain", spans: parseInlineMarkdown(plain) };
+		const prefix = style === undefined ? "" : STYLE_PREFIX[style];
+		const rest = line.slice(prefix.length);
+		const escapes = /^\\*/.exec(rest)![0].length;
+		const reads = linePrefixStyle(prefix + rest.slice(escapes)) ?? "plain";
+		const text = escapes > 0 && reads !== (style ?? "plain") ? rest.slice(1) : rest;
+		return { style: style ?? "plain", spans: parseInlineMarkdown(text) };
 	});
 }
 

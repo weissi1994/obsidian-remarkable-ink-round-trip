@@ -8,6 +8,11 @@
  * the original — from there on it is a synced note like any other.
  */
 
+import { splitNote } from "../preprocess/preprocess";
+import { devicePathOf } from "../transport/metadata";
+import { merge3 } from "./merge3";
+import { mergeIntoNote, type NoteFileIo } from "./notewrite";
+
 export interface DeviceItem {
 	id: string;
 	hash: string;
@@ -19,6 +24,8 @@ export interface DeviceItem {
 	notNotebook?: boolean;
 	/** Written by this plugin — from this or another vault instance — so never brought in. */
 	ours?: boolean;
+	/** Its metadata could not be read at this hash: name and folder are stale or empty. */
+	unreadable?: boolean;
 }
 
 /**
@@ -39,20 +46,6 @@ export interface NewNotebook {
 	folder: string;
 }
 
-/** Device path of an item's folder ("" = root), or null when it is in the trash. */
-function folderPathOf(item: DeviceItem, byId: Map<string, DeviceItem>): string | null {
-	const names: string[] = [];
-	let parent = item.parent;
-	for (let guard = 0; parent !== "" && guard < 64; guard++) {
-		if (parent === "trash") return null;
-		const folder = byId.get(parent);
-		if (folder === undefined) return null;
-		names.unshift(folder.visibleName);
-		parent = folder.parent;
-	}
-	return names.join("/");
-}
-
 /**
  * Notebooks to bring in: documents the plugin does not know, inside the
  * device folder of a synced vault folder, and left alone on the tablet for
@@ -67,9 +60,9 @@ export function findNewNotebooks(
 	const base = options.baseFolder.replace(/^\/+|\/+$/g, "");
 	const out: NewNotebook[] = [];
 	for (const item of items) {
-		if (item.type !== "DocumentType" || item.notNotebook === true || item.ours === true || options.known.has(item.id)) continue;
+		if (item.type !== "DocumentType" || item.notNotebook === true || item.ours === true || item.unreadable === true || options.known.has(item.id)) continue;
 		if (options.now - Number(item.lastModified) < options.quietMs) continue;
-		const path = folderPathOf(item, byId);
+		const path = devicePathOf(item.parent, byId);
 		if (path === null) continue;
 		for (const vaultFolder of options.vaultFolders) {
 			const clean = vaultFolder.replace(/^\/+|\/+$/g, "");
@@ -104,6 +97,27 @@ export function importedNote(docId: string, pages: { image?: string; text?: stri
 		})
 		.join("\n\n");
 	return `---\nremarkable-id: ${docId}\n---\n${blocks}\n`;
+}
+
+/**
+ * A notebook brought in and written in again on the tablet before its
+ * handwritten replacement could go out: the note as its pages read now
+ * (`theirs`, a body as importedNote writes it) merged three ways into the
+ * note, against the body as last brought in (`base`; null when an earlier
+ * version did not keep it — then whatever differs is shown beside the note's
+ * text, never dropped). The owner's edits to the note stay.
+ */
+export function reimportNotebook(
+	io: NoteFileIo,
+	backup: (preImage: string) => Promise<void>,
+	base: string | null,
+	theirs: string,
+): Promise<{ written: boolean; conflicts: number }> {
+	return mergeIntoNote(io, backup, (current) => {
+		const { head, body } = splitNote(current);
+		const merged = merge3(base ?? "", body, theirs);
+		return { text: merged.text === body ? current : head + merged.text, result: merged.conflicts };
+	}).then(({ written, result }) => ({ written, conflicts: result }));
 }
 
 /**

@@ -12,6 +12,21 @@ describe("diffHunks", () => {
 		expect(diffHunks([], [])).toEqual([]);
 		expect(diffHunks(["a"], [])).toEqual([{ oStart: 0, oEnd: 1, xStart: 0, xEnd: 0, side: "ours" }]);
 	});
+
+	it("makes an edit of one of two equal lines a replacement of that line", () => {
+		// Plain Myers matched the first line to the second: "insert before
+		// line 1, delete line 2" — which let the other side's edit of line 2
+		// cut the owner's line apart without a clash.
+		expect(diffHunks(["same", "same"], ["edited", "same"])).toEqual([{ oStart: 0, oEnd: 1, xStart: 0, xEnd: 1, side: "ours" }]);
+		expect(diffHunks(["same", "same"], ["same", "edited"])).toEqual([{ oStart: 1, oEnd: 2, xStart: 1, xEnd: 2, side: "ours" }]);
+		expect(diffHunks(["a", "same", "same", "b"], ["a", "same", "same 2", "b"])).toEqual([
+			{ oStart: 2, oEnd: 3, xStart: 2, xEnd: 3, side: "ours" },
+		]);
+	});
+
+	it("slides a lone insertion among equal lines as far down as it goes", () => {
+		expect(diffHunks(["x", "", "y"], ["x", "", "", "y"])).toEqual([{ oStart: 2, oEnd: 2, xStart: 2, xEnd: 3, side: "ours" }]);
+	});
 });
 
 describe("merge3", () => {
@@ -135,5 +150,84 @@ describe("merge3", () => {
 		expect(after.text).toContain("> The quick ~~brown~~ fox");
 		expect(after.text).toContain("~~- one~~");
 		expect(after.text.match(/\[!warning\]/g)).toHaveLength(1);
+	});
+});
+
+describe("merge3 at the edges of what one side removed", () => {
+	const BASE3 = "a\nfoo bar\nc";
+
+	it("clashes on words added to a line the other side removed, instead of leaving them stranded", () => {
+		for (const [ours, theirs] of [
+			["a\nfoo bar baz\nc", "a\nc"],
+			["a\nc", "a\nfoo bar baz\nc"],
+			["a\nbaz foo bar\nc", "a\nc"],
+		]) {
+			const merged = merge3(BASE3, ours, theirs);
+			expect(merged.conflicts).toBe(1);
+			expect(merged.text).not.toMatch(/^ ?baz ?$/m);
+		}
+		// The note's words stay, the tablet's removal is shown.
+		const kept = merge3(BASE3, "a\nfoo bar baz\nc", "a\nc").text;
+		expect(kept.startsWith("a\nfoo bar baz\n\n> [!warning] Also changed on the reMarkable\n> *(removed there)*\n")).toBe(true);
+	});
+
+	it("still merges an erased word next to an edit of the word beside it", () => {
+		const base = "The quick brown fox.";
+		expect(merge3(base, "The quick red fox.", "The brown fox.")).toEqual({ text: "The red fox.", conflicts: 0 });
+	});
+});
+
+describe("merge3 with lines that repeat", () => {
+	it("keeps the owner's edit of the second of two equal lines next to the tablet's of the first", () => {
+		const base = "- [ ] call mum today\n- [ ] call mum today";
+		const ours = "- [ ] call mum today\n- [ ] call mum today and dad";
+		const theirs = "- [ ] call ~~mum~~ today\n- [ ] call mum today";
+		const merged = merge3(base, ours, theirs);
+		expect(merged).toEqual({ text: "- [ ] call ~~mum~~ today\n- [ ] call mum today and dad", conflicts: 0 });
+		expect(merge3(base, merged.text, theirs)).toEqual(merged);
+	});
+});
+
+describe("merge3 run again on its own result", () => {
+	it("does not apply the tablet's change on top of itself", () => {
+		const base = "Buy milk today.";
+		const theirs = "Buy ~~milk~~ today.";
+		const first = merge3(base, "Buy oat milk today.", theirs);
+		expect(first).toEqual({ text: "Buy oat ~~milk~~ today.", conflicts: 0 });
+		expect(merge3(base, first.text, theirs)).toEqual(first);
+	});
+
+	it("does not add the tablet's line a second time after the owner's", () => {
+		const first = merge3("a\nb", "a\nb\nmine", "a\nb\ntheirs");
+		expect(first.text).toBe("a\nb\nmine\ntheirs");
+		expect(merge3("a\nb", first.text, "a\nb\ntheirs")).toEqual(first);
+	});
+
+	it("still clashes when the tablet's change is missing from the owner's text", () => {
+		expect(merge3("Buy milk today.", "Buy oat today.", "Buy ~~milk~~ today.").conflicts).toBe(1);
+	});
+});
+
+describe("merge3 with the same clash twice", () => {
+	const base = "Same words here.\n\nBetween.\n\nSame words here.";
+	const ours = base.replace(/words/g, "lines");
+	const theirs = base.replace(/words/g, "~~words~~");
+
+	it("gives each callout its own block id", () => {
+		const merged = merge3(base, ours, theirs);
+		expect(merged.conflicts).toBe(2);
+		const ids = merged.text.match(/\^ink-conflict-[0-9a-f-]+/g) ?? [];
+		expect(ids).toHaveLength(2);
+		expect(new Set(ids).size).toBe(2);
+		expect(merge3(base, merged.text, theirs)).toEqual(merged);
+	});
+
+	it("keeps the other callout when the owner edits one", () => {
+		const merged = merge3(base, ours, theirs).text;
+		const at = merged.lastIndexOf("> Same ~~words~~ here.");
+		const edited = `${merged.slice(0, at)}> Same ~~words~~ here. (fine as it is)${merged.slice(at + "> Same ~~words~~ here.".length)}`;
+		const again = merge3(base, edited, theirs);
+		expect(again.text).toBe(edited);
+		expect(again.text.match(/\[!warning\]/g)).toHaveLength(2);
 	});
 });

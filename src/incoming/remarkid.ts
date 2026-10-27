@@ -86,7 +86,7 @@ export function blockIdLine(id: string, quoted = true): string {
  * would be stray "^ink-…" lines.
  */
 export function isPluginIdLine(line: string): boolean {
-	return new RegExp(`^(>\\s*)*\\^${REMARK_ID_PREFIX}(conflict-[0-9a-f]+|pending|[0-9a-f]+)\\s*$`).test(line.trim());
+	return new RegExp(`^(>\\s*)*\\^${REMARK_ID_PREFIX}(conflict-[0-9a-f]+(-\\d+)?|pending|[0-9a-f]+)\\s*$`).test(line.trim());
 }
 
 /** A remark's ink as an earlier import kept it: device units, absolute or from its own corner. */

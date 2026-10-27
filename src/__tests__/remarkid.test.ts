@@ -78,7 +78,7 @@ describe("ids of other blocks the plugin writes", () => {
 		expect(textId("x")).toMatch(/^[0-9a-f]{12}$/);
 		expect(isRemarkIdLine("> ^ink-conflict-3f9a2c1b0d4e")).toBe(false);
 		expect(isRemarkIdLine("> ^ink-pending")).toBe(false);
-		for (const id of ["> ^ink-3f9a2c1b0d4e", "> ^ink-conflict-3f9a2c1b0d4e", "> ^ink-pending"]) {
+		for (const id of ["> ^ink-3f9a2c1b0d4e", "> ^ink-conflict-3f9a2c1b0d4e", "> ^ink-conflict-3f9a2c1b0d4e-2", "> ^ink-pending"]) {
 			expect(isPluginIdLine(id)).toBe(true);
 		}
 		expect(isPluginIdLine("> ^ink-pendingX")).toBe(false);

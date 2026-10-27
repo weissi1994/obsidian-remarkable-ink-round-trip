@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { parseRmScene, type TextSpan, type TypedParagraph } from "../incoming/rmscene";
+import { PARAGRAPH_STYLES, parseRmScene, type TextSpan, type TypedParagraph } from "../incoming/rmscene";
 import { typedTextToMarkdown } from "../incoming/typedtext";
 import { markdownToTypedText, parseInlineMarkdown } from "../ink/roottext";
 
@@ -84,10 +84,22 @@ describe("typedTextToMarkdown", () => {
 		expect(markdownToTypedText(md)).toEqual(paragraphs);
 	});
 
+	it("escapes a bullet whose text reads as a checkbox", () => {
+		const paragraphs: TypedParagraph[] = [
+			{ style: "bullet", spans: [span("[x] milk")] },
+			{ style: "bullet", spans: [span("[ ] eggs")] },
+			{ style: "checkbox", spans: [span("[x] still open")] },
+			{ style: "bullet", spans: [span("[x]no space")] },
+		];
+		const md = typedTextToMarkdown(paragraphs);
+		expect(md).toBe("- \\[x] milk\n- \\[ ] eggs\n- [ ] [x] still open\n- [x]no space");
+		expect(markdownToTypedText(md)).toEqual(paragraphs);
+	});
+
 	it("never loses or invents text, whatever was typed", () => {
 		const random = seeded(7);
-		const alphabet = ["a", "b", " ", "*", "-", "#", "\\", "["];
-		for (let round = 0; round < 2000; round++) {
+		const alphabet = ["a", "b", " ", "*", "-", "#", "\\", "[", "]", "x", "\t"];
+		for (let round = 0; round < 4000; round++) {
 			const spans: TextSpan[] = [];
 			for (let i = 0, count = 1 + Math.floor(random() * 4); i < count; i++) {
 				let text = "";
@@ -96,10 +108,11 @@ describe("typedTextToMarkdown", () => {
 				}
 				spans.push(span(text, random() < 0.4, random() < 0.4));
 			}
-			const style = random() < 0.5 ? "plain" : "bullet";
+			const style = PARAGRAPH_STYLES[Math.floor(random() * PARAGRAPH_STYLES.length)];
 			const md = typedTextToMarkdown([{ style, spans }]);
 			const back = markdownToTypedText(md);
-			expect(back.map((p) => p.style)).toEqual([style]);
+			// A basic paragraph has no markdown of its own: it comes back plain.
+			expect(back.map((p) => p.style)).toEqual([style === "basic" ? "plain" : style]);
 			expect(back[0].spans.map((s) => s.text).join("")).toBe(spans.map((s) => s.text).join(""));
 			// Whatever emphasis markdown could not carry, the next sync sees no change.
 			expect(typedTextToMarkdown(back)).toBe(md);

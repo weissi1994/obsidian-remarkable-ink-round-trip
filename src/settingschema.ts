@@ -135,6 +135,22 @@ export function checkEndpoint(value: string): string | undefined {
 	return undefined;
 }
 
+/**
+ * The archive folder must not lie inside a sync folder (nor hold one): its
+ * notes would be sync-folder notes again, and an archived note is only ever
+ * brought back by the owner moving it out.
+ */
+export function checkArchiveFolder(archiveFolder: string, watchFolderPath: string): string | undefined {
+	const archive = cleanPath(archiveFolder);
+	if (archive === "") return "Choose a folder for archived notes.";
+	const inside = (path: string, folder: string) => path === folder || path.startsWith(`${folder}/`);
+	const clash = watchFolderPath
+		.split(",")
+		.map(cleanPath)
+		.find((folder) => folder !== "" && (inside(archive, folder) || inside(folder, archive)));
+	return clash === undefined ? undefined : `The archive folder cannot be inside a sync folder or hold one (“${clash}”).`;
+}
+
 export const SETTING_SECTIONS: SectionSpec[] = [
 	{
 		heading: "Connection",
@@ -217,6 +233,15 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 					"Before tablet changes go into a note, its previous version is saved " +
 					"here (one copy per note, replaced each time).",
 				control: { type: "text", placeholder: "reMarkable-in/previous", sanitise: "path" },
+			},
+			{
+				key: "archiveFolder",
+				name: "Folder for archived notes",
+				desc:
+					"A note whose notebook you delete on the reMarkable moves here instead of being deleted, " +
+					"and is no longer synced. Restore the notebook on the tablet, or move the note out of this " +
+					"folder, to sync it again. Not inside a sync folder.",
+				control: { type: "text", placeholder: "reMarkable/Archive", sanitise: "path" },
 			},
 		],
 	},

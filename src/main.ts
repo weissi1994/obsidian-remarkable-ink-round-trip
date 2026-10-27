@@ -26,7 +26,7 @@ import {
 	updateProgress,
 } from "./notify";
 import type { ProgressCount } from "./status";
-import { SyncStatusModal } from "./syncstatusmodal";
+import { StopSyncingModal, SyncStatusModal } from "./syncstatusmodal";
 import { buildSyncStatusSummary } from "./sync/statussummary";
 import {
 	DEFAULT_SETTINGS,
@@ -45,7 +45,8 @@ import {
 	rmfakecloudEndpoints,
 } from "./transport/cloud";
 import { installFetchShim, ShimTransport } from "./transport/fetchshim";
-import { MirrorTransport, toTransportError } from "./transport/mirror";
+import { toTransportError } from "./transport/mirror";
+import { ensureFolderPath, editMetadata, readListing } from "./transport/metadata";
 import {
 	describeByteCompat,
 	describeDiagnosis,
@@ -53,14 +54,29 @@ import {
 } from "./transport/diagnose";
 import { ByteCompatReport, installByteCompat } from "./transport/bytescompat";
 import { EmbedContent } from "./preprocess/preprocess";
-import { DOCID_FRONTMATTER_KEY, duplicateIdLosers, generateDocId } from "./id/docid";
-import { NoteInput, SendResult, notesNeedingUpload, sendBatch } from "./sync/send";
+import { DOCID_FRONTMATTER_KEY, generateDocId, isValidDocId } from "./id/docid";
+import type { NoteInput, SendResult } from "./sync/send";
 import { mergeTabletChanges } from "./sync/twoway";
 import { mergeIntoNote } from "./sync/notewrite";
 import { SyncState, type SharedHandwriting, type StateFs } from "./sync/syncstate";
-import { findNewNotebooks, importedNote, importNotebooks, noteFileName, writtenByPlugin } from "./sync/deviceimport";
+import {
+	findNewNotebooks,
+	importedNote,
+	importNotebooks,
+	noteFileName,
+	reimportNotebook,
+	writtenByPlugin,
+	type DeviceItem,
+} from "./sync/deviceimport";
+import { SyncEngine, type EnginePorts } from "./sync/engine";
 import { parseRmScene } from "./incoming/rmscene";
-import { NotebookChangedError, readNotebook } from "./transport/notebook";
+import {
+	InPlaceRefusedError,
+	NotebookChangedError,
+	NotebookGoneError,
+	readNotebook,
+	type NotebookPageFile,
+} from "./transport/notebook";
 import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
 import { confirmAllRemarks, confirmRemarkAt, findRemark, remarkAt, remarkId } from "./incoming/remarkid";
@@ -119,11 +135,11 @@ import { paintPlan, planRender } from "./incoming/strokerender";
 import { MappingEntry, MappingTable, contentHash, migrateMapping } from "./id/mapping";
 import { displayTextForLink, parseFrontmatter, preprocess, splitNote } from "./preprocess/preprocess";
 import type { AnnotationOutcome } from "./incoming/annotationnote";
-import { WatchQueue, parseFolderList } from "./sync/watcher";
+import { WatchQueue, isInWatchFolder, parseFolderList, renameInFolderList } from "./sync/watcher";
 import { PullQueue, PushQueue, SyncQueueCoordinator } from "./sync/queues";
 import type { RawSyncApi } from "./transport/notebook";
 import type { Highlight } from "./incoming/highlights";
-import { flattenSelection, relativeFolderPath } from "./sync/selection";
+import { flattenSelection } from "./sync/selection";
 import { shouldAnnounceUpdate } from "./updatenotice";
 import { InkEdge } from "./inkedge";
 import { gridSizeFor, InkImage, InkStrokes, inkStrokesOf, Picture, quantizeImage } from "./ink/inkimage";
@@ -163,6 +179,11 @@ export default class RoundTripPlugin extends Plugin {
 	/** Notebooks a pull run could not read, shared by the callers deduplicated onto it. */
 	private readonly pullUnread = new Map<string, Map<string, string>>();
 	private syncRunning: Promise<void> | null = null;
+	/**
+	 * Engine runs one at a time — a full sync, a watched note's send, a
+	 * manual send — so no two plan against the same notes at once.
+	 */
+	private engineTail: Promise<void> = Promise.resolve();
 	/** Progress of the upload batch running now, for the status panel. */
 	private uploading: { done: number; total: number } | null = null;
 	/** Built-in OCR: templates per handwriting version, the vault's words per run. */
@@ -235,14 +256,18 @@ export default class RoundTripPlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
+				const structural = file instanceof TFolder || this.isTracked(oldPath);
 				this.watchQueue?.noteRemoved(oldPath);
 				this.watchQueue?.noteChanged(file.path);
+				if (file instanceof TFolder) void this.folderRenamed(oldPath, file.path);
+				else if (structural) this.watchQueue?.structureChanged();
 			}),
 		);
 		this.registerEvent(
-			this.app.vault.on("delete", (file) =>
-				this.watchQueue?.noteRemoved(file.path),
-			),
+			this.app.vault.on("delete", (file) => {
+				this.watchQueue?.noteRemoved(file.path);
+				if (file instanceof TFolder || this.isTracked(file.path)) this.watchQueue?.structureChanged();
+			}),
 		);
 
 		this.addRibbonIcon("tablet", "reMarkable sync", (event) => {
@@ -290,6 +315,16 @@ export default class RoundTripPlugin extends Plugin {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md") return false;
 				if (!checking) void this.sendFiles([file]);
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "stop-syncing-current-note",
+			name: "Stop syncing current note with reMarkable",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || this.recordOf(file) === undefined) return false;
+				if (!checking) this.stopSyncing(file);
 				return true;
 			},
 		});
@@ -424,6 +459,14 @@ export default class RoundTripPlugin extends Plugin {
 							.setIcon("refresh-cw")
 							.onClick(() => void this.sendFiles([file])),
 					);
+					if (this.recordOf(file) !== undefined) {
+						menu.addItem((item) =>
+							item
+								.setTitle("Stop syncing with reMarkable")
+								.setIcon("unlink")
+								.onClick(() => this.stopSyncing(file)),
+						);
+					}
 				}
 				if (file instanceof TFolder) {
 					menu.addItem((item) =>
@@ -517,6 +560,12 @@ export default class RoundTripPlugin extends Plugin {
 		// (bevinding eigenaar 2026-08-13; the spike flag that surfaced it is
 		// gone since GP_E7_S2, the preservation stays).
 		this.extraData = extrasFrom(stored);
+		if (this.settings.installId === "") {
+			// Once per install, kept with this device's settings: it tells this
+			// copy's sends in flight from another copy's (SyncState.settlePending).
+			this.settings.installId = generateDocId();
+			await this.saveData(storedFrom({ ...this.settings, mappings: {} }, this.extraData));
+		}
 		await this.openState(stored.mappings ?? {});
 	}
 
@@ -527,7 +576,7 @@ export default class RoundTripPlugin extends Plugin {
 	 * wins. Sends, hands and word samples follow once.
 	 */
 	private async openState(legacy: MappingTable): Promise<void> {
-		this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
+		this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder, this.settings.installId);
 		const shared = await this.state.loadMappings();
 		const migrated = Object.fromEntries(Object.entries(legacy).map(([docId, entry]) => [docId, migrateMapping(entry)]));
 		this.settings.mappings = { ...migrated, ...shared };
@@ -568,7 +617,7 @@ export default class RoundTripPlugin extends Plugin {
 	 * account listing: done before anything reads or sends, so a landed
 	 * notebook is known before its note could be sent a second time.
 	 */
-	private async settlePendingSends(present: ReadonlySet<string>, log: (line: string) => void): Promise<void> {
+	private async settlePendingSends(present: ReadonlyMap<string, string>, log: (line: string) => void): Promise<void> {
 		const settled = await this.state.settlePending(this.settings.mappings, present);
 		if (settled.committed.length === 0 && settled.dropped.length === 0) return;
 		this.settings.mappings = settled.table;
@@ -632,7 +681,7 @@ export default class RoundTripPlugin extends Plugin {
 		// The mappings live in the shared state folder, not with this device's settings.
 		await this.saveData(storedFrom({ ...this.settings, mappings: {} }, this.extraData));
 		if (this.state.root !== this.settings.syncStateFolder) {
-			this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder);
+			this.state = new SyncState(vaultFs(this.app), this.settings.syncStateFolder, this.settings.installId);
 		}
 		await this.state.saveMappings(this.settings.mappings);
 		await this.state.saveHandwriting(handwritingOf(this.settings));
@@ -720,11 +769,15 @@ export default class RoundTripPlugin extends Plugin {
 			excludeFolders: [this.settings.backupFolder.replace(/^\/+|\/+$/g, "") || "previous"],
 			setTimer: (fn, ms) => window.setTimeout(fn, ms),
 			clearTimer: (id) => window.clearTimeout(id),
+			// Through the same one-at-a-time engine as a full sync: names and
+			// folders are brought together first, then the notes are sent.
 			onReady: (paths) => {
-				const files = paths
-					.map((path) => this.app.vault.getFileByPath(path))
-					.filter((file): file is TFile => file instanceof TFile);
-				if (files.length > 0) void this.sendFiles(files, { auto: true });
+				void this.runEngine((engine) =>
+					engine.send(
+						paths.filter((path) => this.app.vault.getFileByPath(path) !== null),
+						{ auto: true, background: true },
+					),
+				);
 			},
 		});
 	}
@@ -783,50 +836,267 @@ export default class RoundTripPlugin extends Plugin {
 			return Promise.resolve();
 		}
 		if (this.syncRunning !== null) return this.syncRunning;
-		this.syncRunning = (async () => {
-			try {
-				const { changed, unread } = await this.pullAnnotations({ background: options.background });
-				// Notebooks started on the tablet: in as notes, then out below as ink.
-				const imported = await this.importNewNotebooks(options.background === true);
-				for (const path of imported) changed.add(path);
-				const files = new Map<string, TFile>();
-				for (const file of this.syncFolderFiles()) files.set(file.path, file);
-				// A note synced once from outside the folders stays in sync too.
-				for (const entry of Object.values(this.settings.mappings)) {
-					if (entry.format !== "ink") continue;
-					const file = this.resolveNote(entry);
-					if (file !== null) files.set(file.path, file);
-				}
-				for (const path of changed) {
-					const file = this.app.vault.getFileByPath(path);
-					if (file !== null) files.set(file.path, file);
-				}
-				if (files.size === 0) return;
-				await this.sendFiles([...files.values()], {
-					auto: true,
-					pullFirst: false,
-					background: options.background,
-					unread,
-				});
-			} finally {
-				this.syncRunning = null;
-			}
-		})();
+		this.syncRunning = this.runEngine((engine) => engine.sync({ background: options.background })).finally(() => {
+			this.syncRunning = null;
+		});
 		return this.syncRunning;
 	}
 
 	/**
-	 * Bring notebooks started on the tablet into the vault (sync/deviceimport.ts):
+	 * Run one engine pass once the ones before it are done. What it did to
+	 * names, folders and the archive goes to the sync log note.
+	 */
+	private runEngine(run: (engine: SyncEngine) => Promise<void>): Promise<void> {
+		const next = this.engineTail.then(async () => {
+			const lines: string[] = [];
+			try {
+				await run(this.createEngine(lines));
+			} catch (error) {
+				console.warn(`reMarkable Ink Round-Trip: sync failed — ${toTransportError(error).message}`);
+			} finally {
+				if (lines.length > 0) {
+					const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+					await this.appendReport(`reMarkable Ink Round-Trip — notes and notebooks (${stamp})\n${lines.join("\n")}`);
+					notify(`reMarkable sync:\n${lines.slice(0, 3).join("\n")}${lines.length > 3 ? "\n… see the sync log" : ""}`, 10000);
+				}
+			}
+		});
+		this.engineTail = next;
+		return next;
+	}
+
+	/** The engine on this vault and account, for one run: one cloud session, one listing cache. */
+	private createEngine(lines: string[]): SyncEngine {
+		let session: Promise<RawSyncApi> | null = null;
+		const raw = () => (session ??= remarkable(this.settings.deviceToken, this.rmapiOptions()).then((api) => api.raw));
+		let cache: Record<string, DeviceItem> | null = null;
+		// The send reads the notebook again on these; anything else is a transport failure.
+		const passThrough = (error: unknown): never => {
+			throw error instanceof NotebookChangedError || error instanceof NotebookGoneError || error instanceof InPlaceRefusedError
+				? error
+				: toTransportError(error);
+		};
+		let notice: ProgressHandle | null = null;
+		const ports: EnginePorts = {
+			vault: {
+				notes: () => this.vaultNotes(),
+				move: (from, to) => this.moveNote(from, to),
+				setDocId: (path, docId) => this.setDocId(path, docId),
+				load: async (path) => {
+					const file = this.app.vault.getFileByPath(path);
+					if (file === null || file.extension !== "md") return null;
+					const content = await this.app.vault.read(file);
+					const embeds = await this.buildEmbedMap(file);
+					return {
+						note: { path, basename: file.basename, content, existingDocId: this.noteDocId(file, content) },
+						resolveEmbed: (linkpath) => embeds.get(linkpath) ?? { kind: "missing" },
+					};
+				},
+			},
+			cloud: {
+				listing: async () => {
+					cache ??= await this.ink.loadDeviceItems();
+					const before = JSON.stringify(cache);
+					const listing = await readListing(await raw(), cache);
+					if (JSON.stringify(cache) !== before) await this.ink.saveDeviceItems(cache);
+					return listing;
+				},
+				ensureFolder: async (path, listing) => ensureFolderPath(await raw(), listing, path).catch(passThrough),
+				editMetadata: async (id, expectedHash, update) => editMetadata(await raw(), id, expectedHash, update).catch(passThrough),
+				uploadInk: async (visibleName, pages, options) =>
+					this.ink
+						.upload(await raw(), visibleName, pages, {
+							parentId: options.parentId,
+							replaces: options.replaces,
+							expectedHash: options.expectedHash,
+							docId: options.deviceDocId,
+							pageIds: options.pageIds,
+						})
+						.catch(passThrough),
+				updateInk: async (deviceDocId, visibleName, pages, options) =>
+					this.ink.update(await raw(), deviceDocId, visibleName, pages, options).catch(passThrough),
+			},
+			records: {
+				get: () => this.settings.mappings,
+				set: async (table) => {
+					this.settings.mappings = table;
+					await this.persistSettings();
+				},
+				refresh: () => this.refreshState(),
+				settle: async (present) => {
+					const out: string[] = [];
+					await this.settlePendingSends(present, (line) => out.push(line));
+					return out;
+				},
+				persistPending: (docId, sent, mapping, previousHash) => this.state.writePending(docId, sent, mapping, previousHash),
+				commitSent: (docId, sent, mapping) => this.state.commitSent(docId, sent, mapping),
+			},
+			content: {
+				pull: async (docIds, options) => {
+					if (options.nested !== true) return this.pullAnnotations({ docIds, background: options.background });
+					const changed = new Set<string>();
+					const unread = new Map<string, string>();
+					await this.runPullAnnotations({ docIds, nested: true }, changed, unread);
+					return { changed, unread };
+				},
+				reimport: async (docId) => this.reimportDeviceNotebook(docId, await raw()),
+				importNew: async (listing, background) => this.importNewNotebooks(listing, cache ?? {}, await raw(), background),
+			},
+			send: {
+				render: (blocks, title, docId, layout, images, drawings) =>
+					this.ink.renderForSend(blocks, title, docId, layout, images, drawings),
+				loadImages: (note) => this.noteImages(note),
+				loadDrawings: (markdown) => this.noteDrawings(markdown),
+				prepare: () => this.ink.prepareSend(),
+				layout: sendLayout(this.settings),
+				frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
+				progress: (done, total) => {
+					notice ??= this.progress(`Sending 0/${total} to reMarkable…`, { done: 0, total });
+					this.uploading = { done, total };
+					updateProgress(notice, `Sending ${done}/${total} to reMarkable…`, { done, total });
+				},
+				report: async (results, { auto, background, failure }) => {
+					notice?.hide();
+					notice = null;
+					this.uploading = null;
+					if (failure !== undefined) {
+						if (background) console.warn(`reMarkable Ink Round-Trip: ${failure}`);
+						else notify(failure.startsWith("No markdown") ? failure : `${failure} No notes were uploaded.`, 10000);
+						return;
+					}
+					reportResults(results, { quietWhenAllSkipped: auto, quiet: background });
+					const attention = [
+						...results.flatMap((r) => (r.ok ? (r.warning === undefined ? [] : [`${r.path}: ${r.warning}`]) : [`${r.path}: ${r.error}`])),
+						...this.stateProblems().map((problem) => `sync state: ${problem}`),
+					];
+					if (attention.length > 0) {
+						const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+						await this.appendReport(`reMarkable Ink Round-Trip — send (${stamp})\n${attention.join("\n")}`);
+					}
+				},
+			},
+			policy: () => ({
+				baseFolder: this.settings.mirrorFolders ? this.settings.deviceBaseFolder : null,
+				archiveFolder: this.settings.archiveFolder,
+				syncFolders: this.settings.watchFolderEnabled ? parseFolderList(this.settings.watchFolderPath) : [],
+				// The safety-net copies are the plugin's own writes, never notes to send.
+				excludeFolders: [this.settings.backupFolder.replace(/^\/+|\/+$/g, "") || "previous"],
+			}),
+			log: (line) => lines.push(line),
+			push: (work) => this.pushQueue.enqueue(work),
+		};
+		return new SyncEngine(ports);
+	}
+
+	/**
+	 * Every note with the document id in its frontmatter. A note the metadata
+	 * cache has not indexed yet is read: taking it for one without an id would
+	 * make its notebook look deleted in the vault.
+	 */
+	private async vaultNotes(): Promise<{ path: string; docId?: string; ctime: number }[]> {
+		const out: { path: string; docId?: string; ctime: number }[] = [];
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			const cache = this.app.metadataCache.getFileCache(file);
+			const value =
+				cache === null
+					? parseFrontmatter(await this.app.vault.cachedRead(file)).fields[DOCID_FRONTMATTER_KEY]
+					: getFrontmatterValue(cache.frontmatter, DOCID_FRONTMATTER_KEY);
+			out.push({ path: file.path, ctime: file.stat.ctime, ...(isValidDocId(value) ? { docId: value } : {}) });
+		}
+		return out;
+	}
+
+	/** Move a note with Obsidian's file manager (links follow); a taken path gets a number. */
+	private async moveNote(from: string, to: string): Promise<string> {
+		const file = this.app.vault.getFileByPath(from);
+		if (file === null) throw new Error(`“${from}” is not in the vault.`);
+		if (from === to) return to;
+		const stem = to.replace(/\.md$/i, "");
+		let path = to;
+		for (let n = 2; this.app.vault.getAbstractFileByPath(path) !== null; n++) path = `${stem} (${n}).md`;
+		await this.ensureParentFolders(path);
+		this.watchQueue?.suppress(path, 5000);
+		await this.app.fileManager.renameFile(file, path);
+		return path;
+	}
+
+	private async setDocId(path: string, docId: string | null): Promise<void> {
+		const file = this.app.vault.getFileByPath(path);
+		if (file === null) return;
+		this.watchQueue?.suppress(path, 5000);
+		await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+			if (docId === null) delete fm[DOCID_FRONTMATTER_KEY];
+			else fm[DOCID_FRONTMATTER_KEY] = docId;
+		});
+	}
+
+	/** Whether a path is a synced note, or a folder holding one. */
+	private isTracked(path: string): boolean {
+		return Object.values(this.settings.mappings).some((entry) => isInWatchFolder(entry.notePath, path));
+	}
+
+	/**
+	 * A vault folder was renamed: the sync folders and the archive folder
+	 * follow it (a renamed archive must not read as every archived note taken
+	 * out of it). The notes inside follow on the next run, as moved notes.
+	 */
+	private async folderRenamed(from: string, to: string): Promise<void> {
+		const watched = renameInFolderList(this.settings.watchFolderPath, from, to);
+		const archive = renameInFolderList(this.settings.archiveFolder, from, to);
+		if (watched !== null) this.settings.watchFolderPath = watched;
+		if (archive !== null) this.settings.archiveFolder = archive;
+		if (watched !== null || archive !== null) await this.saveSettings();
+		this.watchQueue?.structureChanged();
+	}
+
+	/** The record of a synced note, by the id in its frontmatter. */
+	private recordOf(file: TFile): MappingEntry | undefined {
+		const docId = getFrontmatterValue(this.app.metadataCache.getFileCache(file)?.frontmatter, DOCID_FRONTMATTER_KEY);
+		return typeof docId === "string" ? this.settings.mappings[docId] : undefined;
+	}
+
+	/** "Stop syncing": forget the note's notebook, asking whether it goes to the tablet's trash. */
+	private stopSyncing(file: TFile): void {
+		const entry = this.recordOf(file);
+		if (entry === undefined) return;
+		const inSyncFolder =
+			this.settings.watchFolderEnabled &&
+			parseFolderList(this.settings.watchFolderPath).some((folder) => isInWatchFolder(file.path, folder));
+		new StopSyncingModal(this.app, {
+			name: file.basename,
+			inSyncFolder,
+			onConfirm: (trashNotebook) =>
+				void this.runEngine(async (engine) => {
+					const outcome = await engine.unlink(entry.docId, file.path, trashNotebook);
+					notify(
+						outcome === "trashed"
+							? `“${file.basename}” is no longer synced; its notebook is in the reMarkable's trash.`
+							: outcome === "changed"
+								? `“${file.basename}” is no longer synced. Its notebook was written in since the last sync, so it was kept on the reMarkable.`
+								: `“${file.basename}” is no longer synced; its notebook stays on the reMarkable.`,
+						8000,
+					);
+				}),
+		}).open();
+	}
+
+	/**
+	 * Notebooks started on the tablet, brought into the vault (sync/deviceimport.ts):
 	 * those in the device folder of a synced vault folder that the plugin did
 	 * not write. Each becomes a note — page images and their text — mapped to
 	 * the original, so the send that follows replaces it with a handwritten
-	 * notebook of the note. Returns the new notes' paths.
+	 * notebook of the note. Resolves to the new notes' paths.
 	 */
-	private importNewNotebooks(background: boolean): Promise<string[]> {
+	private importNewNotebooks(
+		listing: DeviceItem[],
+		cache: Record<string, DeviceItem>,
+		api: RawSyncApi,
+		background: boolean,
+	): Promise<string[]> {
 		const created: string[] = [];
 		if (!this.settings.watchFolderEnabled || !this.settings.mirrorFolders) return Promise.resolve(created);
 		return this.pullQueue
-			.enqueue("import-new-notebooks", () => this.runImportNewNotebooks(created, background))
+			.enqueue("import-new-notebooks", () => this.runImportNewNotebooks(listing, cache, api, created, background))
 			.then(() => created)
 			.catch((error: unknown) => {
 				const message = toTransportError(error).message;
@@ -836,35 +1106,19 @@ export default class RoundTripPlugin extends Plugin {
 			});
 	}
 
-	private async runImportNewNotebooks(created: string[], background: boolean): Promise<void> {
+	private async runImportNewNotebooks(
+		listing: DeviceItem[],
+		cache: Record<string, DeviceItem>,
+		api: RawSyncApi,
+		created: string[],
+		background: boolean,
+	): Promise<void> {
 		this.examples = null;
-		const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
-		const cache = await this.ink.loadDeviceItems();
-		const live = await api.listIds(true);
-		const present = new Set<string>();
-		for (const { id, hash } of live) {
-			present.add(id);
-			if (cache[id]?.hash === hash) continue;
-			try {
-				const meta = await api.getMetadata(id, hash);
-				cache[id] = {
-					id,
-					hash,
-					type: meta.type,
-					parent: meta.parent,
-					visibleName: meta.visibleName,
-					lastModified: meta.lastModified,
-				};
-			} catch {
-				// One unreadable item must not stop the rest; it is tried again next time.
-			}
-		}
-		for (const id of Object.keys(cache)) if (!present.has(id)) delete cache[id];
 		const known = new Set(Object.values(this.settings.mappings).map((entry) => entry.deviceDocId));
 		for (const sheet of [this.settings.pendingSheet, this.settings.pendingWordSheet, this.settings.pendingTestSheet]) {
 			if (sheet !== null) known.add(sheet.deviceDocId);
 		}
-		const found = findNewNotebooks(Object.values(cache), {
+		const found = findNewNotebooks(listing, {
 			baseFolder: this.settings.deviceBaseFolder,
 			vaultFolders: parseFolderList(this.settings.watchFolderPath),
 			known,
@@ -874,44 +1128,25 @@ export default class RoundTripPlugin extends Plugin {
 		const { created: paths, failed } = await importNotebooks(
 			found,
 			async (notebook) => {
-				const { pages, content, hash } = await readNotebook(api.raw, notebook.id);
-				if (content === null || (JSON.parse(content) as { fileType?: string }).fileType !== "notebook") {
+				const read = await this.notebookPages(api, notebook.id);
+				if (read === null) {
 					cache[notebook.id] = { ...cache[notebook.id], notNotebook: true };
 					return null;
 				}
-				if (pages.some((page) => writtenByPlugin(parseRmScene(page.bytes).authors))) {
+				if (read.pages.some((page) => writtenByPlugin(parseRmScene(page.bytes).authors))) {
 					cache[notebook.id] = { ...cache[notebook.id], ours: true };
 					return null;
 				}
-				const order = parsePageOrder(content);
-				pages.sort((a, b) => order.indexOf(a.pageId) - order.indexOf(b.pageId));
-				const written: { image?: string; text?: string }[] = [];
-				for (const [index, page] of pages.entries()) {
-					const strokes = parseRmPage(page.bytes).strokes;
-					if (strokes.length === 0) continue;
-					const request: StrokeRenderRequest = {
-						deviceDocId: notebook.id,
-						strokes,
-						page: index + 1,
-						remark: 1,
-						wholePage: true,
-					};
-					const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
-					const read =
-						this.settings.ocrMode === "builtin"
-							? await this.recognizeLocally(request)
-							: this.settings.ocrMode === "endpoint"
-								? await this.transcribeStrokes(request).catch(() => null)
-								: null;
-					const text = read?.text ?? null;
-					written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
-				}
+				const written = await this.pagesAsNote(notebook.id, read.pages);
 				const docId = generateDocId();
 				const base = [notebook.folder, noteFileName(notebook.name)].filter((part) => part !== "").join("/");
 				let path = `${base}.md`;
 				for (let n = 2; this.app.vault.getFileByPath(path) !== null; n++) path = `${base} (${n}).md`;
+				const text = importedNote(docId, written);
 				this.watchQueue?.suppress(path, 5000);
-				await this.writeVaultFile(path, importedNote(docId, written));
+				await this.writeVaultFile(path, text);
+				// The note as brought in: the base the next read of the notebook is merged against.
+				await this.state.writeSent(docId, { title: noteFileName(notebook.name), markdown: "", body: splitNote(text).body });
 				this.settings.mappings = {
 					...this.settings.mappings,
 					[docId]: {
@@ -923,7 +1158,7 @@ export default class RoundTripPlugin extends Plugin {
 						format: "device",
 						// What the note was made from: the send that replaces the
 						// notebook only does so while it is still exactly this.
-						accountedHash: hash,
+						accountedHash: read.hash,
 					},
 				};
 				await this.persistSettings();
@@ -936,7 +1171,6 @@ export default class RoundTripPlugin extends Plugin {
 			await this.ink.saveSamples();
 			this.samplesDirty = false;
 		}
-		await this.ink.saveDeviceItems(cache);
 		if (created.length > 0) notify(`Brought ${created.length} notebook(s) from the reMarkable into the vault.`);
 		if (failed.length > 0) {
 			const message =
@@ -951,12 +1185,83 @@ export default class RoundTripPlugin extends Plugin {
 		}
 	}
 
+	/** A notebook's pages in the order the tablet shows them, or null when it is not a notebook (a PDF, an EPUB). */
+	private async notebookPages(api: RawSyncApi, deviceDocId: string): Promise<{ pages: NotebookPageFile[]; hash: string } | null> {
+		const { pages, content, hash } = await readNotebook(api, deviceDocId);
+		const parsed: unknown = content === null ? null : JSON.parse(content);
+		if (typeof parsed !== "object" || parsed === null || !("fileType" in parsed) || parsed.fileType !== "notebook") return null;
+		const order = parsePageOrder(content ?? "");
+		pages.sort((a, b) => order.indexOf(a.pageId) - order.indexOf(b.pageId));
+		return { pages, hash };
+	}
+
+	/** Each written page as the imported note shows it: its ink as an image, its text as read. */
+	private async pagesAsNote(deviceDocId: string, pages: NotebookPageFile[]): Promise<{ image?: string; text?: string }[]> {
+		const written: { image?: string; text?: string }[] = [];
+		for (const [index, page] of pages.entries()) {
+			const strokes = parseRmPage(page.bytes).strokes;
+			if (strokes.length === 0) continue;
+			const request: StrokeRenderRequest = { deviceDocId, strokes, page: index + 1, remark: 1, wholePage: true };
+			const image = this.settings.importHandwriting ? await this.renderHandwriting(request) : null;
+			const read =
+				this.settings.ocrMode === "builtin"
+					? await this.recognizeLocally(request)
+					: this.settings.ocrMode === "endpoint"
+						? await this.transcribeStrokes(request).catch(() => null)
+						: null;
+			const text = read?.text ?? null;
+			written.push({ ...(image === null ? {} : { image }), ...(text === null ? {} : { text }) });
+		}
+		return written;
+	}
+
+	/**
+	 * A notebook brought in from the tablet and written in again before its
+	 * handwritten replacement went out: its pages read again and merged three
+	 * ways into the note (deviceimport.ts reimportNotebook), then recorded as
+	 * read so the send can go ahead. Resolves to whether the note changed.
+	 */
+	private async reimportDeviceNotebook(docId: string, api: RawSyncApi): Promise<boolean> {
+		const entry = this.settings.mappings[docId];
+		const file = entry === undefined ? null : this.resolveNote(entry);
+		if (entry === undefined || file === null) throw new Error("Its note is not in the vault.");
+		const read = await this.notebookPages(api, entry.deviceDocId);
+		if (read === null) throw new Error("It is no longer a notebook.");
+		if (read.hash === entry.accountedHash) return false;
+		this.examples = null;
+		const theirs = splitNote(importedNote(docId, await this.pagesAsNote(entry.deviceDocId, read.pages))).body;
+		const base = (await this.state.readSent(docId).catch(() => null))?.body ?? null;
+		const { written } = await reimportNotebook(
+			{
+				read: () => this.app.vault.read(file),
+				process: (change) => {
+					this.watchQueue?.suppress(file.path, 5000);
+					return this.app.vault.process(file, change);
+				},
+			},
+			async (preImage) => {
+				await this.writePreviousVersion(file, entry, preImage);
+			},
+			base,
+			theirs,
+		);
+		await this.state.writeSent(docId, { title: file.basename, markdown: "", body: theirs });
+		const latest = this.settings.mappings[docId] ?? entry;
+		this.settings.mappings = { ...this.settings.mappings, [docId]: { ...latest, accountedHash: read.hash } };
+		await this.persistSettings();
+		if (this.samplesDirty) {
+			await this.ink.saveSamples();
+			this.samplesDirty = false;
+		}
+		return written;
+	}
+
 	/** Write every note that has a notebook into a fresh one, read back first as always. */
 	private async resendAll(): Promise<void> {
 		await this.refreshState();
 		const files = new Map<string, TFile>();
 		for (const entry of Object.values(this.settings.mappings)) {
-			const file = this.resolveNote(entry);
+			const file = entry.state === "archived" ? null : this.resolveNote(entry);
 			if (file !== null) files.set(file.path, file);
 		}
 		if (files.size === 0) {
@@ -965,17 +1270,6 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		notify(`Re-sending ${files.size} note(s) — the reMarkable cloud paces this, so it takes a while.`, 8000);
 		await this.sendFiles([...files.values()]);
-	}
-
-	/** Every note in the sync folders, when they are on. */
-	private syncFolderFiles(): TFile[] {
-		if (!this.settings.watchFolderEnabled) return [];
-		const out: TFile[] = [];
-		for (const path of parseFolderList(this.settings.watchFolderPath)) {
-			const folder = this.app.vault.getFolderByPath(path);
-			if (folder !== null) out.push(...collectMarkdownFiles(folder));
-		}
-		return out;
 	}
 
 	/** (Re)start the background sync interval from the current settings. */
@@ -992,305 +1286,30 @@ export default class RoundTripPlugin extends Plugin {
 	}
 
 	/**
-	 * Send notes as handwritten notebooks. A note that already has a notebook
-	 * gets that notebook read first, so ink not yet in the note is merged
-	 * before the notebook is replaced; a note whose notebook could not be read
-	 * is held back. In `auto` mode unchanged notes are skipped and an
+	 * Send notes as handwritten notebooks, through the engine (sync/engine.ts):
+	 * names and folders are brought together first, a note's notebook is read
+	 * before it is written. In `auto` mode unchanged notes are skipped and an
 	 * all-skipped run stays silent — errors always surface.
 	 */
-	async sendFiles(
-		files: TFile[],
-		options: {
-			auto?: boolean;
-			structureRoot?: string;
-			/** Read the existing notebooks first (default); a sync already did. */
-			pullFirst?: boolean;
-			background?: boolean;
-			/** With `pullFirst: false`: the notebooks that read could not get (by note docId). */
-			unread?: ReadonlyMap<string, string>;
-		} = {},
-	): Promise<void> {
+	sendFiles(files: TFile[], options: { auto?: boolean; structureRoot?: string; background?: boolean } = {}): Promise<void> {
 		if (files.length === 0) {
 			if (options.background !== true) notify("No markdown notes to send.");
-			return;
+			return Promise.resolve();
 		}
-		const client = this.createClient();
-		if (!client.isRegistered) {
-			if (options.background !== true) {
-				notify("Not paired with a reMarkable account yet — open the plugin settings first.");
-			}
-			return;
+		if (!this.createClient().isRegistered) {
+			if (options.background !== true) notify("Not paired with a reMarkable account yet — open the plugin settings first.");
+			return Promise.resolve();
 		}
-		const renewed = await this.splitDuplicateIds(files);
-		let unread: ReadonlyMap<string, string> = options.unread ?? new Map<string, string>();
-		if (options.pullFirst !== false) {
-			const synced = files.filter((file) => this.syncedEntry(file) !== undefined);
-			if (synced.length > 0) {
-				unread = (await this.pullAnnotations({ only: synced, background: true })).unread;
-			}
-		}
-		await this.refreshState();
-		const notes: NoteInput[] = [];
-		const embedMaps = new Map<string, Map<string, EmbedContent>>();
-		try {
-			for (const file of files) {
-				const content = await this.app.vault.read(file);
-				notes.push({
-					path: file.path,
-					basename: file.basename,
-					content,
-					existingDocId: renewed.get(file.path) ?? this.noteDocId(file, content),
-				});
-				embedMaps.set(file.path, await this.buildEmbedMap(file));
-			}
-		} catch (error) {
-			notify(error instanceof Error ? error.message : String(error), 10000);
-			return;
-		}
-		let queuedNotes = notes;
-		if (options.auto) {
-			try {
-				queuedNotes = notesNeedingUpload(
-					notes,
-					this.settings.mappings,
-					(linkpath, notePath) =>
-						embedMaps.get(notePath)?.get(linkpath) ?? { kind: "missing" },
-					this.settings.frontmatterAsTitleBlock,
-				);
-			} catch (error) {
-				notify(error instanceof Error ? error.message : String(error), 10000);
-				return;
-			}
-		}
-		const queuedPaths = new Set(queuedNotes.map((note) => note.path));
-		const queuedFiles = files.filter((file) => queuedPaths.has(file.path));
-		const structureOnly =
-			!this.settings.mirrorFolders && options.structureRoot !== undefined;
-		const mirrorFoldersActive = this.settings.mirrorFolders || structureOnly;
-		let mirror: MirrorTransport | null = null;
-		let rawApi: RawSyncApi | null = null;
-		const parentIds = new Map<string, string>();
-		const targetFolder = (notePath: string): string => {
-			const dir = notePath.split("/").slice(0, -1).join("/");
-			return structureOnly
-				? relativeFolderPath(dir, options.structureRoot ?? "")
-				: dir;
-		};
-
-		await this.pushQueue
-			.enqueue({
-				ensureFolders: async () => {
-					if (queuedFiles.length === 0) return;
-					await this.ink.prepareSend();
-					try {
-						const api = await remarkable(
-							this.settings.deviceToken,
-							this.rmapiOptions(),
-						);
-						rawApi = api.raw;
-						// A send a crash interrupted is settled before any note is
-						// sent again: had it landed, sending anew would duplicate it.
-						const listing = await api.listIds(true);
-						await this.settlePendingSends(new Set(listing.map((item) => item.id)), (line) =>
-							console.warn(`reMarkable Ink Round-Trip: ${line}`),
-						);
-						mirror = new MirrorTransport(
-							api,
-							mirrorFoldersActive && !structureOnly
-								? this.settings.deviceBaseFolder
-								: "",
-						);
-						if (!mirrorFoldersActive) return;
-
-						const targets = [
-							...new Set(queuedFiles.map((file) => targetFolder(file.path))),
-						].sort(
-							(a, b) =>
-								a.split("/").filter(Boolean).length -
-									b.split("/").filter(Boolean).length || a.localeCompare(b),
-						);
-						for (const target of targets) {
-							parentIds.set(target, await mirror.ensureFolderPath(target));
-						}
-					} catch (error) {
-						console.error(
-							"reMarkable Round-Trip: folder preparation failed",
-							error,
-						);
-						throw toTransportError(error);
-					}
-				},
-				uploadFiles: async () => {
-					if (queuedNotes.length === 0) return;
-					const notice = this.progress(
-						`Sending 0/${queuedNotes.length} to reMarkable…`,
-						{ done: 0, total: queuedNotes.length },
-					);
-					this.uploading = { done: 0, total: queuedNotes.length };
-					try {
-						const activeMirror = mirror;
-						const activeRaw = rawApi;
-						// Only what the batch changed goes back: a re-read during
-						// the batch may have taken in other copies' mappings.
-						let batchBase = this.settings.mappings;
-						const applyBatch = (next: MappingTable): void => {
-							const merged = { ...this.settings.mappings };
-							for (const [docId, entry] of Object.entries(next)) {
-								if (entry !== batchBase[docId]) merged[docId] = entry;
-							}
-							this.settings.mappings = merged;
-							batchBase = next;
-						};
-						const { results, table } = await sendBatch(
-							queuedNotes,
-							this.settings.mappings,
-							{
-								client: {
-									uploadInk: (visibleName, pages, uploadOptions) => {
-										if (activeRaw === null) {
-											return Promise.reject(new Error("The reMarkable sync API is not available right now."));
-										}
-										return this.ink
-											.upload(activeRaw, visibleName, pages, {
-												parentId: uploadOptions.parentId,
-												replaces: uploadOptions.replaces,
-												expectedHash: uploadOptions.expectedHash,
-												docId: uploadOptions.deviceDocId,
-												pageIds: uploadOptions.pageIds,
-											})
-											.catch((error: unknown) => {
-												// The send reads the notebook again on this one.
-												throw error instanceof NotebookChangedError ? error : toTransportError(error);
-											});
-									},
-								},
-								ink: {
-									render: (blocks, title, docId, layout, images, drawings) =>
-										this.ink.renderForSend(blocks, title, docId, layout, images, drawings),
-									loadImages: (note) => this.noteImages(note),
-									loadDrawings: (markdown) => this.noteDrawings(markdown),
-									persistPending: (docId, sent, mapping) => this.state.writePending(docId, sent, mapping),
-									commitSent: (docId, sent, mapping) => this.state.commitSent(docId, sent, mapping),
-								},
-								resolveParent:
-									activeMirror && mirrorFoldersActive
-										? (notePath) => {
-												const target = targetFolder(notePath);
-												if (!parentIds.has(target)) {
-													return Promise.reject(
-														new Error(
-															`Device folder was not prepared for "${notePath}".`,
-														),
-													);
-												}
-												return Promise.resolve(parentIds.get(target) ?? "");
-											}
-										: undefined,
-								// The old notebook's ink was pulled into the note just
-								// before this send; it goes only while it is still as read.
-								replacePrevious: activeMirror
-									? (previousId, expectedHash) => activeMirror.trashPrevious(previousId, expectedHash)
-									: undefined,
-								unread,
-								reread: async (note, docId) => {
-									const file = this.app.vault.getFileByPath(note.path);
-									if (file === null || this.syncedEntry(file) === undefined) return null;
-									const failed = new Map<string, string>();
-									await this.runPullAnnotations({ only: [file], nested: true }, new Set<string>(), failed);
-									if (failed.size > 0) return null;
-									const content = await this.app.vault.read(file);
-									embedMaps.set(file.path, await this.buildEmbedMap(file));
-									return { note: { ...note, content }, entry: this.settings.mappings[docId] };
-								},
-								resolveEmbed: (linkpath, notePath) =>
-									embedMaps.get(notePath)?.get(linkpath) ?? { kind: "missing" },
-								persistDocId: async (note, docId) => {
-									const file = this.app.vault.getFileByPath(note.path);
-									if (!file) return;
-									this.watchQueue?.suppress(file.path, 5000);
-									await this.app.fileManager.processFrontMatter(file, (fm) => {
-										(fm as Record<string, unknown>)[DOCID_FRONTMATTER_KEY] =
-											docId;
-									});
-								},
-								layout: sendLayout(this.settings),
-								frontmatterAsTitleBlock: this.settings.frontmatterAsTitleBlock,
-								skipUnchanged: options.auto === true,
-							},
-							(done, total) => {
-								this.uploading = { done, total };
-								updateProgress(notice, `Sending ${done}/${total} to reMarkable…`, { done, total });
-							},
-							async (checkpoint) => {
-								applyBatch(checkpoint);
-								await this.persistSettings();
-							},
-						);
-
-						applyBatch(table);
-						await this.persistSettings();
-						reportResults(results, {
-							quietWhenAllSkipped: options.auto === true,
-							quiet: options.background === true,
-						});
-						const attention = [
-							...results.flatMap((r) => (r.ok ? (r.warning === undefined ? [] : [`${r.path}: ${r.warning}`]) : [`${r.path}: ${r.error}`])),
-							...this.stateProblems().map((problem) => `sync state: ${problem}`),
-						];
-						if (attention.length > 0) {
-							const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-							await this.appendReport(`reMarkable Ink Round-Trip — send (${stamp})\n${attention.join("\n")}`);
-						}
-					} finally {
-						this.uploading = null;
-						notice.hide();
-					}
-				},
-			})
-			.catch((error: unknown) => {
-				const message = error instanceof Error ? error.message : String(error);
-				if (options.background === true) console.warn(`reMarkable Ink Round-Trip: ${message}`);
-				else notify(`${message} No notes were uploaded.`, 10000);
-			});
-	}
-
-	/** A note's document id: the metadata cache, or its own frontmatter for a note just written. */
-	private noteDocId(file: TFile, content: string): unknown {
-		return (
-			getFrontmatterValue(this.app.metadataCache.getFileCache(file)?.frontmatter, DOCID_FRONTMATTER_KEY) ??
-			parseFrontmatter(content).fields[DOCID_FRONTMATTER_KEY]
-		);
+		return this.runEngine((engine) => engine.send(files.map((file) => file.path), options));
 	}
 
 	/**
-	 * Give every copy of a note a document id of its own before anything is
-	 * sent: Obsidian's "Make a copy" duplicates the id, and two notes on one
-	 * id would keep replacing each other's notebook. The copies become new
-	 * notes (docid.ts duplicateIdLosers decides which one keeps the id).
-	 * Returns the new ids by path — the metadata cache lags behind the write.
+	 * A note's document id: its own frontmatter as just read — the metadata
+	 * cache lags behind a fresh write, such as a copy's new id — else the cache.
 	 */
-	private async splitDuplicateIds(files: TFile[]): Promise<Map<string, string>> {
-		const notes: { path: string; docId: unknown; ctime: number }[] = [];
-		for (const file of files) {
-			notes.push({ path: file.path, docId: this.noteDocId(file, await this.app.vault.cachedRead(file)), ctime: file.stat.ctime });
-		}
-		const renewed = new Map<string, string>();
-		for (const path of duplicateIdLosers(notes, (docId) => this.settings.mappings[docId]?.notePath)) {
-			const file = this.app.vault.getFileByPath(path);
-			if (file === null) continue;
-			const docId = generateDocId();
-			this.watchQueue?.suppress(path, 5000);
-			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				(fm as Record<string, unknown>)[DOCID_FRONTMATTER_KEY] = docId;
-			});
-			renewed.set(path, docId);
-			const line =
-				`“${path}” shared its ${DOCID_FRONTMATTER_KEY} with another note (a copy?); ` +
-				`it now has its own (${docId}) and gets a notebook of its own.`;
-			console.warn(`reMarkable Ink Round-Trip: ${line}`);
-			await this.appendReport(line);
-		}
-		return renewed;
+	private noteDocId(file: TFile, content: string): unknown {
+		const own = parseFrontmatter(content).fields[DOCID_FRONTMATTER_KEY];
+		return isValidDocId(own) ? own : getFrontmatterValue(this.app.metadataCache.getFileCache(file)?.frontmatter, DOCID_FRONTMATTER_KEY);
 	}
 
 	/** The mapping entry of a note that has a handwritten notebook, if any. */
@@ -1454,9 +1473,9 @@ export default class RoundTripPlugin extends Plugin {
 	 * be read (by note docId, with the reason): their notes must not be sent.
 	 */
 	async pullAnnotations(
-		options: { force?: boolean; only?: TFile[]; background?: boolean } = {},
+		options: { force?: boolean; only?: TFile[]; docIds?: string[]; background?: boolean } = {},
 	): Promise<{ changed: Set<string>; unread: Map<string, string> }> {
-		const scopeKey = options.only?.map((file) => file.path).join("|") ?? "all";
+		const scopeKey = options.docIds?.join("|") ?? options.only?.map((file) => file.path).join("|") ?? "all";
 		const key = `annotations:${options.force === true ? "force" : "changed"}:${scopeKey}`;
 		// A run deduplicated onto an identical one already queued leaves this
 		// set empty: that run's caller sends what it changed. What could not be
@@ -1481,17 +1500,22 @@ export default class RoundTripPlugin extends Plugin {
 	 * holds the sync queue — so no yielding to pushes, and nothing shown.
 	 */
 	private async runPullAnnotations(
-		options: { force?: boolean; only?: TFile[]; background?: boolean; nested?: boolean },
+		options: { force?: boolean; only?: TFile[]; docIds?: string[]; background?: boolean; nested?: boolean },
 		changed: Set<string>,
 		unread: Map<string, string>,
 	): Promise<void> {
 		const quiet = options.background === true || options.nested === true;
+		// Archived notes are not read: the lifecycle brings them back first (sync/reconcile.ts).
 		const scopeOf = (): MappingTable => {
-			if (options.only === undefined) return this.settings.mappings;
+			const entries =
+				options.docIds !== undefined
+					? options.docIds.map((docId) => this.settings.mappings[docId])
+					: options.only !== undefined
+						? options.only.map((file) => this.syncedEntry(file))
+						: Object.values(this.settings.mappings);
 			const scope: MappingTable = {};
-			for (const file of options.only) {
-				const entry = this.syncedEntry(file);
-				if (entry !== undefined) scope[entry.docId] = entry;
+			for (const entry of entries) {
+				if (entry?.format === "ink" && entry.state !== "archived") scope[entry.docId] = entry;
 			}
 			return scope;
 		};
@@ -1515,7 +1539,6 @@ export default class RoundTripPlugin extends Plugin {
 		this.lexicon = null;
 		this.words = null;
 		this.dropWritePad();
-		await this.reconcileNotePaths((line) => log.push(line));
 		await this.learnFromCorrections((line) => log.push(line)).catch((error: unknown) =>
 			log.push(`learning from corrections failed: ${String(error)}`),
 		);
@@ -1524,7 +1547,7 @@ export default class RoundTripPlugin extends Plugin {
 		try {
 			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
 			const listing = await api.listIds(true);
-			await this.settlePendingSends(new Set(listing.map((item) => item.id)), (line) => log.push(line));
+			await this.settlePendingSends(new Map(listing.map((item) => [item.id, item.hash])), (line) => log.push(line));
 			scope = scopeOf();
 			for (const problem of this.stateProblems()) log.push(`sync state: ${problem}`);
 			const { results, table } = await pullAnnotations(
@@ -1583,7 +1606,7 @@ export default class RoundTripPlugin extends Plugin {
 			}
 
 			const eventful = results.some(
-				(r) => !r.ok || r.removed === true || r.scan?.written !== undefined,
+				(r) => !r.ok || r.scan?.written !== undefined,
 			);
 			if (eventful || !quiet) {
 				const report = `${renderImportReport({
@@ -1665,34 +1688,14 @@ export default class RoundTripPlugin extends Plugin {
 	 * (GP_E3_S3).
 	 */
 	private resolveNote(entry: MappingEntry): TFile | null {
+		const idOf = (file: TFile): unknown => this.app.metadataCache.getFileCache(file)?.frontmatter?.[DOCID_FRONTMATTER_KEY];
 		const atPath = this.app.vault.getFileByPath(entry.notePath);
-		if (atPath !== null) return atPath;
+		if (atPath !== null && idOf(atPath) === entry.docId) return atPath;
 		for (const file of this.app.vault.getMarkdownFiles()) {
-			const frontmatter =
-				this.app.metadataCache.getFileCache(file)?.frontmatter;
-			if (frontmatter?.[DOCID_FRONTMATTER_KEY] === entry.docId) return file;
+			if (idOf(file) === entry.docId) return file;
 		}
-		return null;
-	}
-
-	/**
-	 * Bring the recorded paths back in line with the vault before a run, so a
-	 * moved or renamed note keeps its notebook.
-	 */
-	private async reconcileNotePaths(log: (line: string) => void): Promise<void> {
-		let changed = false;
-		for (const entry of Object.values(this.settings.mappings)) {
-			if (this.app.vault.getFileByPath(entry.notePath) !== null) continue;
-			const found = this.resolveNote(entry);
-			if (found === null || found.path === entry.notePath) continue;
-			log(`note moved: ${entry.notePath} → ${found.path}`);
-			this.settings.mappings = {
-				...this.settings.mappings,
-				[entry.docId]: { ...entry, notePath: found.path },
-			};
-			changed = true;
-		}
-		if (changed) await this.persistSettings();
+		// A note at its path the cache has not indexed yet is taken to be it; one with another id is not.
+		return atPath !== null && idOf(atPath) === undefined ? atPath : null;
 	}
 
 	/** Does the note still match the document that was sent? (F14) */
@@ -2282,16 +2285,18 @@ export default class RoundTripPlugin extends Plugin {
 		return false;
 	}
 
+	/** The device base folder for the sheets, made where missing; undefined = the root. */
+	private async sheetFolder(api: RawSyncApi): Promise<string | undefined> {
+		if (!this.settings.mirrorFolders || this.settings.deviceBaseFolder === "") return undefined;
+		return ensureFolderPath(api, await readListing(api, {}), this.settings.deviceBaseFolder);
+	}
+
 	async sendHandwritingSheet(): Promise<void> {
 		if (!this.requirePaired()) return;
 		const notice = this.progress("Sending the handwriting sheet…");
 		try {
-			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
-			let parentId: string | undefined;
-			if (this.settings.mirrorFolders && this.settings.deviceBaseFolder !== "") {
-				parentId = await new MirrorTransport(api, this.settings.deviceBaseFolder).ensureFolderPath("");
-			}
-			await this.ink.sendSheet(api.raw, parentId);
+			const api = await this.rawApi();
+			await this.ink.sendSheet(api, await this.sheetFolder(api));
 			notify(
 				"Handwriting sheet sent. Write each character in its box on the reMarkable, let it sync, then run “Learn my handwriting from the sheet”.",
 				10000,
@@ -2307,12 +2312,8 @@ export default class RoundTripPlugin extends Plugin {
 		if (!this.requirePaired()) return;
 		const notice = this.progress("Sending the word sheet…");
 		try {
-			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
-			let parentId: string | undefined;
-			if (this.settings.mirrorFolders && this.settings.deviceBaseFolder !== "") {
-				parentId = await new MirrorTransport(api, this.settings.deviceBaseFolder).ensureFolderPath("");
-			}
-			await this.ink.sendWordSheet(api.raw, parentId);
+			const api = await this.rawApi();
+			await this.ink.sendWordSheet(api, await this.sheetFolder(api));
 			notify(
 				"Word sheet sent. Write each word in its box the way you usually write, let it sync, then run “Learn my joined-up words from the sheet”.",
 				10000,
@@ -2342,12 +2343,8 @@ export default class RoundTripPlugin extends Plugin {
 		if (!this.requirePaired()) return;
 		const notice = this.progress("Sending the handwriting test sheet…");
 		try {
-			const api = await remarkable(this.settings.deviceToken, this.rmapiOptions());
-			let parentId: string | undefined;
-			if (this.settings.mirrorFolders && this.settings.deviceBaseFolder !== "") {
-				parentId = await new MirrorTransport(api, this.settings.deviceBaseFolder).ensureFolderPath("");
-			}
-			await this.ink.sendTestSheet(api.raw, parentId);
+			const api = await this.rawApi();
+			await this.ink.sendTestSheet(api, await this.sheetFolder(api));
 			notify(
 				"Handwriting test sheet sent. Copy each line below it the way you normally write, let it sync, then run “Save handwriting test sheet to the vault”.",
 				10000,
@@ -2624,6 +2621,7 @@ export default class RoundTripPlugin extends Plugin {
 				const { head, body: ours } = splitNote(current);
 				const result = mergeTabletChanges({
 					base: sent?.body ?? (sourceState === "match" ? ours : null),
+					mergedBase: sent?.mergedBase,
 					ours,
 					layout,
 					highlights,
@@ -2642,7 +2640,9 @@ export default class RoundTripPlugin extends Plugin {
 				return { text: result.body === ours ? current : head + result.body, result };
 			},
 		);
-		const { body, outcome, refreshed } = merged.result;
+		const { body, outcome, refreshed, projected } = merged.result;
+		// The note now holds this merge: the next one projects only what changed on the tablet since.
+		if (projected !== null) await this.state.writeMergedBase(entry.docId, projected);
 		if (!merged.written) return outcome;
 		changed.add(file.path);
 		notedReadings(store, remarks, body);

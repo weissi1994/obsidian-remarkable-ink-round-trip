@@ -1,37 +1,16 @@
 /**
- * Folder-mirroring transport on top of rmapi-js (GP_E2_S7, F4-rest).
- *
- * Design: docs/ontwerp-mapspiegeling.md (route C). The api surface we consume
- * is declared locally (structural typing) so tests inject a fake and the
- * rmapi-js instance satisfies it at the edge. The one deliberate exception is
- * the GenerationError class import below: recognising the library's own error
- * type by identity is the reliable signal (GP_E5_S1) and is worth the direct
- * coupling.
+ * Cloud-write helpers on top of rmapi-js (GP_E2_S7, F4-rest): retrying a
+ * write the account refused because its tree changed meanwhile, and turning
+ * rmapi-js failures into actionable errors. The folder mirroring itself
+ * lives in transport/metadata.ts. The GenerationError class import below is
+ * deliberate: recognising the library's own error type by identity is the
+ * reliable signal (GP_E5_S1) and is worth the direct coupling.
  */
 
 import { GenerationError } from "rmapi-js";
 
 import { TransportError } from "./http";
 import { adviseFailure, classifyFailure } from "./failure";
-
-/** The slice of rmapi-js' RemarkableApi that mirroring needs. */
-export interface MirrorApi {
-	listItems(refresh?: boolean): Promise<MirrorEntry[]>;
-	listIds?(refresh?: boolean): Promise<{ id: string; hash: string }[]>;
-	getMetadata?(id: string, hash: string): Promise<{
-		visibleName: string;
-		lastModified: string;
-		pinned: boolean;
-		parent: string;
-		type: "CollectionType" | "DocumentType" | "TemplateType";
-	}>;
-	putFolder(
-		visibleName: string,
-		opts?: { parent?: string },
-		refresh?: boolean,
-	): Promise<{ id: string; hash: string }>;
-	move(hash: string, parent: string, refresh?: boolean): Promise<unknown>;
-}
 
 /**
  * Writing to the cloud means updating the account's shared root listing. If
@@ -98,134 +77,6 @@ export async function withGenerationRetry<T>(
 		}
 	}
 	throw lastError;
-}
-
-export interface MirrorEntry {
-	id: string;
-	hash: string;
-	/** "CollectionType" | "DocumentType" | others (e.g. templates) — kept wide
-	 * so the real rmapi-js Entry union stays structurally assignable. */
-	type: string;
-	visibleName: string;
-	parent?: string;
-}
-
-export class MirrorTransport {
-	private items: MirrorEntry[] | null = null;
-	/** path → collection id, cached per instance (one send-run). */
-	private readonly folderIds = new Map<string, string>();
-
-	constructor(
-		private readonly api: MirrorApi,
-		/** Device base folder under which the vault tree is mirrored ("" = root). */
-		private readonly baseFolder: string,
-		private readonly retry: RetryOptions = {},
-	) {}
-
-	private async allItems(refresh = false): Promise<MirrorEntry[]> {
-		if (this.items === null || refresh) {
-			if (this.api.listIds && this.api.getMetadata) {
-				const items: MirrorEntry[] = [];
-				for (const { id, hash } of await this.api.listIds(refresh)) {
-					// One odd document must not sink the whole listing.
-					try {
-						const metadata = await this.api.getMetadata(id, hash);
-						items.push({ id, hash, ...metadata });
-					} catch (error) {
-						console.warn(
-							`reMarkable Round-Trip: skipping device item ${id} — metadata unreadable: ${error instanceof Error ? error.message : String(error)}`,
-						);
-					}
-				}
-				this.items = items;
-			} else {
-				this.items = await this.api.listItems(refresh);
-			}
-		}
-		return this.items;
-	}
-
-	/** Drop cached views so the next call sees the server's current tree. */
-	private invalidate(): void {
-		this.items = null;
-		this.folderIds.clear();
-	}
-
-	private async findOrCreateFolder(
-		name: string,
-		parent: string,
-		refresh = false,
-	): Promise<string> {
-		const items = await this.allItems(refresh);
-		const existing = items.find(
-			(e) =>
-				e.type === "CollectionType" &&
-				e.visibleName === name &&
-				(e.parent ?? "") === parent,
-		);
-		if (existing) return existing.id;
-		const created = await withGenerationRetry(
-			(retryRefresh) => this.api.putFolder(name, { parent }, retryRefresh),
-			this.retry,
-		);
-		// Keep the local view consistent for subsequent lookups in this run.
-		this.items?.push({
-			id: created.id,
-			hash: created.hash,
-			type: "CollectionType",
-			visibleName: name,
-			parent,
-		});
-		return created.id;
-	}
-
-	/**
-	 * Resolve the device collection for a vault folder path ("" = vault root),
-	 * creating missing segments. Mirrors under the configured base folder.
-	 */
-	async ensureFolderPath(vaultFolderPath: string): Promise<string> {
-		const segments = [
-			...this.baseFolder.split("/").filter((s) => s !== ""),
-			...vaultFolderPath.split("/").filter((s) => s !== ""),
-		];
-		const key = segments.join("/");
-		const cached = this.folderIds.get(key);
-		if (cached !== undefined) return cached;
-
-		let parent = "";
-		let prefix = "";
-		for (const segment of segments) {
-			prefix = prefix === "" ? segment : `${prefix}/${segment}`;
-			const cachedSegment = this.folderIds.get(prefix);
-			if (cachedSegment !== undefined) {
-				parent = cachedSegment;
-				continue;
-			}
-			parent = await this.findOrCreateFolder(segment, parent);
-			this.folderIds.set(prefix, parent);
-		}
-		return parent;
-	}
-
-	/**
-	 * Move a previously uploaded document to the trash (idempotent re-send,
-	 * N3): recoverable for the user, so safer than a hard delete. Reads the
-	 * account afresh — a cached listing carries old hashes — and leaves a
-	 * document that changed since `expectedHash` alone: its new ink is not in
-	 * the note. The outcome says which, so the caller can report it.
-	 */
-	async trashPrevious(deviceDocId: string, expectedHash?: string): Promise<"trashed" | "not-found" | "changed"> {
-		const items = await this.allItems(true);
-		const doc = items.find((e) => e.type === "DocumentType" && e.id === deviceDocId);
-		if (!doc) return "not-found";
-		if (expectedHash !== undefined && doc.hash !== expectedHash) return "changed";
-		await withGenerationRetry(
-			(refresh) => this.api.move(doc.hash, "trash", refresh),
-			this.retry,
-		);
-		this.items = null;
-		return "trashed";
-	}
 }
 
 /** Map rmapi-js failures onto our actionable error type (N3). */

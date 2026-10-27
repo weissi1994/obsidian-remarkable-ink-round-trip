@@ -42,7 +42,23 @@ interface NoteFile {
 	 * have. Committed once the upload landed, dropped if it never did — so a
 	 * crash between the two neither loses the notebook nor sends it twice.
 	 */
-	pending?: { sent: StoredSent; mapping: MappingEntry };
+	pending?: PendingSend;
+	/**
+	 * The tablet's side as the note was last merged with it since `sent`:
+	 * the base of the next merge, so merging the same ink again changes
+	 * nothing. A new send is a new base and clears it.
+	 */
+	mergedBase?: string;
+}
+
+interface PendingSend {
+	sent: StoredSent;
+	mapping: MappingEntry;
+	/** An update in place: the notebook's hash before it, which it still has if the update never landed. */
+	previousHash?: string;
+	/** The vault copy that is sending, and since when (ms): another copy's send may still be on its way. */
+	device?: string;
+	at?: number;
 }
 
 /** A send record with its pictures replaced by references to `pictures/`. */
@@ -77,6 +93,9 @@ function hash(text: string): string {
 	return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
 }
 
+/** A send in flight this long is no longer on its way: another copy of the vault may drop it. */
+const PENDING_STALE_MS = 60 * 60 * 1000;
+
 /** Which learned hand is in use, and the sheets waiting on the tablet. */
 export interface SharedHandwriting {
 	handVersion: string;
@@ -102,6 +121,9 @@ export class SyncState {
 	constructor(
 		private readonly fs: StateFs,
 		readonly root: string,
+		/** This copy of the vault (kept in the plugin's own data), stamped on its sends in flight. */
+		readonly deviceId?: string,
+		private readonly now: () => number = Date.now,
 	) {}
 
 	private path(...parts: string[]): string {
@@ -273,46 +295,70 @@ export class SyncState {
 	}
 
 	private async storeSent(sent: SentRecord): Promise<StoredSent> {
-		return {
+		const stored: StoredSent = {
 			...sent,
 			images: await this.storePictures<Picture>(sent.images),
 			drawings: await this.storePictures<InkDrawing>(sent.drawings),
 		};
+		// Kept beside the send, not in it (writeMergedBase).
+		delete stored.mergedBase;
+		return stored;
 	}
 
 	/** Keep a send record outright (the one-time move from the plugin folder). */
 	async writeSent(docId: string, sent: SentRecord): Promise<void> {
 		const note = await this.readNoteForWrite(docId);
+		delete note.mergedBase;
 		await this.writeJson(this.noteFile(docId), { ...note, sent: await this.storeSent(sent) });
+	}
+
+	/** Record what the note was just merged with (NoteFile.mergedBase). */
+	async writeMergedBase(docId: string, text: string): Promise<void> {
+		const note = await this.readNoteForWrite(docId);
+		await this.writeJson(this.noteFile(docId), { ...note, mergedBase: text });
 	}
 
 	/**
 	 * Record a send about to be uploaded, beside the committed one: the merge
 	 * base stays what the tablet holds until the upload has landed.
+	 * `previousHash`: for an update in place, the notebook's hash before it.
 	 */
-	async writePending(docId: string, sent: SentRecord, mapping: MappingEntry): Promise<void> {
+	async writePending(docId: string, sent: SentRecord, mapping: MappingEntry, previousHash?: string): Promise<void> {
 		const note = await this.readNoteForWrite(docId);
-		await this.writeJson(this.noteFile(docId), { ...note, pending: { sent: await this.storeSent(sent), mapping } });
+		const pending: PendingSend = {
+			sent: await this.storeSent(sent),
+			mapping,
+			...(previousHash === undefined ? {} : { previousHash }),
+			...(this.deviceId === undefined ? {} : { device: this.deviceId }),
+			at: this.now(),
+		};
+		await this.writeJson(this.noteFile(docId), { ...note, pending });
 	}
 
 	/** The upload landed: its text and mapping become the note's, in one write. */
 	async commitSent(docId: string, sent: SentRecord, mapping: MappingEntry): Promise<void> {
 		const note = await this.readNoteForWrite(docId);
 		delete note.pending;
+		delete note.mergedBase;
 		await this.writeJson(this.noteFile(docId), { ...note, sent: await this.storeSent(sent), mapping });
 		this.seen.set(docId, JSON.stringify(mapping));
 	}
 
 	/**
-	 * Settle sends a crash left half-done: one whose notebook is on the account
-	 * (`present`: device document ids) did land and is committed; one whose
-	 * notebook is not never did, and is dropped. An empty listing settles
-	 * nothing — more likely a fresh pairing than every upload lost. Returns
-	 * `table` with the committed mappings.
+	 * Settle sends a crash left half-done against the account listing
+	 * (`present`: device document id → root entry hash). A new notebook
+	 * landed when it is listed. An update in place (its mapping names the
+	 * hash it writes) landed when the notebook has that hash — or any hash but
+	 * the one it had before: written on since. A landed send is committed,
+	 * unless the note's record is from a later send already. One that did not
+	 * land is dropped if it is this copy's, or stale: another copy of the vault
+	 * may still be sending it. An empty listing settles nothing — more likely
+	 * a fresh pairing than every upload lost. Returns `table` with the
+	 * committed mappings.
 	 */
 	async settlePending(
 		table: MappingTable,
-		present: ReadonlySet<string>,
+		present: ReadonlyMap<string, string>,
 	): Promise<{ table: MappingTable; committed: string[]; dropped: string[] }> {
 		const out = { table: { ...table }, committed: [] as string[], dropped: [] as string[] };
 		if (present.size === 0) return out;
@@ -326,17 +372,32 @@ export class SyncState {
 			const { pending, ...rest } = note;
 			this.pendingIds.delete(docId);
 			if (pending === undefined) continue;
-			if (present.has(pending.mapping.deviceDocId)) {
+			const listed = present.get(pending.mapping.deviceDocId);
+			const landed =
+				listed !== undefined &&
+				(pending.mapping.accountedHash === undefined ||
+					listed === pending.mapping.accountedHash ||
+					listed !== pending.previousHash);
+			if (landed) {
+				if (rest.mapping !== undefined && rest.mapping.uploadedAt > pending.mapping.uploadedAt) {
+					await this.writeJson(this.noteFile(docId), rest);
+					out.dropped.push(docId);
+					continue;
+				}
+				delete rest.mergedBase;
 				await this.writeJson(this.noteFile(docId), { ...rest, sent: pending.sent, mapping: pending.mapping });
 				this.seen.set(docId, JSON.stringify(pending.mapping));
 				out.table[docId] = pending.mapping;
 				out.committed.push(docId);
-			} else {
-				// A first send that never landed leaves nothing behind.
-				if (Object.keys(rest).length === 0) await this.fs.remove(this.noteFile(docId));
-				else await this.writeJson(this.noteFile(docId), rest);
-				out.dropped.push(docId);
+				continue;
 			}
+			const own = this.deviceId !== undefined && pending.device === this.deviceId;
+			const stale = pending.device === undefined || pending.at === undefined || this.now() - pending.at > PENDING_STALE_MS;
+			if (!own && !stale) continue;
+			// A first send that never landed leaves nothing behind.
+			if (Object.keys(rest).length === 0) await this.fs.remove(this.noteFile(docId));
+			else await this.writeJson(this.noteFile(docId), rest);
+			out.dropped.push(docId);
 		}
 		return out;
 	}
@@ -348,6 +409,7 @@ export class SyncState {
 			...note.sent,
 			images: await this.loadPictures<Picture>(note.sent.images),
 			drawings: await this.loadPictures<InkDrawing>(note.sent.drawings),
+			...(note.mergedBase === undefined ? {} : { mergedBase: note.mergedBase }),
 		};
 	}
 

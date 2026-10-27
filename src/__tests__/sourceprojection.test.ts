@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
-import { PdfLayout } from "../convert/pdf";
+import { PdfLayout, toWinAnsi } from "../convert/pdf";
 import { renderPdf } from "./helpers/pdfrender";
 import { preprocess } from "../preprocess/preprocess";
 import { projectOntoSource } from "../incoming/sourceprojection";
@@ -346,6 +346,52 @@ describe("projectOntoSource lines words up exactly", () => {
 			highlights: [],
 		})?.markdown;
 		expect(out).toBe("In theory ~~the~~ plan works and the rest follows.");
+	});
+
+	it("finds a word the typesetter broke across lines, part by part", async () => {
+		// A word wider than the line is hard-broken (pdf.ts breakLongWord): its
+		// parts are separate laid-out words, each starting or ending mid-word.
+		const url = `https://example.com/${"abcdefghij".repeat(12)}`;
+		const source = `Read ${url} today, then the rest.`;
+		const typeset = (await renderPdf(parseBlocks(source), { title: "t", docId: "d" })).layout;
+		const words = typeset.lines.flatMap((line) => line.words);
+		const parts = words.slice(words.findIndex((word) => word.text === "Read") + 1, words.findIndex((word) => word.text === "today,"));
+		expect(parts.length).toBeGreaterThan(1);
+		expect(parts.map((word) => word.text).join("")).toBe(url);
+		const erased = projectOntoSource({
+			source,
+			layout: typeset,
+			marks: [{ kind: "erased", page: 1, words: parts.map((word) => word.id) }],
+			highlights: [],
+		})!;
+		expect(erased.markdown).toBe("Read today, then the rest.");
+		expect(erased.unapplied).toEqual([]);
+		const after = words.find((word) => word.text === "today,")!;
+		const struck = projectOntoSource({ source, layout: typeset, marks: [{ kind: "strikethrough", page: 1, words: [after.id] }], highlights: [] });
+		expect(struck?.markdown).toBe(`Read ${url} ~~today~~, then the rest.`);
+	});
+
+	it("lines up a compound broken in a narrow column, and text written without spaces", () => {
+		const layout = layoutOf([
+			{ text: "Die Donaudampf", block: 0 },
+			{ text: "schifffahrt fährt heute.", block: 0 },
+			{ text: "日本語の", block: 1 },
+			{ text: "テキスト です", block: 1 },
+		]);
+		// The typesetter writes what WinAnsi lacks as "?".
+		for (const line of layout.lines) for (const word of line.words) word.text = toWinAnsi(word.text);
+		const ids = (line: number) => layout.lines[line].words.map((word) => word.id);
+		const result = projectOntoSource({
+			source: "Die Donaudampfschifffahrt fährt heute.\n\n日本語のテキスト です",
+			layout,
+			marks: [
+				{ kind: "strikethrough", page: 1, words: [ids(0)[1], ids(1)[0]] },
+				{ kind: "erased", page: 1, words: [ids(2)[0], ids(3)[0]] },
+			],
+			highlights: [],
+		})!;
+		expect(result.markdown).toBe("Die ~~Donaudampfschifffahrt~~ fährt heute.\n\nです");
+		expect(result.unapplied).toEqual([]);
 	});
 
 	it("finds its place again after text the page does not show, like a long link", () => {

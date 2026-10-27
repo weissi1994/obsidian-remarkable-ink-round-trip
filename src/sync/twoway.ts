@@ -24,6 +24,15 @@
  * from reMarkable” callout at the end of the note, replaced by every import
  * and gone once nothing is pending.
  *
+ * Once a merge is written, the tablet's text it merged (`projected`) is the
+ * base of the next one (`mergedBase`), until the note is sent again: merged
+ * against the text as sent, every later import would apply the same tablet
+ * changes on top of themselves. Remark callouts placed since the send are
+ * the note's from then on, kept out of that base and the tablet's text
+ * alike — what the note does with them, rereading aside, stands. An import
+ * that left a page unread merges against the text as sent: against the
+ * last merge's, that page's changes would look undone.
+ *
  * Pure and synchronous: the write runs it again on the note as it is at
  * that moment.
  */
@@ -70,6 +79,35 @@ export interface TabletChanges {
 	importedAt: string;
 	/** A remark the note shows, by id, as kept from an earlier import; null when nothing was kept. */
 	remarkInk?: (id: string) => KeptRemark | null;
+	/** The tablet's text the note was last merged with since it was sent: that merge's `projected`. */
+	mergedBase?: string;
+}
+
+const remarkIdOf = new RegExp(`\\^${REMARK_ID_PREFIX}([0-9a-f]+)`);
+
+/** Ids of the remark callouts in a text. */
+function remarkIds(text: string): Set<string> {
+	return new Set(text.split("\n").flatMap((line) => (isRemarkIdLine(line) ? [remarkIdOf.exec(line)![1]] : [])));
+}
+
+/**
+ * The text without the callouts of these remarks, and the blank line one
+ * left behind — the reverse of how the projection puts a remark in.
+ */
+function withoutRemarks(text: string, ids: Set<string>): string {
+	let lines = text.split("\n");
+	for (const id of ids) {
+		const found = findRemark(lines.join("\n"), { id });
+		if (found === null) continue;
+		const after = found.end + 1;
+		const blankAfter = after >= lines.length || lines[after].trim() === "";
+		let from = found.start;
+		let to = found.end;
+		if (from > 0 && lines[from - 1].trim() === "" && blankAfter) from--;
+		else if (from === 0 && after < lines.length && lines[after].trim() === "") to++;
+		lines = [...lines.slice(0, from), ...lines.slice(to + 1)];
+	}
+	return lines.join("\n");
 }
 
 /** Remarks are found by id, or by image in notes from before ids. */
@@ -201,6 +239,12 @@ export function mergeTabletChanges(input: TabletChanges): {
 	outcome: AnnotationOutcome;
 	/** Remarks whose untouched earlier reading was replaced by a new one. */
 	refreshed: string[];
+	/**
+	 * The tablet's text this merge used, to keep as the next one's
+	 * `mergedBase` once the body is written; null when there is none to keep
+	 * (nothing applied, a summary, a page left unread).
+	 */
+	projected: string | null;
 } {
 	// The pending callout is the plugin's own list, rebuilt by every import.
 	const ours = withoutPendingCallout(input.ours);
@@ -213,6 +257,7 @@ export function mergeTabletChanges(input: TabletChanges): {
 			body: withPendingCallout(ours, unread),
 			outcome: { form: "copy", conflicts: 0, pending: unread.map(pendingLine) },
 			refreshed: [],
+			projected: null,
 		};
 	}
 	const settled = settleRemarks(ours, marks, input.remarkInk);
@@ -245,15 +290,22 @@ export function mergeTabletChanges(input: TabletChanges): {
 			body: upsertAnnotationBlock(ours, summary.text),
 			outcome: { ...summary.outcome, pending: unread.map(pendingLine) },
 			refreshed,
+			projected: null,
 		};
 	}
 	// The projection trims the end; the note keeps the base's.
 	const tail = input.base.slice(input.base.trimEnd().length);
-	const merged = merge3(
-		withoutPendingCallout(input.base),
-		settled.ours,
-		withoutPendingCallout(projected.markdown + tail),
-	);
+	const theirs = withoutPendingCallout(projected.markdown + tail);
+	const complete = !input.marks.some((mark) => mark.kind === "skipped" && mark.unreadPage === true);
+	let base = withoutPendingCallout(input.base);
+	let tablet = theirs;
+	if (input.mergedBase !== undefined && complete) {
+		const sentIds = remarkIds(base);
+		const placed = new Set([...remarkIds(input.mergedBase)].filter((id) => !sentIds.has(id)));
+		base = withoutRemarks(withoutPendingCallout(input.mergedBase), placed);
+		tablet = withoutRemarks(theirs, placed);
+	}
+	const merged = merge3(base, settled.ours, tablet);
 	const pending = [
 		...unread,
 		...projected.unapplied,
@@ -271,5 +323,6 @@ export function mergeTabletChanges(input: TabletChanges): {
 			pending: pending.map(pendingLine),
 		},
 		refreshed: settled.refreshed,
+		projected: complete ? theirs : null,
 	};
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, extrasFrom, settingsFrom, storedFrom } from "../settingsmodel";
 import {
 	SETTING_SECTIONS,
+	checkArchiveFolder,
 	checkEndpoint,
 	cleanPath,
 	conditionsOf,
@@ -37,6 +38,7 @@ describe("the settings schema", () => {
 			"pendingSheet",
 			"pendingWordSheet",
 			"pendingTestSheet",
+			"installId",
 		]);
 		const described = new Set(specs.map((spec) => spec.key.split(".")[0]));
 		for (const key of Object.keys(DEFAULT_SETTINGS)) {
@@ -87,6 +89,24 @@ describe("the settings schema", () => {
 			expect(value, spec.key).toBeGreaterThanOrEqual(spec.control.min);
 			expect(value, spec.key).toBeLessThanOrEqual(spec.control.max);
 		}
+	});
+});
+
+describe("the archive folder", () => {
+	it("may not lie inside a sync folder, nor hold one", () => {
+		expect(checkArchiveFolder("reMarkable/Archive", "reMarkable-out, Work")).toBeUndefined();
+		expect(checkArchiveFolder("reMarkable/Archive", "Work, reMarkable")).toContain("reMarkable");
+		expect(checkArchiveFolder("Archive", "Archive/Notes")).toContain("Archive/Notes");
+		expect(checkArchiveFolder("/Work/", "Work")).toBeDefined();
+		expect(checkArchiveFolder("Work-archive", "Work")).toBeUndefined();
+		expect(checkArchiveFolder("", "Work")).toBeDefined();
+	});
+
+	it("defaults beside a sync folder that would hold the default one, and keeps a chosen one", () => {
+		expect(settingsFrom({}).archiveFolder).toBe("reMarkable/Archive");
+		const synced = settingsFrom({ watchFolderPath: "reMarkable" });
+		expect(checkArchiveFolder(synced.archiveFolder, synced.watchFolderPath)).toBeUndefined();
+		expect(settingsFrom({ watchFolderPath: "reMarkable", archiveFolder: "Old" }).archiveFolder).toBe("Old");
 	});
 });
 

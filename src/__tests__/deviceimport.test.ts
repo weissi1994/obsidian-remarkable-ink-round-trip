@@ -6,6 +6,7 @@ import {
 	importNotebooks,
 	noteFileName,
 	writtenByPlugin,
+	reimportNotebook,
 	type NewNotebook,
 } from "../sync/deviceimport";
 import { buildInkPageRm } from "../ink/rmwrite";
@@ -186,6 +187,50 @@ describe("adopting it", () => {
 		expect(result.ok).toBe(false);
 		expect(result.ok ? "" : result.error).toContain("changed on the reMarkable");
 		expect(cloud.live()).toEqual([original.docId]);
+	});
+});
+
+describe("bringing a notebook in again after it was written in", () => {
+	const io = (initial: string) => {
+		let text = initial;
+		return {
+			read: () => Promise.resolve(text),
+			process: (change: (current: string) => string) => {
+				text = change(text);
+				return Promise.resolve(text);
+			},
+			text: () => text,
+		};
+	};
+	const body = (pages: { text?: string }[]) => importedNote(ID, pages).replace(/^---\n[\s\S]*?\n---\n/, "");
+
+	it("adds the new page and keeps what the owner changed in the note", async () => {
+		const base = body([{ text: "Buy seeds" }]);
+		const note = io(importedNote(ID, [{ text: "Buy seeds" }]).replace("Buy seeds", "Buy seeds and soil"));
+		const theirs = body([{ text: "Buy seeds" }, { text: "Call Ann" }]);
+		const backups: string[] = [];
+		const { written, conflicts } = await reimportNotebook(note, async (pre) => void backups.push(pre), base, theirs);
+		expect(written).toBe(true);
+		expect(conflicts).toBe(0);
+		expect(note.text()).toContain("Buy seeds and soil");
+		expect(note.text()).toContain("Call Ann");
+		expect(parseFrontmatter(note.text()).fields["remarkable-id"]).toBe(ID);
+		expect(backups).toHaveLength(1);
+	});
+
+	it("drops nothing when the note as first brought in was not kept", async () => {
+		const note = io(importedNote(ID, [{ text: "Mine now" }]));
+		await reimportNotebook(note, async () => undefined, null, body([{ text: "Tablet's" }]));
+		expect(note.text()).toContain("Mine now");
+		expect(note.text()).toContain("Tablet's");
+	});
+
+	it("writes nothing when the pages read as the note already is", async () => {
+		const text = importedNote(ID, [{ text: "Same" }]);
+		const note = io(text);
+		const { written } = await reimportNotebook(note, async () => undefined, body([{ text: "Same" }]), body([{ text: "Same" }]));
+		expect(written).toBe(false);
+		expect(note.text()).toBe(text);
 	});
 });
 

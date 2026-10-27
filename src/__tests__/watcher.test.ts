@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { WatchQueue, isInWatchFolder, parseFolderList } from "../sync/watcher";
+import { WatchQueue, isInWatchFolder, parseFolderList, renameInFolderList } from "../sync/watcher";
 
 /** Manual timer harness: fire() runs all due timers. */
 function fakeTimers() {
@@ -40,6 +40,38 @@ describe("parseFolderList", () => {
 		expect(parseFolderList(" /out/ , Work/print,, out ")).toEqual(["out", "Work/print"]);
 		expect(parseFolderList("")).toEqual([]);
 		expect(parseFolderList("reMarkable-out")).toEqual(["reMarkable-out"]);
+	});
+});
+
+describe("renameInFolderList", () => {
+	it("follows a renamed sync folder and the folders below it, leaving look-alikes", () => {
+		expect(renameInFolderList("Work, Work/print, Workshop", "Work", "Job")).toBe("Job, Job/print, Workshop");
+		expect(renameInFolderList("Projects/Old", "Projects", "Archive/Projects")).toBe("Archive/Projects/Old");
+		expect(renameInFolderList("Work", "Elsewhere", "Other")).toBeNull();
+	});
+});
+
+describe("a rename, move or delete of a synced note or folder", () => {
+	const queue = (timers: ReturnType<typeof fakeTimers>, ready: string[][]) =>
+		new WatchQueue({ folders: ["out"], debounceMs: 1000, ...timers, onReady: (paths) => ready.push(paths) });
+
+	it("runs a batch even with no note to send, so the notebooks follow", () => {
+		const timers = fakeTimers();
+		const ready: string[][] = [];
+		queue(timers, ready).structureChanged();
+		timers.fire();
+		expect(ready).toEqual([[]]);
+	});
+
+	it("is not cancelled when the last pending note is removed", () => {
+		const timers = fakeTimers();
+		const ready: string[][] = [];
+		const q = queue(timers, ready);
+		q.noteChanged("out/a.md");
+		q.structureChanged();
+		q.noteRemoved("out/a.md");
+		timers.fire();
+		expect(ready).toEqual([[]]);
 	});
 });
 

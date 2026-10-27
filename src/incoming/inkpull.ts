@@ -331,8 +331,12 @@ export async function collectInkAnnotations(
 	const collected: { page: number | undefined; order: number; mark: ImportedMark }[] = [];
 	const highlights: Highlight[] = [];
 	// A change that cannot be read or applied is listed in the note, never dropped.
-	const skip = (page: number | undefined, order: number, unapplied: string) =>
-		collected.push({ page, order, mark: { kind: "skipped", ...(page === undefined ? {} : { page }), unapplied } });
+	const skip = (page: number | undefined, order: number, unapplied: string, unreadPage = false) =>
+		collected.push({
+			page,
+			order,
+			mark: { kind: "skipped", ...(page === undefined ? {} : { page }), unapplied, ...(unreadPage ? { unreadPage } : {}) },
+		});
 	const notImported = (what: string) =>
 		`${what} — ${deps.transcribe === undefined ? "not imported: handwriting import is off" : "could not be read, and handwriting images are off"}`;
 
@@ -343,7 +347,7 @@ export async function collectInkAnnotations(
 		const page = pageId === null ? undefined : pageOf.get(pageId);
 		try {
 			if (!deps.readBytes) {
-				skip(undefined, 0, `${strokeFiles.length - index} page(s) not read — they could not be downloaded`);
+				skip(undefined, 0, `${strokeFiles.length - index} page(s) not read — they could not be downloaded`, true);
 				break;
 			}
 			const bytes = await deps.readBytes(file);
@@ -389,7 +393,7 @@ export async function collectInkAnnotations(
 				deps.log?.(
 					`    skipped: the regenerated handwriting does not match this page (${diff.stats.idConflicts} id conflicts)`,
 				);
-				skip(page, -1, "not read — its handwriting no longer matches what was sent, so your changes on it cannot be told apart");
+				skip(page, -1, "not read — its handwriting no longer matches what was sent, so your changes on it cannot be told apart", true);
 				continue;
 			}
 			if (scan.ink) {
@@ -517,7 +521,7 @@ export async function collectInkAnnotations(
 			scan.unreadableFiles++;
 			const message = error instanceof Error ? error.message : String(error);
 			deps.log?.(`  could not read ${file.id}: ${message}`);
-			skip(page, -1, `not read — ${message}`);
+			skip(page, -1, `not read — ${message}`, true);
 		}
 	}
 

@@ -135,7 +135,24 @@ describe("sends in flight", () => {
 		const reloaded = new SyncState(fs, ROOT);
 		expect((await reloaded.loadMappings())[A]).toMatchObject({ deviceDocId: "d2", accountedHash: "h2" });
 		// Committed: nothing left to settle.
-		expect(await reloaded.settlePending({}, new Set(["d2"]))).toMatchObject({ committed: [], dropped: [] });
+		expect(await reloaded.settlePending({}, new Map([["d2", "h2"]]))).toMatchObject({ committed: [], dropped: [] });
+	});
+
+	it("keeps what the note was last merged with until a new send lands", async () => {
+		const { fs } = memoryFs();
+		const state = new SyncState(fs, ROOT, "this-copy");
+		await state.commitSent(A, sent("sent"), { ...entry(A, "d1"), accountedHash: "h1" });
+		await state.writeMergedBase(A, "sent, merged with the tablet");
+		expect(await new SyncState(fs, ROOT).readSent(A)).toMatchObject({ body: "sent", mergedBase: "sent, merged with the tablet" });
+		// A send in flight does not change the base; its landing does.
+		await state.writePending(A, sent("next"), { ...entry(A, "d1"), accountedHash: "h2" }, "h1");
+		expect((await state.readSent(A))?.mergedBase).toBe("sent, merged with the tablet");
+		const next = new SyncState(fs, ROOT, "this-copy");
+		await next.settlePending(await next.loadMappings(), new Map([["d1", "h2"]]));
+		expect(await next.readSent(A)).not.toHaveProperty("mergedBase");
+		await next.writeMergedBase(A, "merged again");
+		await next.commitSent(A, { ...sent("third"), mergedBase: "must not be stored" }, entry(A, "d1"));
+		expect(await next.readSent(A)).not.toHaveProperty("mergedBase");
 	});
 
 	it("settles nothing against an empty account listing", async () => {
@@ -145,9 +162,9 @@ describe("sends in flight", () => {
 		await state.writePending(A, sent("new"), entry(A, "d2"));
 		const fresh = new SyncState(fs, ROOT);
 		const table = await fresh.loadMappings();
-		expect(await fresh.settlePending(table, new Set())).toMatchObject({ committed: [], dropped: [] });
+		expect(await fresh.settlePending(table, new Map())).toMatchObject({ committed: [], dropped: [] });
 		// The pending record is still there for a later, real listing.
-		expect((await fresh.settlePending(table, new Set(["d2"]))).committed).toEqual([A]);
+		expect((await fresh.settlePending(table, new Map([["d2", "h"]]))).committed).toEqual([A]);
 	});
 
 	it("keeps a send in flight when its note's mapping is dropped meanwhile", async () => {
@@ -160,7 +177,98 @@ describe("sends in flight", () => {
 		const fresh = new SyncState(fs, ROOT);
 		const table = await fresh.loadMappings();
 		expect(table[A]).toBeUndefined();
-		expect((await fresh.settlePending(table, new Set(["d2"]))).table[A].deviceDocId).toBe("d2");
+		expect((await fresh.settlePending(table, new Map([["d2", "h"]]))).table[A].deviceDocId).toBe("d2");
+	});
+
+	describe("an update in place (same notebook, new hash)", () => {
+		/** A committed send to d1 at hash h1, then an update to h2 recorded as pending. */
+		async function inFlight() {
+			const { fs } = memoryFs();
+			const state = new SyncState(fs, ROOT, "this-copy");
+			await state.commitSent(A, sent("old"), { ...entry(A, "d1"), accountedHash: "h1" });
+			await state.writePending(A, sent("new"), { ...entry(A, "d1"), accountedHash: "h2" }, "h1");
+			const next = new SyncState(fs, ROOT, "this-copy");
+			return { next, table: await next.loadMappings() };
+		}
+
+		it("did not land while the notebook still has the hash it replaced, though it is listed", async () => {
+			const { next, table } = await inFlight();
+			const settled = await next.settlePending(table, new Map([["d1", "h1"]]));
+			expect(settled.dropped).toEqual([A]);
+			expect(settled.table[A].accountedHash).toBe("h1");
+			expect((await next.readSent(A))?.body).toBe("old");
+		});
+
+		it("landed when the notebook has the hash it wrote", async () => {
+			const { next, table } = await inFlight();
+			const settled = await next.settlePending(table, new Map([["d1", "h2"]]));
+			expect(settled.committed).toEqual([A]);
+			expect(settled.table[A].accountedHash).toBe("h2");
+			expect((await next.readSent(A))?.body).toBe("new");
+		});
+
+		it("landed and was written on since: committed, the newer ink left for the next read", async () => {
+			const { next, table } = await inFlight();
+			const settled = await next.settlePending(table, new Map([["d1", "h3"]]));
+			expect(settled.committed).toEqual([A]);
+			// Still the hash the update wrote, so the pull sees h3 as new.
+			expect(settled.table[A].accountedHash).toBe("h2");
+		});
+	});
+
+	describe("another copy of the vault sending (shared state folder)", () => {
+		it("leaves its send in flight alone until it is stale", async () => {
+			const { fs } = memoryFs();
+			let clock = 1_000_000;
+			const there = new SyncState(fs, ROOT, "other-copy", () => clock);
+			await there.commitSent(A, sent("old"), entry(A, "d1"));
+			await there.writePending(A, sent("new"), entry(A, "d2"));
+
+			const here = new SyncState(fs, ROOT, "this-copy", () => clock + 60_000);
+			const listing = new Map([["d1", "h1"]]);
+			const early = await here.settlePending(await here.loadMappings(), listing);
+			expect(early).toMatchObject({ committed: [], dropped: [] });
+			// Its upload lands: the other copy's pending send is still there to commit.
+			const reloaded = new SyncState(fs, ROOT, "this-copy", () => clock + 60_000);
+			expect((await reloaded.settlePending(await reloaded.loadMappings(), new Map([...listing, ["d2", "h2"]]))).committed).toEqual([A]);
+
+			await there.writePending(A, sent("newer"), entry(A, "d3"));
+			clock += 2 * 60 * 60 * 1000;
+			const later = new SyncState(fs, ROOT, "this-copy", () => clock);
+			expect((await later.settlePending(await later.loadMappings(), listing)).dropped).toEqual([A]);
+		});
+
+		it("drops its own send that never landed at once", async () => {
+			const { fs } = memoryFs();
+			const state = new SyncState(fs, ROOT, "this-copy");
+			await state.commitSent(A, sent("old"), entry(A, "d1"));
+			await state.writePending(A, sent("new"), entry(A, "d2"));
+			const next = new SyncState(fs, ROOT, "this-copy");
+			expect((await next.settlePending(await next.loadMappings(), new Map([["d1", "h1"]]))).dropped).toEqual([A]);
+			expect((await next.readSent(A))?.body).toBe("old");
+		});
+
+		it("does not write a landed send over a later one already committed", async () => {
+			const { fs, files } = memoryFs();
+			const state = new SyncState(fs, ROOT, "this-copy");
+			await state.writePending(A, sent("first"), { ...entry(A, "d2"), uploadedAt: "2026-10-19T00:00:00Z" });
+			// Another copy committed a later send of the same note meanwhile, beside our pending record.
+			const file = `${ROOT}/notes/${A}.json`;
+			const record = JSON.parse(files.get(file)!) as Record<string, unknown>;
+			files.set(
+				file,
+				JSON.stringify({
+					...record,
+					sent: { title: "A", markdown: "later", body: "later" },
+					mapping: { ...entry(A, "d3"), uploadedAt: "2026-10-20T00:00:00Z" },
+				}),
+			);
+			const next = new SyncState(fs, ROOT, "this-copy");
+			const settled = await next.settlePending(await next.loadMappings(), new Map([["d2", "h2"], ["d3", "h3"]]));
+			expect(settled.committed).toEqual([]);
+			expect(settled.table[A].deviceDocId).toBe("d3");
+			expect((await next.readSent(A))?.body).toBe("later");
+		});
 	});
 });
 

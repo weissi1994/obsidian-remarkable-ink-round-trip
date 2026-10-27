@@ -112,14 +112,16 @@ interface Range {
 /** A letter or digit: what a word is made of, for its boundaries. */
 const WORDISH = /[\p{L}\p{N}]/u;
 
+/** Whether `at` falls inside a word of the source, between two of its letters. */
+const insideWord = (source: string, at: number) =>
+	at > 0 && at < source.length && WORDISH.test(source[at - 1]) && WORDISH.test(source[at]);
+
 /**
- * Match one word against the source from `from`, allowing markdown syntax to
- * sit anywhere inside or before it — `**Grote** financiële` still contains the
- * word "Grote". Returns the end offset, or null when this position is not it
- * — also when the match would end inside a longer word: "the" is not in
- * "theory".
+ * Where one word ends when read from `from`, allowing markdown syntax to sit
+ * anywhere inside or before it — `**Grote** financiële` still contains the
+ * word "Grote". Null when this position is not it.
  */
-function matchAt(source: string, from: number, word: string, typo: number): number | null {
+function consume(source: string, from: number, word: string, typo: number): number | null {
 	let at = from;
 	let taken = 0;
 	while (taken < word.length) {
@@ -140,8 +142,20 @@ function matchAt(source: string, from: number, word: string, typo: number): numb
 		}
 		return null;
 	}
-	if (at < source.length && WORDISH.test(source[at]) && WORDISH.test(source[at - 1])) return null;
 	return at;
+}
+
+/**
+ * Match one word against the source at `from`; the end offset, or null. A
+ * match ending inside a longer word is not it — "the" is not in "theory" —
+ * unless the typesetter broke that word at the end of its line (a long URL,
+ * a compound in a narrow column): then `then`, the next laid-out word, is
+ * its rest and carries on right there.
+ */
+function matchAt(source: string, from: number, word: string, typo: number, then?: string): number | null {
+	const end = consume(source, from, word, typo);
+	if (end === null || !insideWord(source, end)) return end;
+	return then !== undefined && consume(source, end, then, typo) !== null ? end : null;
 }
 
 /**
@@ -156,9 +170,9 @@ function matchAt(source: string, from: number, word: string, typo: number): numb
 const WINDOW = 200;
 
 /**
- * Where a word sits in the source, searching forward from `from`. Text in
- * `skip` is not on the page (remarks drawn back in place): it is stepped
- * over without counting against the window.
+ * Where a word sits in the source, searching forward from `from`, starting
+ * at a word boundary. Text in `skip` is not on the page (remarks drawn back
+ * in place): it is stepped over without counting against the window.
  */
 function findWord(
 	source: string,
@@ -167,6 +181,7 @@ function findWord(
 	typo: number,
 	window = WINDOW,
 	skip: Range[] = [],
+	then?: string,
 ): Range | null {
 	let limit = Math.min(source.length, from + window);
 	for (let at = from; at < limit; at++) {
@@ -178,9 +193,8 @@ function findWord(
 		}
 		// Syntax is stepped over — unless the word itself starts with it (`#tag`, `(see`).
 		if (SYNTAX.has(source[at]) && source[at] !== word[0]) continue;
-		// A word starts at a word boundary, never inside another word.
-		if (at > 0 && WORDISH.test(source[at - 1]) && WORDISH.test(source[at])) continue;
-		const end = matchAt(source, at, word, typo);
+		if (insideWord(source, at)) continue;
+		const end = matchAt(source, at, word, typo, then);
 		if (end !== null) return { start: at, end };
 	}
 	return null;
@@ -216,21 +230,30 @@ export function hiddenRemarks(source: string, names: string[] | undefined): Rang
 }
 
 /**
+ * Where layout word `index` sits, from `from` on. `glued`: the word before
+ * it ended inside a source word — broken at a line's end — so this one is
+ * its rest, right at `from`.
+ */
+type Locate = (from: number, index: number, glued: boolean, window: number) => Range | null;
+
+/**
  * Where the note's own text begins in the layout. The typeset document opens
  * with a title, and optionally with the frontmatter as a title block; neither
  * is part of the note body. Rather than special-casing them, look for the
  * first word that starts a run of three consecutive matches near the top of
  * the note — that is where the two texts genuinely meet.
  */
-function syncPoint(source: string, words: { text: string }[], typo: number, skip: Range[] = []): number {
-	const head = Math.min(words.length, 60);
+function syncPoint(source: string, count: number, locate: Locate): number {
+	const head = Math.min(count, 60);
 	for (let index = 0; index < head; index++) {
 		let cursor = 0;
+		let glued = false;
 		let run = 0;
-		for (let step = 0; step < 3 && index + step < words.length; step++) {
-			const hit = findWord(source, cursor, words[index + step].text, typo, cursor === 0 ? 400 : 40, skip);
+		for (let step = 0; step < 3 && index + step < count; step++) {
+			const hit = locate(cursor, index + step, glued, cursor === 0 ? 400 : 40);
 			if (hit === null) break;
 			cursor = hit.end;
+			glued = insideWord(source, hit.end);
 			run++;
 		}
 		if (run === 3) return index;
@@ -301,12 +324,24 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	// at the first typographic character.
 	const typo = input.layout.typo ?? 1;
 	const skip = hiddenRemarks(input.source, input.layout.remarksInPlace);
-	const start = syncPoint(input.source, words, typo, skip);
+	const source = input.source;
+	// The last word of a laid-out line may be the first part of a word the
+	// typesetter broke; its next part starts the next line of the block.
+	const lineEnds = new Set(input.layout.lines.flatMap((line) => line.words.slice(-1).map((word) => word.id)));
+	const carried = (index: number) => {
+		const next = words[index + 1];
+		return next !== undefined && lineEnds.has(words[index].id) && next.block === words[index].block ? next.text : undefined;
+	};
+	const locate: Locate = (from, index, glued, window) => {
+		const end = glued ? matchAt(source, from, words[index].text, typo, carried(index)) : null;
+		return end !== null ? { start: from, end } : findWord(source, from, words[index].text, typo, window, skip, carried(index));
+	};
+	const start = syncPoint(source, words.length, locate);
 	const followed = (from: number, index: number, count: number) => {
 		if (index + count >= words.length) return false;
 		let at = from;
 		for (let next = index + 1; next <= index + count; next++) {
-			const hit = findWord(input.source, at, words[next].text, typo, 40, skip);
+			const hit = locate(at, next, insideWord(source, at), 40);
 			if (hit === null) return false;
 			at = hit.end;
 		}
@@ -316,13 +351,13 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	let found = 0;
 	let missed = 0;
 	for (let index = start; index < words.length; index++) {
-		const text = words[index].text;
-		let hit = findWord(input.source, cursor, text, typo, WINDOW, skip);
+		const glued = insideWord(source, cursor) && ranges.has(words[index - 1]?.id);
+		let hit = locate(cursor, index, glued, WINDOW);
 		// Near the end of the layout there is nothing left to confirm with.
 		const lastWords = index + 2 >= words.length;
 		if (hit !== null && (missed > 0 || hit.start - cursor > JUMP) && !lastWords && !followed(hit.end, index, 2)) hit = null;
 		for (let from = cursor; hit === null && !lastWords; ) {
-			const far = findWord(input.source, from, text, typo, FAR - (from - cursor), skip);
+			const far = findWord(source, from, words[index].text, typo, FAR - (from - cursor), skip, carried(index));
 			if (far === null) break;
 			if (followed(far.end, index, Math.min(4, words.length - 1 - index))) hit = far;
 			from = far.start + 1;

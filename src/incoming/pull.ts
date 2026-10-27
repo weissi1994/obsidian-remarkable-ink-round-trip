@@ -138,6 +138,8 @@ export interface ImportedMark {
 	strokes?: { x: number; y: number }[][];
 	/** Ink fork, kind "skipped": why this tablet change could not be read or applied — listed in the note's “Pending from reMarkable” callout. */
 	unapplied?: string;
+	/** Ink fork, kind "skipped": a whole page went unread (not downloadable, unreadable, or no longer matching what was sent), so this import cannot say what changed on it — the merge must not take its text as the tablet's (sync/twoway.ts). */
+	unreadPage?: boolean;
 }
 
 /** What the edge needs to paint one remark. */
@@ -240,11 +242,6 @@ export interface PullSuccess {
 	skipped?: boolean;
 	/** Why it was skipped, for the diagnostic report. */
 	skipReason?: "unchanged" | "not-on-device" | "superseded" | "legacy";
-	/**
-	 * The mapping was dropped because the document no longer exists on the
-	 * account (GP_E5_S17). The note keeps its id; re-sending re-links it.
-	 */
-	removed?: boolean;
 	scan?: DocumentScan;
 }
 
@@ -259,8 +256,7 @@ export type PullResult = PullSuccess | PullFailure;
 
 /**
  * Apply pull-owned mapping changes without overwriting a push that completed
- * while an account-wide pull yielded. Pulls only update accountedHash or remove
- * a mapping whose device document disappeared.
+ * while an account-wide pull yielded. Pulls only update accountedHash.
  */
 export function mergePullMappings(
 	current: MappingTable,
@@ -270,13 +266,9 @@ export function mergePullMappings(
 	const merged = { ...current };
 	for (const [docId, original] of Object.entries(scope)) {
 		const latest = merged[docId];
-		if (latest?.deviceDocId !== original.deviceDocId) continue;
 		const result = pulled[docId];
-		if (result === undefined) {
-			delete merged[docId];
-		} else {
-			merged[docId] = { ...latest, accountedHash: result.accountedHash };
-		}
+		if (latest?.deviceDocId !== original.deviceDocId || result === undefined) continue;
+		merged[docId] = { ...latest, accountedHash: result.accountedHash };
 	}
 	return merged;
 }
@@ -348,24 +340,10 @@ export async function pullAnnotations(
 					skipReason: "superseded",
 				};
 			} else if (hash === undefined) {
-				// The document is gone from the account (deleted on the
-				// device, trash emptied): drop the mapping so the run stops
-				// walking it forever (GP_E5_S17) — the note keeps its id in
-				// its frontmatter, so re-sending re-links it seamlessly. One
-				// guard: an EMPTY account listing is far more likely a fresh
-				// pairing or an endpoint switch than 300 real deletions, so
-				// then nothing is pruned.
-				const prune = hashes.size > 0;
-				if (prune) {
-					updated = Object.fromEntries(
-						Object.entries(updated).filter(([docId]) => docId !== entry.docId),
-					);
-				}
-				deps.log?.(
-					prune
-						? "  not on the account — mapping removed"
-						: "  not on the account — kept (account listing is empty; not pruning)",
-				);
+				// Gone from the account (deleted on the tablet, trash emptied):
+				// the lifecycle archives its note (sync/reconcile.ts); the
+				// mapping stays, so the note is never sent as a duplicate.
+				deps.log?.("  not on the account — skipped");
 				result = {
 					ok: true,
 					docId: entry.docId,
@@ -373,7 +351,6 @@ export async function pullAnnotations(
 					highlightCount: 0,
 					skipped: true,
 					skipReason: "not-on-device",
-					removed: prune ? true : undefined,
 				};
 			} else if (entry.format !== "ink") {
 				// Sent as PDF, EPUB or editable text by an earlier version: not

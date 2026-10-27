@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	NoteInput,
@@ -11,15 +12,23 @@ import {
 } from "../sync/send";
 import { TYPO_VERSION } from "../convert/pdf";
 import { isValidDocId } from "../id/docid";
-import { MappingTable, contentHash } from "../id/mapping";
+import { MappingEntry, MappingTable, contentHash } from "../id/mapping";
+import { remarkId } from "../incoming/remarkid";
+import { parseRmScene } from "../incoming/rmscene";
 import { DEVICE_PROFILES } from "../ink/inkrender";
-import { SyncState } from "../sync/syncstate";
-import { sendNotebook } from "../transport/notebook";
+import { buildInkPageRm, PEN, PEN_COLOR, type InkLine } from "../ink/rmwrite";
+import { SyncState, type StateFs } from "../sync/syncstate";
+import { sendNotebook, sendNotebookUpdate } from "../transport/notebook";
 import { fakeCloud } from "./helpers/fakecloud";
 import { memoryFs } from "./helpers/memoryfs";
+import { filesOf, onTablet, removeFromAccount } from "./helpers/tablet";
 
 /** What a result has to say: its error, or the warning that came with a send. */
 const messageOf = (result: SendResult): string => (result.ok ? (result.warning ?? "") : result.error);
+
+/** The account listing as settlePending takes it: device document id → hash. */
+const listed = (cloud: { listing(): { id: string; hash: string }[] }) =>
+	new Map(cloud.listing().map((item) => [item.id, item.hash]));
 
 function makeDeps(overrides: Partial<SendDeps> = {}) {
 	const uploads: { name: string; pages: Uint8Array[] }[] = [];
@@ -29,7 +38,7 @@ function makeDeps(overrides: Partial<SendDeps> = {}) {
 		client: {
 			uploadInk: (name, pages) => {
 				uploads.push({ name, pages });
-				return Promise.resolve({ deviceDocId: `device-${uploads.length}`, pageIds: ["p1"] });
+				return Promise.resolve({ deviceDocId: `device-${uploads.length}`, pageIds: ["p1"], hash: `hash-${uploads.length}` });
 			},
 		},
 		ink: {
@@ -206,7 +215,7 @@ describe("sendNote folder mirroring hooks", () => {
 			uploadInk: (name, pages, uploadOptions) => {
 				uploadArgs.push(uploadOptions.parentId);
 				uploads.push({ name, pages });
-				return Promise.resolve({ deviceDocId: `device-${uploads.length}`, pageIds: ["p1"] });
+				return Promise.resolve({ deviceDocId: `device-${uploads.length}`, pageIds: ["p1"], hash: `hash-${uploads.length}` });
 			},
 		};
 
@@ -395,6 +404,30 @@ describe("sending without losing tablet ink", () => {
 		expect((await state.readSent(DOC))?.body).toContain("Written on the tablet.");
 	});
 
+	it("reads a notebook whose hash is not known before replacing it", async () => {
+		const { cloud, deps } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		// A send committed without the hash it wrote (an older version, a settled crash).
+		const unknown: MappingTable = { [DOC]: { ...table[DOC], accountedHash: undefined } };
+		cloud.writeOnTablet(old);
+		const writes = cloud.rootWrites();
+		const held = await sendNote(edited, unknown, deps);
+		expect(held.result.ok).toBe(false);
+		expect(messageOf(held.result)).toContain("not read since it was last sent");
+		expect(cloud.rootWrites()).toBe(writes);
+
+		const rereads: string[] = [];
+		deps.reread = async (current) => {
+			rereads.push(current.path);
+			return { note: current, entry: { ...table[DOC], accountedHash: cloud.hashOf(old) } };
+		};
+		const { result } = await sendNote(edited, unknown, deps);
+		expect(result.ok).toBe(true);
+		expect(rereads).toEqual([note.path]);
+		expect(cloud.parentOf(old)).toBe("trash");
+	});
+
 	it("holds the note back when the notebook keeps changing, keeping what the re-read recorded", async () => {
 		const { cloud, deps } = setup();
 		const table = await sentOnce(deps);
@@ -423,7 +456,7 @@ describe("sending without losing tablet ink", () => {
 		// The next run finds the send never landed and drops it.
 		const next = new SyncState(disk.fs, ROOT);
 		const loaded = await next.loadMappings();
-		const settled = await next.settlePending(loaded, new Set(cloud.listing().map((item) => item.id)));
+		const settled = await next.settlePending(loaded, listed(cloud));
 		expect(settled.dropped).toEqual([DOC]);
 		expect(settled.table[DOC]).toEqual(table[DOC]);
 		expect(await next.readSent(DOC)).toEqual(base);
@@ -442,7 +475,7 @@ describe("sending without losing tablet ink", () => {
 		const next = new SyncState(disk.fs, ROOT);
 		const loaded = await next.loadMappings();
 		expect(loaded[DOC].deviceDocId).toBe(old);
-		const settled = await next.settlePending(loaded, new Set(cloud.listing().map((item) => item.id)));
+		const settled = await next.settlePending(loaded, listed(cloud));
 		expect(settled.committed).toEqual([DOC]);
 		expect(settled.table[DOC].deviceDocId).toBe(landed);
 		expect((await next.readSent(DOC))?.body).toContain("Typed in Obsidian.");
@@ -452,5 +485,191 @@ describe("sending without losing tablet ink", () => {
 		expect(again.result).toMatchObject({ ok: true, skipped: true });
 		expect(cloud.rootWrites()).toBe(writes);
 		expect(cloud.live()).toEqual([landed]);
+	});
+});
+
+describe("sending into the same notebook", () => {
+	const DOC = "0f8fad5b-d9cb-469f-a165-70867728950e";
+	const ROOT = "reMarkable/.sync";
+	const note: NoteInput = { ...NOTE, existingDocId: DOC };
+	const edited: NoteInput = { ...note, content: `${NOTE.content}\n\nTyped in Obsidian.` };
+	const NO_WAIT = { attempts: 3, backoffMs: () => 0, sleep: async () => undefined };
+	const PAPER = { paperSize: { width: 1404, height: 1872 } };
+	const line = (counter: number, y: number): InkLine => ({
+		counter,
+		tool: PEN.fineliner,
+		color: PEN_COLOR.black,
+		thicknessScale: 1,
+		points: [
+			{ x: 10, y, width: 8, pressure: 100, speed: 0, direction: 0 },
+			{ x: 60, y: y + 5, width: 8, pressure: 100, speed: 0, direction: 0 },
+		],
+	});
+
+	/** The production wiring with in-place updates; one handwritten page per block, so an edit changes only its page. */
+	function setup() {
+		const cloud = fakeCloud();
+		const disk = memoryFs();
+		const state = new SyncState(disk.fs, ROOT, "this-copy");
+		const trashed: string[] = [];
+		const { deps } = makeDeps({
+			client: {
+				uploadInk: (name, pages, options) =>
+					sendNotebook(cloud.api, name, pages, {
+						parentId: options.parentId,
+						replaces: options.replaces,
+						expectedHash: options.expectedHash,
+						docId: options.deviceDocId,
+						pageIds: options.pageIds,
+						retry: NO_WAIT,
+					}).then((r) => ({ deviceDocId: r.docId, pageIds: r.pageIds, hash: r.hash, replaced: r.replaced })),
+				updateInk: (deviceDocId, name, pages, options) =>
+					sendNotebookUpdate(cloud.api, deviceDocId, name, pages, { ...options, retry: NO_WAIT }).then((r) => ({
+						deviceDocId: r.docId,
+						pageIds: r.pageIds,
+						hash: r.hash,
+					})),
+			},
+			replacePrevious: (id) => {
+				trashed.push(id);
+				return Promise.resolve("trashed");
+			},
+		});
+		deps.ink = {
+			...deps.ink,
+			render: (blocks) => ({
+				pages: blocks.map((block, index) => buildInkPageRm([line(100 + index, 100 + JSON.stringify(block).length)], PAPER)),
+				snapshot: {
+					font: "readability",
+					fallbackFont: "readability",
+					pen: "medium",
+					color: 0,
+					jitter: 0.4,
+					profile: DEVICE_PROFILES.rm2,
+					shape: 1,
+				},
+			}),
+			persistPending: (docId, sent, mapping, previousHash) => state.writePending(docId, sent, mapping, previousHash),
+			commitSent: (docId, sent, mapping) => state.commitSent(docId, sent, mapping),
+		};
+		return { cloud, disk, state, deps, trashed };
+	}
+
+	async function sentOnce(deps: SendDeps): Promise<MappingTable> {
+		const { result, table } = await sendNote(note, {}, deps);
+		if (!result.ok) throw new Error(result.error);
+		return table;
+	}
+
+	const settleNextRun = async (fs: StateFs, cloud: { listing(): { id: string; hash: string }[] }) => {
+		const next = new SyncState(fs, ROOT, "this-copy");
+		return { next, settled: await next.settlePending(await next.loadMappings(), listed(cloud)) };
+	};
+
+	it("writes a changed note into its notebook: same document, same pages, nothing trashed", async () => {
+		const { cloud, deps, trashed } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		const { result, table: after } = await sendNote(edited, table, deps);
+		if (!result.ok) throw new Error(result.error);
+		expect(result.deviceDocId).toBe(old);
+		expect(cloud.live()).toEqual([old]);
+		expect(trashed).toEqual([]);
+		expect(after[DOC].accountedHash).toBe(cloud.hashOf(old));
+		expect(after[DOC].ink?.pageIds[0]).toBe(table[DOC].ink?.pageIds[0]);
+		expect(after[DOC].ink?.pageIds.length).toBeGreaterThan(table[DOC].ink?.pageIds.length ?? 0);
+	});
+
+	it("records an update that landed just before a crash, and does not send it again", async () => {
+		const { cloud, disk, deps } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		const crashing = { ...deps, ink: { ...deps.ink, commitSent: () => Promise.reject(new Error("crash")) } };
+		await sendNote(edited, table, crashing);
+
+		const { next, settled } = await settleNextRun(disk.fs, cloud);
+		expect(settled.committed).toEqual([DOC]);
+		expect(settled.table[DOC]).toMatchObject({ deviceDocId: old, accountedHash: cloud.hashOf(old) });
+		expect((await next.readSent(DOC))?.body).toContain("Typed in Obsidian.");
+
+		const writes = cloud.rootWrites();
+		const again = await sendNote(edited, settled.table, { ...deps, skipUnchanged: true });
+		expect(again.result).toMatchObject({ ok: true, skipped: true });
+		expect(cloud.rootWrites()).toBe(writes);
+		expect(cloud.live()).toEqual([old]);
+	});
+
+	it("keeps the merge base when the update never landed, though its notebook is listed", async () => {
+		const { cloud, disk, state, deps } = setup();
+		const table = await sentOnce(deps);
+		const base = await state.readSent(DOC);
+		cloud.onRootWrite(() => new Error("connection lost"));
+		const { result } = await sendNote(edited, table, deps);
+		expect(result).toMatchObject({ ok: false, error: "connection lost" });
+		cloud.onRootWrite(null);
+
+		const { next, settled } = await settleNextRun(disk.fs, cloud);
+		expect(settled.dropped).toEqual([DOC]);
+		expect(settled.table[DOC]).toEqual(table[DOC]);
+		expect(await next.readSent(DOC)).toEqual(base);
+	});
+
+	it("makes a new notebook when the old one is gone from the account", async () => {
+		const { cloud, deps, trashed } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		await removeFromAccount(cloud, old);
+		const { result, table: after } = await sendNote(edited, table, deps);
+		if (!result.ok) throw new Error(result.error);
+		expect(result.deviceDocId).not.toBe(old);
+		expect(cloud.live()).toEqual([result.deviceDocId]);
+		expect(after[DOC].accountedHash).toBe(cloud.hashOf(result.deviceDocId));
+		expect(trashed).toEqual([]);
+	});
+
+	it("does not send over text typed on the tablet, and says why", async () => {
+		const { cloud, deps } = setup();
+		const table = await sentOnce(deps);
+		const old = table[DOC].deviceDocId;
+		const [first] = table[DOC].ink?.pageIds ?? [];
+		const typedOn = new Uint8Array(readFileSync(new URL("./fixtures/text-crdt-ordering.rm", import.meta.url)));
+		const typed = await onTablet(cloud, old, (files) => files.set(`${old}/${first}.rm`, typedOn));
+		// The pull read the notebook (it cannot import typed text yet) and accounted for it.
+		const read = { ...table, [DOC]: { ...table[DOC], accountedHash: typed } };
+		const writes = cloud.rootWrites();
+		const changed = { ...edited, content: `---\ntitle: X\n---\nAnders begonnen.\n\nTyped in Obsidian.` };
+		const { result, table: after } = await sendNote(changed, read, deps);
+		expect(result.ok).toBe(false);
+		expect(messageOf(result)).toContain("text typed on the reMarkable");
+		expect(cloud.rootWrites()).toBe(writes);
+		expect(after[DOC].accountedHash).toBe(typed);
+	});
+
+	it("updates a notebook started on the tablet in place, keeping the pages not in the note", async () => {
+		const { cloud, deps } = setup();
+		const inNote = buildInkPageRm([line(5, 700), line(6, 760)], PAPER);
+		const notInNote = buildInkPageRm([line(5, 900), line(6, 990), line(7, 1100)], PAPER);
+		const tablet = await sendNotebook(cloud.api, "Ideas", [inNote, notInNote], { retry: NO_WAIT });
+		const [taken, left] = tablet.pageIds;
+		const imported: MappingEntry = {
+			docId: DOC,
+			notePath: note.path,
+			deviceDocId: tablet.docId,
+			uploadedAt: "2026-10-27T00:00:00Z",
+			contentHash: "",
+			format: "device",
+			accountedHash: tablet.hash,
+		};
+		const id = remarkId(parseRmScene(inNote).lines.map((l) => l.stroke));
+		const fromTablet: NoteInput = { ...note, content: `Idee.\n\n> [!note] Page 1\n> ![[p1.png]]\n> ^ink-${id}\n` };
+		const { result, table } = await sendNote(fromTablet, { [DOC]: imported }, deps);
+		if (!result.ok) throw new Error(result.error);
+		expect(result.deviceDocId).toBe(tablet.docId);
+		expect(cloud.live()).toEqual([tablet.docId]);
+		const files = await filesOf(cloud, tablet.docId);
+		expect(files.has(`${tablet.docId}/${taken}.rm`)).toBe(false);
+		expect(files.get(`${tablet.docId}/${left}.rm`)).toEqual(notInNote);
+		expect(table[DOC]).toMatchObject({ format: "ink", accountedHash: cloud.hashOf(tablet.docId) });
+		expect(table[DOC].ink?.pageIds).not.toContain(left);
 	});
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseBlocks } from "../convert/mdblocks";
 import { inkOptionsFor } from "../ink/inkfonts";
 import { DEVICE_PROFILES, InkRender, renderInk, toInkLines } from "../ink/inkrender";
-import { buildScenePageRm, INK_AUTHOR, SceneItemSpec } from "../ink/rmwrite";
+import { buildScenePageRm, INK_AUTHOR, InkLine, SceneItemSpec } from "../ink/rmwrite";
 import type { InkSnapshot, MappingEntry } from "../id/mapping";
 import { PENDING_TITLE } from "../incoming/annotationnote";
 import { collectInkAnnotations } from "../incoming/inkpull";
@@ -43,8 +43,21 @@ const ENTRY: MappingEntry = {
 };
 
 const options = inkOptionsFor(SNAPSHOT, "doc-1", () => null)!;
-const sent = renderInk(parseBlocks(preprocess(NOTE).markdown), "Ink", {}, options);
-const lines = toInkLines(sent.pages[0], options.pen);
+
+/** A note sent as a handwritten notebook: what the plugin wrote, and the strokes as lines. */
+interface Notebook {
+	note: string;
+	render: InkRender;
+	lines: InkLine[];
+}
+
+function notebook(note: string): Notebook {
+	const render = renderInk(parseBlocks(preprocess(note).markdown), "Ink", {}, options);
+	return { note, render, lines: toInkLines(render.pages[0], options.pen) };
+}
+
+const book = notebook(NOTE);
+const { render: sent, lines } = book;
 
 const wordOf = (render: InkRender, text: string) => render.layout.lines.flatMap((line) => line.words).find((word) => word.text === text)!;
 
@@ -85,9 +98,9 @@ type Treat = (stroke: (typeof sent.pages)[0][0], index: number) => SceneItemSpec
  * The notebook as sent, with `treat` deciding what became of each of our
  * strokes (null: untouched), `extra` ink of the owner's, read back by the import.
  */
-async function readTablet(treat: Treat = () => null, extra: SceneItemSpec[] = [], deps: Partial<PullDeps> = {}) {
-	const items: SceneItemSpec[] = sent.pages[0].flatMap(
-		(stroke, index) => treat(stroke, index) ?? [{ author: INK_AUTHOR, counter: stroke.counter, line: lines[index] }],
+async function readTablet(treat: Treat = () => null, extra: SceneItemSpec[] = [], deps: Partial<PullDeps> = {}, from: Notebook = book) {
+	const items: SceneItemSpec[] = from.render.pages[0].flatMap(
+		(stroke, index) => treat(stroke, index) ?? [{ author: INK_AUTHOR, counter: stroke.counter, line: from.lines[index] }],
 	);
 	const page = buildScenePageRm([...items, ...extra], { paperSize: { width: 1404, height: 1872 } });
 	const all: PullDeps = {
@@ -95,16 +108,17 @@ async function readTablet(treat: Treat = () => null, extra: SceneItemSpec[] = []
 		listDocumentFiles: async () => [{ id: "dev-1/page-1.rm", hash: "p" }],
 		readFile: async () => "{}",
 		readBytes: async () => page,
-		loadInk: async () => sent,
+		loadInk: async () => from.render,
 		writeAnnotations: async () => undefined,
 		...deps,
 	};
 	const { highlights, marks } = await collectInkAnnotations(ENTRY, "h", all);
-	return { layout: sent.layout, highlights, marks };
+	return { layout: from.render.layout, highlights, marks };
 }
 
-const erase = (text: string): Treat => (stroke) =>
-	stroke.wordId === wordOf(sent, text).id ? [{ author: INK_AUTHOR, counter: stroke.counter, deletedLength: 1 }] : null;
+/** Every stroke of the first word `text` rubbed out. */
+const erase = (text: string, from: Notebook = book): Treat => (stroke) =>
+	stroke.wordId === wordOf(from.render, text).id ? [{ author: INK_AUTHOR, counter: stroke.counter, deletedLength: 1 }] : null;
 
 /** The notebook as sent, with every stroke of `word` rubbed out on the tablet. */
 const tabletChanges = (word: string) => readTablet(erase(word));
@@ -287,5 +301,70 @@ describe("a remark the owner wrote more on", () => {
 		expect(after.body.match(/\[!note\] Remark/g)).toHaveLength(1);
 		expect(after.body).toContain(`> check this with Anna\n> ![[img/dev-1-p01-${now.id}.png]]\n> ^ink-${now.id}`);
 		expect(after.refreshed).toEqual([]);
+	});
+});
+
+describe("merging again after a merge was written", () => {
+	const quickErased = NOTE.replace("quick ", "");
+
+	it("does not bring back a clash over a place the owner edited after the tablet's change went in", async () => {
+		const changes = await tabletChanges("quick");
+		const first = merge(changes, NOTE);
+		expect(first.body).toBe(quickErased);
+		expect(first.projected).toBe(quickErased);
+		const edited = first.body.replace("The brown fox", "The very brown fox");
+		// Merged against the text as sent, "quick" erased clashes with "very" typed in its place.
+		expect(merge(changes, edited).outcome.conflicts).toBe(1);
+		const again = merge(changes, edited, { mergedBase: first.projected! });
+		expect(again.body).toBe(edited);
+		expect(again.outcome.conflicts).toBe(0);
+	});
+
+	it("applies only what changed on the tablet since", async () => {
+		const first = merge(await tabletChanges("quick"), NOTE);
+		const edited = first.body.replace("The brown fox", "The very brown fox");
+		const both = await readTablet((stroke, index) => erase("quick")(stroke, index) ?? erase("lazy")(stroke, index));
+		const again = merge(both, edited, { mergedBase: first.projected! });
+		expect(again.body).toBe(edited.replace("lazy ", ""));
+		expect(again.outcome.conflicts).toBe(0);
+	});
+
+	it("leaves a remark callout it placed as the owner left it: edited, or deleted", async () => {
+		const handwriting = { renderStrokes: async () => "img/r.png", transcribe: async () => ({ text: "check this" }) };
+		const changes = await readTablet(() => null, remarkStrokes(), handwriting);
+		const first = merge(changes, NOTE);
+		expect(first.body).toContain("> check this\n> ![[img/r.png]]");
+		const edited = first.body.replace("> check this", "> check this with Anna");
+		expect(merge(changes, edited, { mergedBase: first.projected! }).body).toBe(edited);
+		const id = changes.marks.find((mark) => mark.kind === "note")!.id!;
+		const deleted = first.body.replace(new RegExp(`\\n\\n> \\[!note\\] Remark\\n> check this\\n> !\\[\\[img/r.png\\]\\]\\n> \\^ink-${id}`), "");
+		expect(deleted).toBe(NOTE);
+		expect(merge(changes, deleted, { mergedBase: first.projected! }).body).toBe(NOTE);
+	});
+
+	it("merges against the text as sent when a page went unread, rather than undo what came from it", async () => {
+		const first = merge(await tabletChanges("quick"), NOTE);
+		// "quick" was on the page that could not be read this time.
+		const lazy = await tabletChanges("lazy");
+		const unread: ImportedMark = { kind: "skipped", page: 1, unapplied: "not read — connection lost", unreadPage: true };
+		const again = merge({ ...lazy, marks: [...lazy.marks, unread] }, first.body, { mergedBase: first.projected! });
+		expect(again.body.startsWith(quickErased.replace("lazy ", ""))).toBe(true);
+		expect(again.projected).toBeNull();
+	});
+});
+
+describe("two equal lines", () => {
+	const twin = notebook("- [ ] call mum today\n- [ ] call mum today");
+
+	it("keeps the owner's edit of the second next to the tablet's erase in the first", async () => {
+		const changes = await readTablet(erase("mum", twin), [], {}, twin);
+		const ours = "- [ ] call mum today\n- [ ] call mum today and dad";
+		const first = mergeTabletChanges({ ...common, ...changes, base: twin.note, ours, erasedAs: "strikethrough" });
+		expect(first.body).toBe("- [ ] call ~~mum~~ today\n- [ ] call mum today and dad");
+		expect(first.outcome.conflicts).toBe(0);
+		for (const mergedBase of [undefined, first.projected!]) {
+			const again = mergeTabletChanges({ ...common, ...changes, base: twin.note, ours: first.body, erasedAs: "strikethrough", mergedBase });
+			expect(again.body).toBe(first.body);
+		}
 	});
 });

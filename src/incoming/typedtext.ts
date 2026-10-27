@@ -12,10 +12,11 @@ export function typedTextToMarkdown(paragraphs: readonly TypedParagraph[]): stri
 		.map((paragraph) => {
 			const inline = inlineMarkdown(paragraph.spans);
 			const prefix = STYLE_PREFIX[paragraph.style];
-			if (prefix !== "") return prefix + inline;
-			// A plain line that reads like a styled one keeps a backslash.
+			// A line that would read as another style keeps a backslash: a plain
+			// "- not a list", a bullet whose text is "[x] milk".
 			const escapes = /^\\*/.exec(inline)![0].length;
-			return linePrefixStyle(inline.slice(escapes)) === undefined ? inline : `\\${inline}`;
+			const reads = linePrefixStyle(prefix + inline.slice(escapes)) ?? "plain";
+			return reads === (prefix === "" ? "plain" : paragraph.style) ? prefix + inline : `${prefix}\\${inline}`;
 		})
 		.join("\n");
 }

@@ -7,7 +7,10 @@
 export interface MappingEntry {
 	/** Stable document ID from the note's frontmatter. */
 	docId: string;
-	/** Vault path of the source note at upload time (informational only). */
+	/**
+	 * Vault path of the note as last synced: a different path now means the
+	 * note was renamed or moved in the vault since (sync/reconcile.ts).
+	 */
 	notePath: string;
 	/** Document UUID assigned by the reMarkable cloud on upload. */
 	deviceDocId: string;
@@ -53,6 +56,22 @@ export interface MappingEntry {
 	 * layout pages; a page the tablet owner added is simply not in it.
 	 */
 	ink?: InkSnapshot;
+	/** The notebook's name on the tablet as last synced; absent = not known yet (taken from the tablet). */
+	deviceName?: string;
+	/** The notebook's folder (collection id, "" = root) as last synced; absent = not known yet. */
+	deviceParent?: string;
+	/**
+	 * "archived": the note or the notebook went (vault delete, tablet trash);
+	 * nothing is synced until one of them comes back. Absent = active.
+	 */
+	state?: "archived";
+	/** Where an archived note was before it went into the archive folder, to move it back. */
+	archivedFrom?: string;
+	/**
+	 * The notebook hash last reported as "written on the tablet, but its note
+	 * was deleted": reported once per change, not on every sync.
+	 */
+	unappliedHash?: string;
 	pdfLayout?: {
 		fontSize: number;
 		lineHeight: number;

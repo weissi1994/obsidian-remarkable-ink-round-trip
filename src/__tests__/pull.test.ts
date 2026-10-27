@@ -150,12 +150,11 @@ describe("pullAnnotations", () => {
 			skipped: true,
 			skipReason: "not-on-device",
 		});
-		expect(results[0].ok && results[0].removed).toBeUndefined();
 		expect(table["doc-a"]).toBeDefined();
 		expect(written).toHaveLength(0);
 	});
 
-	it("removes the mapping of a document gone from the account (GP_E5_S17)", async () => {
+	it("keeps the mapping of a document gone from the account: the lifecycle archives its note", async () => {
 		const table: MappingTable = {
 			...TABLE,
 			"doc-b": {
@@ -165,7 +164,7 @@ describe("pullAnnotations", () => {
 				notePath: "b.md",
 			},
 		};
-		const { deps } = makeDeps({
+		const { deps, written } = makeDeps({
 			// device-a is gone; device-b still lives, so the listing is real.
 			listDocumentHashes: () =>
 				Promise.resolve(new Map([["device-b", "hash-2"]])),
@@ -173,45 +172,9 @@ describe("pullAnnotations", () => {
 				Promise.resolve([{ id: "device-b.highlights/p1.json", hash: "h" }]),
 		});
 		const { results, table: updated } = await pullAnnotations(table, deps);
-		expect(results[0]).toMatchObject({
-			ok: true,
-			skipped: true,
-			skipReason: "not-on-device",
-			removed: true,
-		});
-		expect(updated["doc-a"]).toBeUndefined();
-		expect(updated["doc-b"]).toBeDefined();
-	});
-
-	it("also removes a gone legacy document's mapping", async () => {
-		const table: MappingTable = {
-			"doc-t": {
-				...TABLE["doc-a"],
-				docId: "doc-t",
-				deviceDocId: "device-t",
-				notePath: "t.md",
-				format: "text",
-			},
-			"doc-b": {
-				...TABLE["doc-a"],
-				docId: "doc-b",
-				deviceDocId: "device-b",
-				notePath: "b.md",
-			},
-		};
-		const { deps } = makeDeps({
-			listDocumentHashes: () =>
-				Promise.resolve(new Map([["device-b", "hash-2"]])),
-			listDocumentFiles: () =>
-				Promise.resolve([{ id: "device-b.highlights/p1.json", hash: "h" }]),
-		});
-		const { results, table: updated } = await pullAnnotations(table, deps);
-		expect(results[0]).toMatchObject({
-			skipReason: "not-on-device",
-			removed: true,
-		});
-		expect(updated["doc-t"]).toBeUndefined();
-		expect(updated["doc-b"]).toBeDefined();
+		expect(results[0]).toMatchObject({ ok: true, skipped: true, skipReason: "not-on-device" });
+		expect(updated["doc-a"]).toEqual(table["doc-a"]);
+		expect(written.map((entry) => entry.notePath)).toEqual(["b.md"]);
 	});
 
 	it("reports a per-document failure without aborting the run", async () => {

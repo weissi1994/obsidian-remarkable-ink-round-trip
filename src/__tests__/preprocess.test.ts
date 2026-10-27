@@ -33,6 +33,30 @@ describe("parseFrontmatter", () => {
 	});
 });
 
+describe("plugin block ids", () => {
+	it("never reach the tablet, outside code", () => {
+		const note = [
+			"Text",
+			"",
+			"> [!warning] Also changed on the reMarkable",
+			"> Text changed",
+			"> ^ink-conflict-3f9a2c1b0d4e-2",
+			"",
+			"> [!info] Pending from reMarkable",
+			"> - p. 1: moved words",
+			"> ^ink-pending",
+			"",
+			"```",
+			"^ink-pending",
+			"```",
+		].join("\n");
+		const out = preprocess(note).markdown;
+		expect(out).not.toContain("^ink-conflict");
+		expect(out.match(/\^ink-pending/g)).toHaveLength(1);
+		expect(out).toContain("```\n^ink-pending\n```");
+	});
+});
+
 describe("preprocess", () => {
 	it("strips frontmatter by default", () => {
 		const result = preprocess("---\ntitle: X\n---\nHello");
