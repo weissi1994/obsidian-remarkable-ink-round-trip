@@ -177,7 +177,7 @@ const TABLE_ROW = /^\s*\|.*\|\s*$/;
 const TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 
 /** The closing fence of the code block holding line `at` (fences included), or null outside one. */
-function fenceEnd(lines: string[], at: number): number | null {
+export function fenceEnd(lines: string[], at: number): number | null {
 	let open: { line: number; fence: string } | null = null;
 	for (let i = 0; i < lines.length; i++) {
 		const fence = FENCE.exec(lines[i])?.[1];
@@ -201,7 +201,7 @@ function paragraphEnd(lines: string[], at: number): number {
 }
 
 /** Cells of a table row, the outer pipes aside; `\|` stays inside its cell. */
-function cellsOf(row: string): string[] {
+export function cellsOf(row: string): string[] {
 	const inner = row.trim().replace(/^\|/, "").replace(/\|$/, "");
 	return inner.split(/(?<!\\)\|/);
 }

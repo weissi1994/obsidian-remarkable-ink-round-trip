@@ -15,6 +15,7 @@
  */
 
 import { App, ButtonComponent, MarkdownPostProcessorContext, Modal, setIcon, TFile } from "obsidian";
+import { flatText } from "./incoming/inlineremark";
 import { CONFIRM_MARK, confirmRemarkAt, findRemark, remarkAt, setRemarkTextAt } from "./incoming/remarkid";
 
 /** A remark as the note has it now, by id. */
@@ -185,6 +186,59 @@ class RemarkEditor extends Modal {
 	private async save(text: string, confirm: boolean): Promise<void> {
 		await this.controls.correct(this.remark.file, this.remark.id, text, confirm);
 		this.close();
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+/**
+ * Turn an inline image of handwriting into text (inkRemarksForm "inline"):
+ * the ink above, the reading below — or an empty box when there is none —
+ * saved in the image's place.
+ */
+export class HandwritingTextModal extends Modal {
+	constructor(
+		app: App,
+		private readonly image: TFile | null,
+		private readonly reading: string,
+		private readonly save: (text: string) => Promise<void>,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.setTitle("Turn this handwriting into text");
+		const { contentEl } = this;
+		contentEl.addClass("remarkable-ink-remark-editor");
+		if (this.image !== null) {
+			contentEl.createEl("img", {
+				cls: "remarkable-ink-remark-ink",
+				attr: { src: this.app.vault.getResourcePath(this.image), alt: "The handwriting" },
+			});
+		}
+		contentEl.createEl("p", {
+			cls: "setting-item-description",
+			text:
+				this.reading === ""
+					? "It could not be read. Type what it says — the next sync learns your handwriting from it."
+					: "This is how it was read. Fix what was misread — the next sync learns your handwriting from it.",
+		});
+		const input = contentEl.createEl("textarea", { cls: "remarkable-ink-remark-text" });
+		input.value = this.reading;
+		input.rows = 2;
+		const buttons = contentEl.createDiv({ cls: "modal-button-container" });
+		new ButtonComponent(buttons)
+			.setButtonText("Use as text")
+			.setCta()
+			.onClick(() => {
+				const text = flatText(input.value);
+				if (text === "") return;
+				void this.save(text).then(() => this.close());
+			});
+		new ButtonComponent(buttons).setButtonText("Cancel").onClick(() => this.close());
+		window.setTimeout(() => input.focus(), 0);
 	}
 
 	onClose(): void {

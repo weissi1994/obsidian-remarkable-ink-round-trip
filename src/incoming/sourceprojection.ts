@@ -19,7 +19,9 @@ import { Highlight, colorName, rgbName } from "./highlights";
 import type { EmptyTask } from "./marks";
 import { DEFAULT_MARK_STYLES, MarkStyle, MarkStyles } from "./markstyles";
 import type { ImportedMark } from "./pull";
+import { appendToCell, appendToLine, hiddenInlineRanges, type InlineContent, inlineItem } from "./inlineremark";
 import { CONFIRM_MARK, remarkIdLine, typedIdLine } from "./remarkid";
+import { fenceEnd } from "./remarkinsert";
 
 /** Markdown punctuation that carries no text and may sit between words. */
 const SYNTAX = new Set([
@@ -319,10 +321,22 @@ export interface ProjectionInput {
 	 * The two-way merge lists them with the other changes it could not apply.
 	 */
 	listUnplaced?: boolean;
+	/**
+	 * How a handwritten remark goes in: as a callout below its line (the
+	 * default), or "inline" — its reading as text, or its ink as an image,
+	 * where it was written (inlineremark.ts).
+	 */
+	remarksForm?: "inline" | "callout";
 }
 
 export interface ProjectionResult {
 	markdown: string;
+	/**
+	 * The same without the inline remarks it placed: the tablet's text to
+	 * merge the next import against (sync/twoway.ts), so an item the note took
+	 * in is the note's from then on, whatever the owner makes of it.
+	 */
+	withoutInline: string;
 	/** Marks and highlights that found their place in the text. */
 	placed: number;
 	/** Highlights whose text could not be located. */
@@ -363,7 +377,11 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	// where the source has an em dash, and mapping modern against it fails
 	// at the first typographic character.
 	const typo = input.layout.typo ?? 1;
-	const skip = [...hiddenRemarks(input.source, input.layout.remarksInPlace), ...hiddenLinkTargets(input.source)];
+	const skip = [
+		...hiddenRemarks(input.source, input.layout.remarksInPlace),
+		...hiddenLinkTargets(input.source),
+		...hiddenInlineRanges(input.source),
+	];
 	const source = input.source;
 	// The last word of a laid-out line may be the first part of a word the
 	// typesetter broke; its next part starts the next line of the block.
@@ -626,17 +644,19 @@ export function projectOntoSource(input: ProjectionInput): ProjectionResult | nu
 	// rewrite addresses lines by their untouched-source index (applySpans
 	// only inserts inline, so those indices still hold here).
 	markdown = applyTaskStates(markdown, done, cancelled);
-	markdown = applyBlockMarks(markdown, input, words, ranges, unapplied);
+	const blocks = applyBlockMarks(markdown, input, words, ranges, unapplied);
 
+	let listed = "";
 	if (unplaced.length > 0 && input.listUnplaced !== false) {
-		markdown += "\n\n**Highlights that could not be placed in the text**\n\n";
+		listed += "\n\n**Highlights that could not be placed in the text**\n\n";
 		for (const highlight of unplaced) {
 			const color = rgbName(highlight.rgb) ?? colorName(highlight.color);
-			markdown += `- ==${highlight.text}==${color === undefined ? "" : ` ^[${color}]`}\n`;
+			listed += `- ==${highlight.text}==${color === undefined ? "" : ` ^[${color}]`}\n`;
 		}
 	}
 	// Trailing line breaks go; spaces ending the last line are the note's own.
-	return { markdown: markdown.replace(/(\n[ \t]*)+$/, ""), placed, unplaced, unapplied };
+	const ended = (text: string) => (text + listed).replace(/(\n[ \t]*)+$/, "");
+	return { markdown: ended(blocks.markdown), withoutInline: ended(blocks.withoutInline), placed, unplaced, unapplied };
 }
 
 /** What a mark did to its words, for the list of what could not be applied. */
@@ -917,8 +937,11 @@ function splitAtOuterEdges<T extends { kind: string; start: number; end: number 
 
 /**
  * Marks that act on whole lines: a bar in the margin quotes them, a remark
- * is appended below them. Line numbers come from the untouched source, and
- * inline insertions add no newlines, so they still hold.
+ * is appended below them — or, inline, goes into the line it was written
+ * on, or in a paragraph of its own where it was written between blocks.
+ * Line numbers come from the untouched source, and inline insertions add
+ * no newlines, so they still hold. Returns the result with and without the
+ * inline remarks.
  */
 function applyBlockMarks(
 	markdown: string,
@@ -926,11 +949,14 @@ function applyBlockMarks(
 	words: { id: number; text: string; block: number; page: number; y: number }[],
 	ranges: Map<number, Range>,
 	unapplied: PendingChange[],
-): string {
+): { markdown: string; withoutInline: string } {
 	const lineOf = lineIndexer(input.source);
 	const lines = markdown.split("\n");
 	const quoted = new Set<number>();
-	const remarks = new Map<number, string[]>();
+	const placed = new Map<number, { lines: string[]; inline: boolean }[]>();
+	const place = (at: number, block: string[], inline: boolean) => placed.set(at, [...(placed.get(at) ?? []), { lines: block, inline }]);
+	const appended = new Map<number, { item: string; column?: number }[]>();
+	const pitch = linePitch(input.layout);
 
 	for (const mark of input.marks) {
 		const blocks = new Set(mark.blocks ?? []);
@@ -953,12 +979,34 @@ function applyBlockMarks(
 			const ink = device === null ? null : deviceBoundsToPdf(device, input.layout);
 			// Written on a task with no text: its line, which no word leads to.
 			const onTask = mark.task === undefined ? null : emptyTaskLine(mark.task, ranges, lineOf, lines);
-			const anchor = onTask ?? anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1);
-			remarks.set(anchor, joinBlocks(remarks.get(anchor) ?? [], markLines(mark)));
+			const content = input.remarksForm === "inline" ? inlineContentOf(mark, ink, pitch) : null;
+			if (content === null) {
+				place(onTask ?? anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1), markLines(mark), false);
+				continue;
+			}
+			// On a row: into that line — its cell in a table — unless it is code.
+			const row = onTask ?? (mark.onRow === true ? quotedLine(mark, words, ranges, lineOf, ink) : null);
+			if (row !== null && fenceEnd(lines, row) === null) {
+				const column = mark.column !== undefined && lines[row].includes("|") ? mark.column : undefined;
+				appended.set(row, [...(appended.get(row) ?? []), { item: inlineItem(content, mark.id!, column !== undefined), column }]);
+				continue;
+			}
+			place(row ?? anchorLine(mark, words, ranges, lineOf, ink, lines.length - 1), [inlineItem(content, mark.id!)], true);
 		}
 	}
 
-	return placeAfterBlocks(lines, remarks, quoted);
+	const blocksOf = (inline: boolean) => {
+		const out = new Map<number, string[]>();
+		for (const [at, list] of placed) {
+			const kept = list.filter((block) => inline || !block.inline).reduce<string[]>((all, block) => joinBlocks(all, block.lines), []);
+			if (kept.length > 0) out.set(at, kept);
+		}
+		return out;
+	};
+	const withItems = lines.map((line, index) =>
+		(appended.get(index) ?? []).reduce((text, { item, column }) => (column === undefined ? appendToLine(text, item) : appendToCell(text, column, item)), line),
+	);
+	return { markdown: placeAfterBlocks(withItems, blocksOf(true), quoted), withoutInline: placeAfterBlocks(lines, blocksOf(false), quoted) };
 }
 
 /**
@@ -1131,24 +1179,8 @@ function anchorLine(
 	ink: Bounds | null,
 	fallback: number,
 ): number {
-	// PDF points, y upwards; another page counts as far away.
-	const distance = (word: { page: number; y: number }) =>
-		(mark.page === undefined || word.page === mark.page ? 0 : 1e6) +
-		(ink === null ? 0 : Math.max(0, ink.minY - word.y, word.y - ink.maxY));
-	const quote = mark.quote?.trim();
-	if (quote !== undefined && quote !== "") {
-		const wanted = quote.split(/\s+/).slice(0, 4);
-		let best: { line: number; distance: number } | undefined;
-		for (let at = 0; at + wanted.length <= words.length; at++) {
-			const run = words.slice(at, at + wanted.length);
-			if (!run.every((word, index) => word.text === wanted[index])) continue;
-			const range = ranges.get(run[run.length - 1].id);
-			if (range === undefined) continue;
-			const away = distance(run[0]);
-			if (best === undefined || away < best.distance) best = { line: lineOf(range.start), distance: away };
-		}
-		if (best !== undefined) return best.line;
-	}
+	const quoted = quotedLine(mark, words, ranges, lineOf, ink);
+	if (quoted !== null) return quoted;
 	const page = mark.page;
 	if (page === undefined) return fallback;
 	const centre = ink === null ? -Infinity : (ink.minY + ink.maxY) / 2;
@@ -1156,4 +1188,64 @@ function anchorLine(
 	const above = words.filter((word) => ranges.has(word.id) && (word.page < page || (word.page === page && word.y > centre)));
 	const last = above[above.length - 1];
 	return last === undefined ? -1 : lineOf(ranges.get(last.id)!.start);
+}
+
+/**
+ * The line of the row a remark was written against, by its quote: where
+ * the text repeats, the occurrence on its page nearest its ink. Null when
+ * the note does not have that row.
+ */
+function quotedLine(
+	mark: ImportedMark,
+	words: { id: number; text: string; page: number; y: number }[],
+	ranges: Map<number, Range>,
+	lineOf: (offset: number) => number,
+	ink: Bounds | null,
+): number | null {
+	// PDF points, y upwards; another page counts as far away.
+	const distance = (word: { page: number; y: number }) =>
+		(mark.page === undefined || word.page === mark.page ? 0 : 1e6) +
+		(ink === null ? 0 : Math.max(0, ink.minY - word.y, word.y - ink.maxY));
+	const quote = mark.quote?.trim();
+	if (quote === undefined || quote === "") return null;
+	const wanted = quote.split(/\s+/).slice(0, 4);
+	let best: { line: number; distance: number } | undefined;
+	for (let at = 0; at + wanted.length <= words.length; at++) {
+		const run = words.slice(at, at + wanted.length);
+		if (!run.every((word, index) => word.text === wanted[index])) continue;
+		const range = ranges.get(run[run.length - 1].id);
+		if (range === undefined) continue;
+		const away = distance(run[0]);
+		if (best === undefined || away < best.distance) best = { line: lineOf(range.start), distance: away };
+	}
+	return best?.line ?? null;
+}
+
+/** How tall a line of writing shows in the note, px: an inline image is about this high per line it spans. */
+const INLINE_LINE_PX = 22;
+
+/** The page's line pitch in PDF points: its usual text size, at the layout's 1.5 leading. */
+function linePitch(layout: PdfLayout): number {
+	const sizes = layout.lines.filter((line) => line.role === "paragraph" || line.role === "list").map((line) => line.size).sort((a, b) => a - b);
+	return (sizes[Math.floor(sizes.length / 2)] ?? 11) * 1.5;
+}
+
+/**
+ * What a remark shows inline: its reading when it is confident — or when
+ * there is no image to show instead — else its image, about as high as the
+ * lines of writing it spans and as wide as that makes it. Null for what
+ * stays a callout: a page added on the tablet, typed text, a remark
+ * without an id.
+ */
+function inlineContentOf(mark: ImportedMark, ink: Bounds | null, pitch: number): InlineContent | null {
+	if (mark.typed !== undefined || mark.addedPage !== undefined || mark.id === undefined) return null;
+	const text = mark.transcript?.trim() ?? "";
+	if (text !== "" && (mark.confident === true || mark.path === undefined)) return { text };
+	if (mark.path === undefined) return null;
+	if (ink === null) return { image: mark.path, width: INLINE_LINE_PX * 4 };
+	// The picture keeps a margin around the ink.
+	const height = ink.maxY - ink.minY + 8;
+	const width = ink.maxX - ink.minX + 8;
+	const lines = Math.min(4, Math.max(1, Math.round((ink.maxY - ink.minY) / pitch)));
+	return { image: mark.path, width: Math.min(640, Math.max(INLINE_LINE_PX, Math.round((INLINE_LINE_PX * lines * width) / height))) };
 }

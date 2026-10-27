@@ -97,5 +97,7 @@ export function projectTyped(base: string, tabletText: string, marks: ImportedMa
 		blocks.set(at, joinBlocks(blocks.get(at) ?? [], markLines(mark)));
 		placed++;
 	}
-	return { markdown: placeAfterBlocks(lines, blocks), placed, unplaced: [], unapplied };
+	const markdown = placeAfterBlocks(lines, blocks);
+	// Remarks on typed text stay callouts: nothing is placed inline.
+	return { markdown, withoutInline: markdown, placed, unplaced: [], unapplied };
 }

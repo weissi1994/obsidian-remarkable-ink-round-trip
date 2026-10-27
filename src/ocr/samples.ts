@@ -25,8 +25,9 @@
  */
 
 import type { ImportedMark } from "../incoming/pull";
+import { findInlineRemark, flatText, inlineRemarkText } from "../incoming/inlineremark";
 import { findRemark, isPluginIdLine, remarkText, type RemarkRef } from "../incoming/remarkid";
-import { cloudOf, cutLetters, matchDistance, splitLineInto, splitWords, type Point } from "./recognize";
+import { cloudOf, cutLetters, matchDistance, OCR_MAX_SYMBOLS, splitLineInto, splitWords, type Point } from "./recognize";
 
 export { remarkText };
 
@@ -92,6 +93,51 @@ export function isBetterReading(old: { score?: number }, next: { score?: number 
 	return next.score > old.score + BETTER_BY;
 }
 
+/** A reading as a reader gave it: how sure it was (scoreAbove), or `known` — the owner's own text for this ink. */
+export interface ReadingEvidence {
+	text: string;
+	by?: ReaderName;
+	score?: number;
+	known?: boolean;
+}
+
+/** What an unscored reading is checked against. */
+export interface ReadingContext {
+	/** A word the vault uses or the owner's hand was learned for (case-insensitive). */
+	isWord?: (word: string) => boolean;
+	/** The built-in or WritePad reading of the same ink, when there is one. */
+	otherReading?: string | null;
+}
+
+/** Punctuation a handwritten reading may carry; any other symbol is one a reader made up. */
+const PLAIN_PUNCTUATION = /^[.,;:!?'"’‘“”„«»()\-–—/&+%€$£@#…]$/u;
+
+/**
+ * Whether a reading may go into the note as text where it was written
+ * (inkRemarksForm "inline"); otherwise its ink goes in as an image. It has to
+ * be a reading at all (isReadingText) without made-up symbols, and then:
+ * the owner's own text for this ink always is; a scored reader's must clear
+ * its own cut-off by the margin a reading needs to replace another
+ * (SURE_ENOUGH); an unscored one (a vision endpoint) must consist of words
+ * the vault or the owner's learned hand knows — numbers count — or say the
+ * same as the built-in/WritePad reading of the ink.
+ */
+export function isConfidentReading(reading: ReadingEvidence, context: ReadingContext = {}): boolean {
+	const text = reading.text.trim();
+	if (text === "" || !isReadingText(text)) return false;
+	if (reading.known === true) return true;
+	const chars = [...text.replace(/\s/gu, "")];
+	const symbols = chars.filter((ch) => !/[\p{L}\p{N}]/u.test(ch));
+	if (symbols.some((ch) => !PLAIN_PUNCTUATION.test(ch)) || symbols.length > chars.length * OCR_MAX_SYMBOLS) return false;
+	if (reading.score !== undefined) return reading.score >= SURE_ENOUGH;
+	const words = (value: string) => value.split(/\s+/).map(bare).filter((word) => word !== "");
+	const own = words(text);
+	if (own.length === 0) return false;
+	const { isWord, otherReading } = context;
+	if (isWord !== undefined && own.every((word) => /^\p{N}+$/u.test(word) || isWord(word))) return true;
+	return typeof otherReading === "string" && words(otherReading).join(" ").toLowerCase() === own.join(" ").toLowerCase();
+}
+
 export interface RemarkRecord {
 	/** The remark's strokes, device units. */
 	strokes: Point[][];
@@ -124,6 +170,12 @@ export interface RemarkRecord {
 	inkHighlights?: { strokes: Point[][]; rgb: string }[];
 	/** Taken into the note as plain text: no callout any more, never placed again. */
 	inserted?: boolean;
+	/**
+	 * Shown inline, it filled its container when the note was written — a
+	 * paragraph, an empty task or cell of its own: all the text before its
+	 * marker there is the remark's (inlineremark.ts).
+	 */
+	alone?: true;
 }
 
 /**
@@ -448,8 +500,18 @@ export function notedReadings(store: SampleStore, marks: ImportedMark[], note: s
 	for (const mark of marks) {
 		const known = mark.id === undefined ? undefined : store.remarks[mark.id];
 		if (known === undefined || isVerified(known)) continue;
-		const text = remarkText(note, { id: mark.id, image: mark.path });
-		if (text !== null && text === (mark.transcript ?? "") && text !== known.transcript) {
+		const callout = remarkText(note, { id: mark.id, image: mark.path });
+		// An inline item shows the reading on one line; "" while it shows the ink.
+		const item = callout === null ? findInlineRemark(note, mark.id!) : null;
+		const inline = item === null ? null : inlineRemarkText(note, mark.id!, mark.transcript);
+		const text = callout ?? inline;
+		const shown = inline === null ? (mark.transcript ?? "") : text === "" ? "" : flatText(mark.transcript ?? "");
+		if (item !== null && text === shown) {
+			const alone = item.image === undefined ? flatText(item.before) === text : /^!\[\[[^\]]*\]\]$/.test(item.before);
+			if (alone) known.alone = true;
+			else delete known.alone;
+		}
+		if (text !== null && text === shown && text !== known.transcript) {
 			known.transcript = text;
 			known.score = known.readScore;
 			known.by = known.readBy;
@@ -547,14 +609,20 @@ export function learnFromNotes(
 		const note = noteOf(key, record);
 		if (note === null) continue;
 		const found = findRemark(note, refOf(key, record));
-		if (found === null) continue;
-		const text = found.text;
+		// An inline item: all the text before its marker when it filled its
+		// container, else as many words as the ink has unless it still ends in
+		// the plugin's reading; it carries no ✓.
+		const inkWords = record.alone === true || record.strokes.length === 0 ? undefined : splitWords(record.strokes).flat().length;
+		const inline = found === null ? inlineRemarkText(note, key, record.transcript, inkWords) : null;
+		if (found === null && inline === null) continue;
+		const text = found?.text ?? inline!;
+		const plugin = found === null ? flatText(record.transcript) : record.transcript;
 		// Note structure in the callout is not what the owner read in the ink.
 		if (!isReadingText(text)) continue;
 		// A ✓ taken away again makes the reading the plugin's once more.
-		const newlyConfirmed = found.confirmed && record.confirmed !== true && text !== "";
-		record.confirmed = found.confirmed ? true : undefined;
-		if (text === "" || text === record.transcript) {
+		const newlyConfirmed = found !== null && found.confirmed && record.confirmed !== true && text !== "";
+		if (found !== null) record.confirmed = found.confirmed ? true : undefined;
+		if (text === "" || text === plugin) {
 			// Confirmed as read: the words are known-correct, so the built-in
 			// reader learns them as it would from a correction.
 			if (newlyConfirmed) {

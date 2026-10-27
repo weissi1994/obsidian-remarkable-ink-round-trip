@@ -7,7 +7,8 @@
  * - `[[wikilinks]]` flattened to their display text,
  * - callouts flattened to titled blockquotes,
  * - remark callouts whose ink goes back where it was written swapped for a
- *   `*[remark: name]*` placeholder (ink fork),
+ *   `*[remark: name]*` placeholder (ink fork), and so are inline remarks
+ *   still showing their ink (`![[…]]%%ink-…%%`), after their block,
  * - `%%comments%%` and `<!-- comments -->` removed (inline formatting tags
  *   stay: the block parser reads them as styling).
  *
@@ -15,7 +16,9 @@
  * is pure and unit-testable (and mobile-safe per N7 — no Node APIs).
  */
 
+import { INLINE_IMAGE_RE } from "../incoming/inlineremark";
 import { isPluginIdLine, isRemarkIdLine } from "../incoming/remarkid";
+import { blockEnd } from "../incoming/sourceprojection";
 
 export type EmbedContent =
 	| { kind: "markdown"; content: string }
@@ -323,6 +326,53 @@ function remarksInPlace(markdown: string, resolveEmbed: EmbedResolver): string {
 }
 
 /**
+ * Inline remarks still showing their ink (incoming/inlineremark.ts): the
+ * image leaves its line — the text around it stays — and goes after the
+ * block that line is in, or takes the line's place when it was all there
+ * was: as a `*[remark: name]*` placeholder when its ink goes back where it
+ * was written, else as the picture on a line of its own. Runs before the
+ * markers, being comments, are stripped.
+ */
+function inlineRemarkImages(markdown: string, resolveEmbed: EmbedResolver): string {
+	if (!markdown.includes("%%ink-")) return markdown;
+	const lines = markdown.split("\n");
+	const after = new Map<number, string[]>();
+	let fenced = false;
+	lines.forEach((line, index) => {
+		if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+		if (fenced) return;
+		let rest = line;
+		const out: string[] = [];
+		for (const match of line.matchAll(INLINE_IMAGE_RE)) {
+			const target = match[1].trim();
+			const resolved = resolveEmbed(target);
+			if (resolved.kind !== "image") continue;
+			// The space before it goes when one follows: `row ![[…]] |` becomes `row |`.
+			const at = rest.indexOf(match[0]);
+			const stop = at + match[0].length;
+			rest = rest.slice(0, at > 0 && rest[at - 1] === " " && rest[stop] === " " ? at - 1 : at) + rest.slice(stop);
+			out.push(resolved.inPlace === true ? `*[remark: ${displayTextForLink(target, undefined)}]*` : `![[${target}]]`);
+		}
+		if (out.length === 0) return;
+		if (rest.trim() === "") {
+			lines[index] = out.join("\n\n");
+			return;
+		}
+		lines[index] = rest;
+		const end = blockEnd(lines, index);
+		after.set(end, [...(after.get(end) ?? []), ...out]);
+	});
+	return lines
+		.flatMap((line, index) => {
+			const placed = after.get(index);
+			if (placed === undefined) return [line];
+			const blankAfter = index + 1 >= lines.length || lines[index + 1].trim() === "";
+			return [line, "", placed.join("\n\n"), ...(blankAfter ? [] : [""])];
+		})
+		.join("\n");
+}
+
+/**
  * Flatten a callout block to a blockquote with a bold title line, at any
  * quote depth. Lines inside code fences are left as written.
  */
@@ -447,7 +497,7 @@ export function preprocess(
 	const { fields, body } = parseFrontmatter(source);
 	const missingEmbeds: string[] = [];
 
-	let text = remarksInPlace(body.replace(COMMENT_RE, ""), resolveEmbed);
+	let text = remarksInPlace(inlineRemarkImages(body, resolveEmbed).replace(COMMENT_RE, ""), resolveEmbed);
 	text = resolveEmbeds(
 		text,
 		{ resolveEmbed, maxEmbedDepth, imagesAsBlocks: options.imagesAsBlocks },

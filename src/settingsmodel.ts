@@ -123,6 +123,12 @@ export interface RoundTripSettings {
 	inkAccents: boolean;
 	/** What a word erased on the tablet becomes in the note. */
 	erasedAs: "delete" | "strikethrough";
+	/**
+	 * How handwriting comes into the note: as text where it was written (its
+	 * picture there when it cannot be read with confidence), or as a remark
+	 * callout below the line.
+	 */
+	inkRemarksForm: "inline" | "callout";
 	/** Opt-in OCR of handwritten remarks via an OpenAI-compatible endpoint. */
 	ocrMode: OcrMode;
 	/** Base URL ending in /v1, e.g. a local Ollama: http://localhost:11434/v1 */
@@ -192,6 +198,7 @@ export const DEFAULT_SETTINGS: RoundTripSettings = {
 	inkDiagrams: "handwritten",
 	inkAccents: true,
 	erasedAs: "strikethrough",
+	inkRemarksForm: "inline",
 	ocrMode: "builtin",
 	ocrEndpoint: "http://localhost:11434/v1",
 	ocrModel: "qwen2.5vl:7b",

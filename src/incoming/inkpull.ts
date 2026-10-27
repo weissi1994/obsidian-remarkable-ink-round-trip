@@ -22,6 +22,7 @@
 import type { LaidOutLine, PdfLayout } from "../convert/pdf";
 import type { GeneratedStroke, InkRender } from "../ink/inkrender";
 import type { MappingEntry } from "../id/mapping";
+import { isConfidentReading } from "../ocr/samples";
 import { deviceBoundsToPdf, strokeBounds } from "./anchor";
 import type { Highlight } from "./highlights";
 import { describeDiff, diffInkPage, InkPageDiff } from "./inkdiff";
@@ -247,14 +248,16 @@ async function pictureOf(
 	quote: string | undefined,
 	deps: PullDeps,
 	scan: DocumentScan,
-): Promise<{ id: string; path?: string; transcript?: string; strokes: { x: number; y: number }[][] } | null> {
+): Promise<{ id: string; path?: string; transcript?: string; confident?: true; strokes: { x: number; y: number }[][] } | null> {
 	const path = deps.renderStrokes ? await deps.renderStrokes(request) : null;
 	let transcript: string | undefined;
+	let confident = false;
 	if (deps.transcribe !== undefined) {
 		try {
 			const read = await deps.transcribe({ ...request, quote });
 			if (read !== null && read.text.trim() !== "") {
 				transcript = read.text.trim();
+				confident = read.confident ?? isConfidentReading(read);
 				if (scan.ink) {
 					scan.ink.transcribed++;
 					// Who read it, and how sure: averaged per reader at render time,
@@ -277,6 +280,7 @@ async function pictureOf(
 		id: remarkId(request.strokes),
 		path: keepImage && path !== null ? path : undefined,
 		transcript,
+		...(confident ? { confident: true as const } : {}),
 		// The ink itself, so a remark the owner adds to is known for the same remark (sync/twoway.ts).
 		strokes: request.strokes.map((stroke) => stroke.points.map((point) => ({ x: point.x, y: point.y }))),
 	};
@@ -494,14 +498,14 @@ export async function collectInkAnnotations(
 			);
 			let onThisPage = 0;
 			for (const [position, mark] of marks.entries()) {
-				let picture: { id: string; path?: string; transcript?: string; strokes: { x: number; y: number }[][] } | null = null;
+				let picture: { id: string; path?: string; transcript?: string; confident?: true; strokes: { x: number; y: number }[][] } | null = null;
+				const column = mark.kind === "note" ? tableColumnUnder(layout, page, mark.strokes) : undefined;
 				if (!TEXT_ONLY_KINDS.has(mark.kind)) {
 					const remark = `a handwritten remark${mark.quote === undefined ? "" : ` near “${mark.quote}”`}`;
 					if (deps.renderStrokes === undefined && deps.transcribe === undefined) {
 						skip(page, (mark.words?.[0] ?? 0) + position / 1000, notImported(remark));
 						continue;
 					}
-					const column = mark.kind === "note" ? tableColumnUnder(layout, page, mark.strokes) : undefined;
 					const inkHighlights = mark.kind === "note" ? highlightsOver(overInk, mark.strokes) : [];
 					picture = await pictureOf(
 						{
@@ -536,6 +540,8 @@ export async function collectInkAnnotations(
 						blocks: mark.blocks,
 						quote: mark.quote,
 						...(mark.task === undefined ? {} : { task: mark.task }),
+						...(mark.onRow === true ? { onRow: true } : {}),
+						...(column === undefined ? {} : { column }),
 						...(picture ?? {}),
 					},
 				});

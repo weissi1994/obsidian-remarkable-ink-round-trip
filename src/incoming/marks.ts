@@ -57,6 +57,8 @@ export interface Mark {
 	at?: { text: string; x: number; below: number };
 	/** On the row of a task item with no text (EmptyTask), which has no words to point at. */
 	task?: EmptyTask;
+	/** A handwritten note written on a printed row (beside its text, in a cell, on a task, in its margin), not in the free space between rows. */
+	onRow?: boolean;
 	/** Strokes making up this mark, for the kinds that stay an image. */
 	strokes: Stroke[];
 	/** Device-unit bounds, for rendering. */
@@ -633,6 +635,7 @@ function groupNotes(leftovers: Candidate[], rows: Row[], gap: number, taskOf: (r
 		group.mark.at = { text: row.text, x: round1(group.pdf.minX), below: round1(row.y - group.pdf.maxY) };
 		const task = on === undefined ? undefined : taskOf(on);
 		if (task !== undefined) group.mark.task = task;
+		if (group.onRow && on !== undefined) group.mark.onRow = true;
 	}
 	return groups.map((group) => group.mark);
 }

@@ -120,6 +120,16 @@ export interface ImportedMark {
 	 */
 	transcript?: string;
 	/**
+	 * Ink fork: the reading may go into the note as text where it was
+	 * written (ocr/samples.ts isConfidentReading); else the ink goes in as an
+	 * image there (inkRemarksForm "inline").
+	 */
+	confident?: boolean;
+	/** Ink fork: written on a printed row — beside its text, on its task, in its margin — not between rows. */
+	onRow?: boolean;
+	/** Ink fork: the table column under the remark, when it sits on a table row (0-based). */
+	column?: number;
+	/**
 	 * Ink fork: the remark's id, a hash of its ink (remarkid.ts). Names its
 	 * image and marks its callout, so it is found again in the note.
 	 */
@@ -220,7 +230,7 @@ export interface PullDeps {
 	 */
 	transcribe?: (
 		request: StrokeRenderRequest & { quote?: string },
-	) => Promise<{ text: string; by?: ReaderName; score?: number } | null>;
+	) => Promise<{ text: string; by?: ReaderName; score?: number; confident?: boolean } | null>;
 	/** Keep the ink image next to a transcript (default true). */
 	keepImageWithTranscript?: boolean;
 	/**

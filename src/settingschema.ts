@@ -447,6 +447,22 @@ export const SETTING_SECTIONS: SectionSpec[] = [
 					options: { delete: "Removed", strikethrough: "Struck through (default)" },
 				},
 			},
+			{
+				key: "inkRemarksForm",
+				name: "Handwriting comes into the note as",
+				desc:
+					"Text where you wrote it — in the table cell, on the task, at the end of the " +
+					"line, or as its own paragraph between blocks — with the picture of your ink " +
+					"there instead when it can't be read with confidence. Or a Remark callout below " +
+					"the line (classic). Remarks already in a note stay as they are.",
+				control: {
+					type: "dropdown",
+					options: {
+						inline: "Text where I wrote it (picture when unsure)",
+						callout: "A Remark callout below the line (classic)",
+					},
+				},
+			},
 		],
 	},
 	{

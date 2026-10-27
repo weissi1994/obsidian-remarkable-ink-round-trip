@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Handwriting comes into the note where you wrote it.** On the tablet your
+  writing sits in a table cell, on a task, beside a line or between blocks;
+  now it does in the note too, without a callout. A reading the plugin is
+  confident of goes in as plain text right there — appended to the cell, as
+  the empty task's text, at the end of the line, or as a paragraph of its own
+  between blocks; anything else goes in as a small picture of your ink at
+  the same place, about a line high. A hidden marker (`%%ink-<id>%%`) after
+  each item finds it again on the next sync, so nothing is placed twice and
+  reading the same page again leaves the note as it is. Your edits to the
+  text stand; a picture gives way to a confident reading, and the plugin's
+  own untouched text to a clearly better one. Writing more on the same
+  remark updates the same item. Sent back, text is typeset and its strokes
+  are gone from the page; a picture is your original strokes again where you
+  wrote them. Fixing the text, or replacing a picture with text — by hand or
+  with **Turn this handwriting into text** (command and right-click) —
+  teaches the reader. "Confident" means: the built-in reader or WritePad
+  clearly above its own threshold; for a vision endpoint, every word known to
+  your vault or your learned hand, or the same as the local reading; never
+  with made-up symbols. *Settings → Handwriting → Handwriting comes into the
+  note as* switches back to the Remark callout; callouts already in a note
+  are never rewritten. A page you added on the tablet, and typed-text
+  notebooks, still come in as callouts; the faded ink overlay is for
+  callouts only.
 - **Fixes from the first device test of two-way sync:**
   - Handwriting readings no longer become nested callouts. A remark inside a
     callout (a clash callout, say) is read on its own: its text is no longer

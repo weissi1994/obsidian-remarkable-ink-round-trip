@@ -87,7 +87,8 @@ import { parsePageOrder } from "./incoming/pagemap";
 import { parseRmPage } from "./incoming/rmlines";
 import { confirmAllRemarks, confirmRemarkAt, findRemark, remarkAt, remarkId } from "./incoming/remarkid";
 import { highlightedText, insertRemarkText } from "./incoming/remarkinsert";
-import { RemarkControls } from "./remarkui";
+import { findInlineRemark, flatText, inlineImageAt, setInlineRemark } from "./incoming/inlineremark";
+import { HandwritingTextModal, RemarkControls } from "./remarkui";
 import { RemarkOverlays } from "./remarkoverlayui";
 import { resolveLayoutOptions } from "./convert/pdf";
 import { builtinTrusted, Lexicon, lettersTemplates, OCR_TRUST, recognize, Template, templatesFrom } from "./ocr/recognize";
@@ -100,6 +101,7 @@ import {
 	knownText,
 	learnFromNotes,
 	notedReadings,
+	isConfidentReading,
 	isReadingText,
 	isVerified,
 	refOf,
@@ -166,7 +168,8 @@ const IMAGE_EXTENSIONS = new Set([
 	"avif",
 ]);
 const MAX_EMBED_DEPTH = 3;
-const EMBED_SCAN_RE = /!\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g;
+// `\|` before the size: an embed inside a table cell.
+const EMBED_SCAN_RE = /!\[\[([^\]|]+?)\\?(?:\|[^\]]*)?\]\]/g;
 // Quiet period before a watch-folder note is sent: long enough to survive a
 // typing session, short enough to feel automatic (F6).
 const WATCH_DEBOUNCE_MS = 15000;
@@ -463,6 +466,32 @@ export default class RoundTripPlugin extends Plugin {
 				return true;
 			},
 		});
+		// Ink fork: an inline image of handwriting (inkRemarksForm "inline") made text.
+		this.addCommand({
+			id: "inline-handwriting-to-text",
+			name: "Turn this handwriting into text",
+			editorCheckCallback: (checking, editor, view) => {
+				const cursor = editor.getCursor();
+				const item = inlineImageAt(editor.getValue(), cursor.line, cursor.ch);
+				if (item === null || view.file === null) return false;
+				if (!checking) void this.inlineImageToText(view.file, item.id);
+				return true;
+			},
+		});
+		this.registerEvent(
+			this.app.workspace.on("editor-menu", (menu, editor, view) => {
+				const cursor = editor.getCursor();
+				const item = inlineImageAt(editor.getValue(), cursor.line, cursor.ch);
+				const file = view.file;
+				if (item === null || file === null) return;
+				menu.addItem((entry) =>
+					entry
+						.setTitle("Turn this handwriting into text")
+						.setIcon("type")
+						.onClick(() => void this.inlineImageToText(file, item.id)),
+				);
+			}),
+		);
 		this.addCommand({
 			id: "confirm-all-remark-readings",
 			name: "Confirm all handwriting readings in this note",
@@ -2046,13 +2075,14 @@ export default class RoundTripPlugin extends Plugin {
 		const placeholders = this.settings.inkImages === "placeholder";
 		const seen = new Set<string>();
 		const visit = async (content: string, sourcePath: string, depth: number): Promise<void> => {
-			for (const match of content.matchAll(/!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g)) {
+			for (const match of content.matchAll(/!\[\[([^\]|]+?)\\?(?:\|([^\]]*))?\]\]/g)) {
 				const target = match[1].trim();
 				const alias = match[2];
 				const file = this.app.metadataCache.getFirstLinkpathDest(target.split("#")[0], sourcePath);
 				if (file === null) continue;
 				if (IMAGE_EXTENSIONS.has(file.extension.toLowerCase())) {
-					const names = [displayTextForLink(target, alias), file.basename].filter(
+					// The plain file name too: an inline remark's placeholder names it so, whatever its size.
+					const names = [...new Set([displayTextForLink(target, alias), displayTextForLink(target, undefined), file.basename])].filter(
 						(name) => out[name] === undefined,
 					);
 					if (names.length === 0) continue;
@@ -2227,33 +2257,37 @@ export default class RoundTripPlugin extends Plugin {
 	 */
 	private async recognizeLocally(
 		request: StrokeRenderRequest & { quote?: string },
-	): Promise<{ text: string; by?: ReaderName; score?: number } | null> {
+	): Promise<{ text: string; by?: ReaderName; score?: number; confident?: boolean } | null> {
 		const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
 		// Read before: the note's text for it — the owner's, once corrected — stands.
 		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
 		if (known !== null) {
 			await this.rememberReading(request, known, {});
-			return { text: known };
+			return { text: known, confident: true };
 		}
-		const lexicon = await this.vaultLexicon();
-		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
-		let text: string | null = null;
+		const read = await this.localReading(strokes);
 		// How sure each reader was, above its own cut-off: decides whether this
 		// reading may later replace one the note already shows.
-		let scored: { score?: number; by?: ReaderName } = {};
+		const scored: { score?: number; by?: ReaderName } = read === null ? {} : { score: read.score, by: read.by };
+		await this.rememberReading(request, read?.text ?? null, scored);
+		return read === null ? null : { ...read, confident: isConfidentReading(read) };
+	}
+
+	/**
+	 * The built-in reading of some ink, else WritePad's for joined-up
+	 * writing (when on) — each only when it clears its reader's cut-off.
+	 */
+	private async localReading(strokes: { x: number; y: number }[][]): Promise<{ text: string; by: ReaderName; score: number } | null> {
+		const lexicon = await this.vaultLexicon();
+		const result = recognize(strokes, await this.ocrTemplates(), lexicon, await this.wordReader());
 		if (result !== null && builtinTrusted(result)) {
-			text = result.text;
-			scored = { score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
-		} else if (this.settings.ocrUseWritePad) {
-			// Joined-up writing, most likely: WritePad was made for it.
-			const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
-			if (cursive !== null && cursive.confidence >= WRITEPAD_TRUST) {
-				text = cursive.text;
-				scored = { score: scoreAbove(cursive.confidence, WRITEPAD_TRUST), by: "writepad" };
-			}
+			return { text: result.text, score: scoreAbove(result.confidence, OCR_TRUST), by: "builtin" };
 		}
-		await this.rememberReading(request, text, scored);
-		return text === null ? null : { text, ...scored };
+		if (!this.settings.ocrUseWritePad) return null;
+		// Joined-up writing, most likely: WritePad was made for it.
+		const cursive = (await this.writePad())?.read(strokes, lexicon) ?? null;
+		if (cursive === null || cursive.confidence < WRITEPAD_TRUST) return null;
+		return { text: cursive.text, score: scoreAbove(cursive.confidence, WRITEPAD_TRUST), by: "writepad" };
 	}
 
 	/**
@@ -2347,7 +2381,7 @@ export default class RoundTripPlugin extends Plugin {
 		}
 		const learned = learnFromNotes(store, (key, record) => {
 			const own = record.note === undefined ? null : (texts.get(record.note) ?? null);
-			if (own !== null && remarkText(own, refOf(key, record)) !== null) return own;
+			if (own !== null && (remarkText(own, refOf(key, record)) !== null || findInlineRemark(own, key) !== null)) return own;
 			const source = embedders.get(record.image ?? key);
 			return source === undefined ? null : (texts.get(source) ?? null);
 		});
@@ -2407,6 +2441,39 @@ export default class RoundTripPlugin extends Plugin {
 		await this.ink.saveSamples();
 		this.words = null;
 		if (!marked.placed) notify("Inserted as text. The highlighting could not be matched to words, so it was left out.");
+	}
+
+	/**
+	 * Turn an inline image of handwriting into text (inlineremark.ts): the
+	 * owner checks or types its text, which takes the image's place before
+	 * its marker. Recorded as their word at once (acceptRemark), so the
+	 * reader learns from it and no later reading replaces it.
+	 */
+	async inlineImageToText(file: TFile, id: string): Promise<void> {
+		const item = findInlineRemark(await this.app.vault.read(file), id);
+		if (item === null || item.image === undefined) return;
+		const store = await this.ink.loadSamples();
+		const record = store.remarks[id];
+		const read = record?.read ?? record?.transcript ?? "";
+		const reading = read !== "" && isReadingText(read) ? flatText(read) : "";
+		const image = this.app.metadataCache.getFirstLinkpathDest(item.image, file.path);
+		new HandwritingTextModal(this.app, image, reading, async (text) => {
+			let done = false;
+			await this.app.vault.process(file, (note) => {
+				// The note as it is now: the owner may have edited it meanwhile.
+				if (findInlineRemark(note, id)?.image === undefined) return note;
+				const next = setInlineRemark(note, id, { text });
+				done = next !== null;
+				return next ?? note;
+			});
+			if (!done) {
+				notify("This handwriting changed meanwhile — nothing was changed; try again.");
+				return;
+			}
+			acceptRemark(store, id, text);
+			await this.ink.saveSamples();
+			this.words = null;
+		}).open();
 	}
 
 	/**
@@ -2512,11 +2579,12 @@ export default class RoundTripPlugin extends Plugin {
 
 	private async transcribeStrokes(
 		request: StrokeRenderRequest & { quote?: string },
-	): Promise<{ text: string; by?: ReaderName; score?: number } | null> {
-		const known = knownText(await this.ink.loadSamples(), remarkId(request.strokes));
+	): Promise<{ text: string; by?: ReaderName; score?: number; confident?: boolean } | null> {
+		const store = await this.ink.loadSamples();
+		const known = knownText(store, remarkId(request.strokes));
 		if (known !== null) {
 			await this.rememberReading(request, known, {});
-			return { text: known };
+			return { text: known, confident: true };
 		}
 		const png = await this.strokesToPng(request.strokes);
 		if (png === null) return null;
@@ -2526,7 +2594,17 @@ export default class RoundTripPlugin extends Plugin {
 		// No confidence from a chat endpoint: its readings fill empty callouts
 		// but never replace text the note already shows.
 		await this.rememberReading(request, text, { by: "endpoint" });
-		return text === null ? null : { text, by: "endpoint" };
+		if (text === null) return null;
+		// Confident when the vault or the owner's hand knows every word, or the local readers agree.
+		const lexicon = await this.vaultLexicon();
+		const learned = new Set(Object.keys(store.words).map((word) => word.toLowerCase()));
+		const reading = { text, by: "endpoint" as const };
+		let confident = isConfidentReading(reading, { isWord: (word) => lexicon.has(word) || learned.has(word.toLowerCase()) });
+		if (!confident) {
+			const strokes = request.strokes.map((stroke) => stroke.points.map((p) => ({ x: p.x, y: p.y })));
+			confident = isConfidentReading(reading, { otherReading: (await this.localReading(strokes))?.text ?? null });
+		}
+		return { ...reading, confident };
 	}
 
 	/** Worked examples, rendered once per run: the latest corrections, oldest first. */
@@ -2925,6 +3003,7 @@ export default class RoundTripPlugin extends Plugin {
 					marks: remarks,
 					styles: this.settings.markStyles,
 					erasedAs: this.settings.erasedAs,
+					remarksForm: this.settings.inkRemarksForm,
 					sourcePath: file.path,
 					sourceName: file.basename,
 					importedAt,

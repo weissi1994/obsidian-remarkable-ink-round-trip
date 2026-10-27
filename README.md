@@ -78,7 +78,7 @@ On every sync the plugin first reads the notebooks back, then sends what changed
 | A **bar in the margin** | The lines it ran along, as a `>` quote |
 | The **highlighter** over words | `<mark>` in the colour you used |
 | A **tick** in a drawn checkbox / a **stripe** through it | `- [x]` / `- [-]` |
-| **Handwriting** between the lines or in the margin | A remark callout with the image — and its text (see [OCR](#reading-handwriting)); sent back, it is your original strokes again, where you wrote them |
+| **Handwriting** between the lines, beside a line, in a table cell or on a task | Text right where you wrote it — in the cell, as the task's text, at the end of the line, or as a paragraph between blocks — when it reads with confidence; otherwise the picture of your ink in that same place (see [OCR](#reading-handwriting)). Sent back, text is typeset, a picture is your original strokes again, where you wrote them. *Settings → Handwriting → Handwriting comes into the note as → A Remark callout below the line* keeps the classic callout |
 | A **page you added** | The whole page as a remark, after the text it follows |
 | **Typed text** (the reMarkable keyboard) | The text itself, word for word, after the content of its page |
 | The notebook's **tags** | The note's `tags` frontmatter — both ways; added or removed on either side, merged |
@@ -147,8 +147,10 @@ tick, quotes, tables, code — and every word is written as pen strokes.
   the header, padded cells, and no column so narrow that a word has to break.
   Empty rows become boxes to write in.
 - **Your handwritten remarks** come back as your own strokes, where you wrote
-  them, beside the line you wrote them against — the callout, its title and its
-  text stay in Obsidian. If that line was rewritten, the ink goes right under
+  them, beside the line you wrote them against — a remark's callout, its title
+  and its text stay in Obsidian; a picture of your ink taken into a line is
+  your strokes again at that spot, and text taken in is typeset like the rest
+  of the note (its strokes do not come back twice). If that line was rewritten, the ink goes right under
   the text it followed. (*Settings → Handwriting → Handwritten remarks →
   Callout with text* sends the callout instead; remarks read before this
   version are always sent that way.)
@@ -232,8 +234,46 @@ Remarks come back as an image of your ink and — when they can be read — as t
 
 ### Correcting what was read
 
-Every remark callout ends in a hidden block id, `^ink-<id>` — a hash of the
-remark's ink, which also names its image. Link to it like any block
+**Handwriting taken in where you wrote it** (the default) is plain note text
+or a small picture of your ink, followed by a hidden marker — an Obsidian
+comment, `%%ink-<id>%%`, a hash of the ink that also names its picture:
+
+```
+| with | row YAY%%ink-3f9a2c1b0d4e%% |
+- [x] What%%ink-0a1b2c3d4e5f%%
+
+![[reMarkable-in/handwriting/<notebook>-p01-9e8d7c6b5a4f.png|96]]%%ink-9e8d7c6b5a4f%%
+```
+
+The marker is hidden in reading view and never reaches the tablet; keep it
+right after the text. It is how the next sync finds the item again, so it is
+never placed twice. A reading goes in as text only when it is **confident**:
+
+- the built-in reader or WritePad is clearly surer of it than its own
+  threshold (the same margin a new reading needs to replace an old one), or
+- a vision endpoint's reading has only words your vault uses or your learned
+  handwriting knows (numbers count) — or says the same as the built-in/WritePad
+  reading of the ink;
+- and it has no made-up symbols (anything but letters, digits and ordinary
+  punctuation) — never note structure. Text you corrected or confirmed always is.
+
+Otherwise the picture goes in, about a line of text high. **Fix the text** by
+editing it before its marker; **turn a picture into text** with right-click →
+**Turn this handwriting into text** (or the command of that name, cursor on
+the picture): it shows the ink and its reading, and puts what you confirm or
+type there — or simply replace the picture with the text yourself. Either
+way the next sync learns your handwriting from it. The text taken as the
+item's is everything before the marker when the item had its own paragraph,
+task or cell; appended to text already there, it is the plugin's reading
+while the line still ends in it, else as many words as the ink has. A
+confident reading replaces a picture, and a clearly better one replaces text
+the plugin wrote that you never touched; your text stands. Faded ink over the
+text (below) is only for callouts: an inline item already sits where you
+wrote it.
+
+**As a callout** (*Handwriting comes into the note as → A Remark callout below
+the line*, and every callout already in a note — they are never rewritten),
+the remark ends in a hidden block id, `^ink-<id>`. Link to it like any block
 (`[[Note#^ink-3f9a2c1b0d4e]]`).
 
 ```
@@ -360,6 +400,7 @@ subfolder after a week; delete that subfolder to empty it.
 | Send handwriting sheet / Learn my handwriting / Add handwriting variations | Your letters |
 | Send joined-up word sheet / Learn my joined-up words | Your joined-up writing |
 | Send handwriting test sheet / Save handwriting test sheet to the vault | Measure how well your handwriting is read; learns nothing |
+| Turn this handwriting into text (also right-click on the picture) | A picture of handwriting taken into a line becomes its text, which teaches the reader |
 | Detect reMarkable page size from my notebooks | Read the canvas from a notebook made on the tablet |
 
 ## How it works

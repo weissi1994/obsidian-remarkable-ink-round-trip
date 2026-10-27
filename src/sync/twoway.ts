@@ -19,6 +19,13 @@
  * a new id with mostly the old ink: its callout is found by that ink and
  * takes the new id instead of a second callout appearing.
  *
+ * With remarks inline (inlineremark.ts) a remark is the text or image in
+ * the line it was written on, found again by its hidden `%%ink-<id>%%`
+ * marker and settled on the same terms: an image takes a confident reading,
+ * the plugin's untouched text a confident better one, text the owner
+ * changed stands. The tablet's text kept for the next merge leaves the
+ * inline remarks it placed out, so they are the note's from then on.
+ *
  * Nothing the tablet changed is dropped silently: what the import could not
  * read, and what the projection could not apply, is listed in one “Pending
  * from reMarkable” callout at the end of the note, replaced by every import
@@ -56,6 +63,7 @@ import {
 	withPendingCallout,
 } from "../incoming/annotationnote";
 import type { Highlight } from "../incoming/highlights";
+import { findInlineRemark, flatText, inlineRemarks, inlineRemarkText, retargetInlineRemark, setInlineRemark } from "../incoming/inlineremark";
 import type { MarkStyles } from "../incoming/markstyles";
 import type { ImportedMark } from "../incoming/pull";
 import {
@@ -91,6 +99,8 @@ export interface TabletChanges {
 	remarkInk?: (id: string) => KeptRemark | null;
 	/** The tablet's text the note was last merged with since it was sent: that merge's `projected`. */
 	mergedBase?: string;
+	/** How a new handwritten remark goes in: a callout below its line (default), or inline where it was written (inlineremark.ts). */
+	remarksForm?: "inline" | "callout";
 }
 
 const remarkIdOf = new RegExp(`\\^${REMARK_ID_PREFIX}([0-9a-f]+)`);
@@ -123,6 +133,11 @@ function withoutRemarks(text: string, ids: Set<string>): string {
 /** Remarks are found by id, or by image in notes from before ids. */
 const refOf = (mark: ImportedMark) => ({ id: mark.id, image: mark.path });
 const isRemark = (mark: ImportedMark) => mark.kind === "note" && (mark.id !== undefined || mark.path !== undefined);
+/** Remark images are named `<doc>-p<page>-<id>.png`: the page, when the name says. */
+const pageOfImage = (image: string) => {
+	const page = Number(/-p(\d+)-[^/]*$/.exec(image)?.[1] ?? NaN);
+	return Number.isFinite(page) ? page : undefined;
+};
 
 /** Whether the note's text for a remark is the plugin's own, untouched, and a new reading differs. */
 function takesNewReading(mark: ImportedMark, text: string): boolean {
@@ -156,9 +171,7 @@ function rebindChangedRemark(
 		const block = lines.slice(found.start, found.end + 1);
 		const imageAt = block.findIndex((line) => line.includes("![["));
 		const image = imageAt === -1 ? undefined : /!\[\[([^\]|]+)/.exec(block[imageAt])?.[1];
-		// Remark images are named `<doc>-p<page>-<id>.png`.
-		const page = image === undefined ? undefined : Number(/-p(\d+)-[^/]*$/.exec(image)?.[1] ?? NaN);
-		const known = { page: Number.isFinite(page) ? page : undefined, strokes: kept.strokes };
+		const known = { page: image === undefined ? undefined : pageOfImage(image), strokes: kept.strokes };
 		if (!isSameRemark(known, { page: mark.addedPage ?? mark.page, strokes: mark.strokes })) continue;
 		const next = [...lines];
 		next[at] = lines[at].replace(idOf, `^${REMARK_ID_PREFIX}${mark.id}`);
@@ -172,6 +185,53 @@ function rebindChangedRemark(
 		return { lines: next, text: kept.text };
 	}
 	return null;
+}
+
+/**
+ * A remark the note shows inline (inlineremark.ts), settled: found by its
+ * marker — or, written more on since, by the kept ink of an item whose
+ * remark is gone (isSameRemark), its marker then pointing at the new id.
+ * An image takes a confident reading in its place; text the plugin wrote
+ * and nobody touched takes a confident new reading on the terms a callout
+ * does (`replaces`, or the rebound item's earlier reading). Text the owner
+ * changed stands. Null when the note shows no such item.
+ */
+function settleInline(
+	note: string,
+	mark: ImportedMark,
+	current: Set<string>,
+	remarkInk?: (id: string) => KeptRemark | null,
+): { note: string; refreshed: boolean } | null {
+	const id = mark.id!;
+	let item = findInlineRemark(note, id);
+	let plugin = mark.replaces;
+	if (item === null && remarkInk !== undefined && mark.strokes !== undefined) {
+		for (const other of inlineRemarks(note)) {
+			if (current.has(other.id)) continue;
+			const kept = remarkInk(other.id);
+			if (kept === null) continue;
+			const known = { page: other.image === undefined ? undefined : pageOfImage(other.image), strokes: kept.strokes };
+			if (!isSameRemark(known, { page: mark.addedPage ?? mark.page, strokes: mark.strokes })) continue;
+			note = retargetInlineRemark(note, other.id, id);
+			item = findInlineRemark(note, id);
+			plugin = kept.text;
+			break;
+		}
+	}
+	if (item === null) return null;
+	const reading = mark.transcript?.trim() ?? "";
+	const confident = mark.confident === true && reading !== "";
+	if (item.image !== undefined) {
+		if (confident) return { note: setInlineRemark(note, id, { text: reading })!, refreshed: true };
+		if (mark.path === undefined || mark.path === item.image) return { note, refreshed: false };
+		const lines = note.split("\n");
+		lines[item.line] = lines[item.line].replace(`![[${item.image}`, `![[${mark.path}`);
+		return { note: lines.join("\n"), refreshed: false };
+	}
+	if (!confident || plugin === undefined || plugin.trim() === "") return { note, refreshed: false };
+	const untouched = inlineRemarkText(note, id, plugin) === flatText(plugin);
+	if (!untouched || flatText(plugin) === flatText(reading)) return { note, refreshed: false };
+	return { note: setInlineRemark(note, id, { text: reading }, plugin)!, refreshed: true };
 }
 
 /**
@@ -207,7 +267,13 @@ export function settleRemarks(
 			}
 		}
 		if (found === null) {
-			rest.push(mark);
+			const inline = isRemark(mark) && mark.id !== undefined ? settleInline(lines.join("\n"), mark, current, remarkInk) : null;
+			if (inline === null) {
+				rest.push(mark);
+				continue;
+			}
+			lines = inline.note.split("\n");
+			if (inline.refreshed) refreshed.push(mark.id!);
 			continue;
 		}
 		const quoted = lines[found.end].startsWith(">");
@@ -232,7 +298,9 @@ export function settleRemarks(
 
 /** In the summary block, a remark keeps the note's text unless it is the plugin's untouched reading. */
 function withNoteTexts(ours: string, marks: ImportedMark[], refreshed: string[]): ImportedMark[] {
-	return marks.map((mark) => {
+	// One the note shows inline is the note's text already.
+	const shown = marks.filter((mark) => !isRemark(mark) || mark.id === undefined || findInlineRemark(ours, mark.id) === null);
+	return shown.map((mark) => {
 		const found = isRemark(mark) ? findRemark(ours, refOf(mark)) : null;
 		if (found === null) return mark;
 		if (!found.confirmed && takesNewReading(mark, found.text)) {
@@ -297,6 +365,7 @@ export function mergeTabletChanges(input: TabletChanges): {
 							styles: input.styles,
 							erasedAs: input.erasedAs,
 							listUnplaced: false,
+							remarksForm: input.remarksForm,
 						});
 	if (projected === null || input.base === null) {
 		const refreshed: string[] = [];
@@ -326,7 +395,8 @@ export function mergeTabletChanges(input: TabletChanges): {
 	// line breaks after it. A typed page's text ends trimmed: the base's
 	// spaces ending its last line come back with them.
 	const ended = typedPage === undefined ? input.base.replace(/(\n[ \t]*)+$/, "") : input.base.trimEnd();
-	const theirs = withoutPendingCallout(projected.markdown + input.base.slice(ended.length));
+	const tail = input.base.slice(ended.length);
+	const theirs = withoutPendingCallout(projected.markdown + tail);
 	let base = withoutPendingCallout(input.base);
 	let tablet = theirs;
 	if (input.mergedBase !== undefined && complete) {
@@ -353,6 +423,7 @@ export function mergeTabletChanges(input: TabletChanges): {
 			pending: pending.map(pendingLine),
 		},
 		refreshed: settled.refreshed,
-		projected: complete ? theirs : null,
+		// Without the inline remarks it placed: from now on those are the note's.
+		projected: complete ? withoutPendingCallout(projected.withoutInline + tail) : null,
 	};
 }

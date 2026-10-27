@@ -20,6 +20,7 @@
  */
 
 import { parsePageOrder } from "../incoming/pagemap";
+import { inlineMarker } from "../incoming/inlineremark";
 import { REMARK_ID_PREFIX, remarkId, typedIdLine, typedTextId } from "../incoming/remarkid";
 import { RM_V6_HEADER } from "../incoming/rmlines";
 import { parseRmScene, type RmScene, type TextParagraph, type TypedParagraph } from "../incoming/rmscene";
@@ -686,7 +687,7 @@ export async function updateNotebook(
 			if (
 				!textUnread &&
 				holds &&
-				(strokes.length === 0 || options.noteText.includes(`^${REMARK_ID_PREFIX}${remarkId(strokes)}`)) &&
+				(strokes.length === 0 || [`^${REMARK_ID_PREFIX}${remarkId(strokes)}`, inlineMarker(remarkId(strokes))].some((marker) => options.noteText!.includes(marker))) &&
 				typedImported(id, scene, typed)
 			) {
 				dropped.add(id);

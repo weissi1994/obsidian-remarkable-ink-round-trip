@@ -1173,6 +1173,16 @@ describe.skipIf(ROOT === undefined)("the owner's real sync state", () => {
 					fail("one remark", `${remarks(one.body, base)} callout(s)`);
 					continue;
 				}
+				// Inline: one item where it was written, no callout, and reading it again changes nothing.
+				const inline = merge(p, first, base, { remarksForm: "inline" });
+				const markers = (text: string, id: string) => count(text, `%%ink-${id}%%`) - count(base, `%%ink-${id}%%`);
+				if (markers(inline.body, old.id!) !== 1 || remarks(inline.body, base) !== 0) {
+					fail("inline", `${markers(inline.body, old.id!)} item(s), ${remarks(inline.body, base)} callout(s)`);
+				} else if (merge(p, first, inline.body, { remarksForm: "inline", mergedBase: inline.projected ?? undefined }).body !== inline.body) {
+					fail("inline", "read again, the note changed");
+				} else {
+					bump("inline: one item, read again unchanged");
+				}
 				// A dot has no ink to share: any stroke added outweighs it, so it is a new remark by design (isSameRemark).
 				if (inkLength < 10) {
 					bump("dot-sized ink, not written on");
@@ -1197,6 +1207,11 @@ describe.skipIf(ROOT === undefined)("the owner's real sync state", () => {
 					if (remarks(after.body, base) !== 1) fail(variant, `${remarks(after.body, base)} callout(s): ${where(after.body, one.body)}; ${second.marks.map((m) => m.kind).join(",")}; ink length ${Math.round(inkLength)}`);
 					else if (idAt === -1 || after.body.includes(`^ink-${old.id}`)) fail(variant, "the callout does not carry the new id alone");
 					else if (callout[title] !== "> [!note] Remark" || callout[title + 1] !== `> ${text}`) fail(variant, "the callout's text is not the expected reading");
+				}
+				// Inline, written on: the same item takes the new id.
+				const inlineAfter = merge(p, second, inline.body, { remarkInk, mergedBase: inline.projected ?? undefined, remarksForm: "inline" });
+				if (markers(inlineAfter.body, now[0].id!) !== 1 || markers(inlineAfter.body, old.id!) !== 0 || remarks(inlineAfter.body, base) !== 0) {
+					fail("inline, written on", `the item does not carry the new id alone: ${where(inlineAfter.body, inline.body)}`);
 				}
 			} catch (error) {
 				fail("one remark", `threw ${error instanceof Error ? error.name : "error"}`);
